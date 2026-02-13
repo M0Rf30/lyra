@@ -48,11 +48,10 @@ impl LibraryScanner {
                     .unwrap_or(0);
 
                 let path_str = path.to_string_lossy();
-                if let Some(existing_mtime) = db.get_track_mtime(&path_str) {
-                    if existing_mtime == mtime {
+                if let Some(existing_mtime) = db.get_track_mtime(&path_str)
+                    && existing_mtime == mtime {
                         continue; // File hasn't changed
                     }
-                }
 
                 match Self::read_metadata(path) {
                     Ok(track) => {
@@ -70,11 +69,10 @@ impl LibraryScanner {
         }
 
         // Clean up tracks that no longer exist
-        if let Ok(removed) = db.remove_missing_tracks() {
-            if removed > 0 {
+        if let Ok(removed) = db.remove_missing_tracks()
+            && removed > 0 {
                 log::info!("Removed {removed} missing tracks from library");
             }
-        }
 
         Ok(count)
     }

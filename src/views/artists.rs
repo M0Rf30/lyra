@@ -2,7 +2,7 @@
 
 //! Artists view - list of artists with album sub-views.
 
-use crate::library::Artist;
+use crate::library::{Artist, CoverArt};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -18,7 +18,10 @@ pub enum ArtistMessage {
 }
 
 /// Render the artist list.
-pub fn artist_list_view(artists: &[Artist]) -> cosmic::Element<'_, ArtistMessage> {
+pub fn artist_list_view<'a>(
+    artists: &'a [Artist],
+    artist_avatars: &'a std::collections::HashMap<String, widget::icon::Handle>,
+) -> cosmic::Element<'a, ArtistMessage> {
     if artists.is_empty() {
         return widget::container(
             widget::column()
@@ -37,9 +40,18 @@ pub fn artist_list_view(artists: &[Artist]) -> cosmic::Element<'_, ArtistMessage
     let mut list = widget::column().spacing(2);
 
     for (index, artist) in artists.iter().enumerate() {
+        let avatar: cosmic::Element<'_, ArtistMessage> =
+            if let Some(handle) = artist_avatars.get(&artist.name) {
+                widget::icon::icon(handle.clone()).size(40).into()
+            } else {
+                widget::icon::from_name("avatar-default-symbolic")
+                    .size(40)
+                    .into()
+            };
+
         let row = widget::button::custom(
             widget::row()
-                .push(widget::icon::from_name("avatar-default-symbolic").size(40))
+                .push(avatar)
                 .push(
                     widget::column()
                         .push(widget::text(artist.name.as_str()))
@@ -69,13 +81,24 @@ pub fn artist_list_view(artists: &[Artist]) -> cosmic::Element<'_, ArtistMessage
 pub fn artist_detail_view<'a>(
     artist: &'a Artist,
     artist_index: usize,
+    artist_avatars: &'a std::collections::HashMap<String, widget::icon::Handle>,
+    cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
 ) -> cosmic::Element<'a, ArtistMessage> {
+    let avatar: cosmic::Element<'_, ArtistMessage> =
+        if let Some(handle) = artist_avatars.get(&artist.name) {
+            widget::icon::icon(handle.clone()).size(80).into()
+        } else {
+            widget::icon::from_name("avatar-default-symbolic")
+                .size(80)
+                .into()
+        };
+
     let header = widget::row()
         .push(
             widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
                 .on_press(ArtistMessage::BackToList),
         )
-        .push(widget::icon::from_name("avatar-default-symbolic").size(80))
+        .push(avatar)
         .push(
             widget::column()
                 .push(widget::text::title1(artist.name.as_str()))
@@ -92,16 +115,24 @@ pub fn artist_detail_view<'a>(
     let mut content = widget::column().push(header).spacing(16);
 
     for (album_idx, album) in artist.albums.iter().enumerate() {
+        let key = CoverArt::album_key(&artist.name, &album.name);
+        let album_art: cosmic::Element<'_, ArtistMessage> =
+            if let Some(handle) = cover_images.get(&key) {
+                widget::icon::icon(handle.clone()).size(64).into()
+            } else {
+                widget::icon::from_name("media-optical-cd-audio-symbolic")
+                    .size(48)
+                    .into()
+            };
+
         let album_header = widget::row()
             .push(
-                widget::container(
-                    widget::icon::from_name("media-optical-cd-audio-symbolic").size(48),
-                )
-                .width(64)
-                .height(64)
-                .align_x(Horizontal::Center)
-                .align_y(Vertical::Center)
-                .class(cosmic::theme::Container::Card),
+                widget::container(album_art)
+                    .width(64)
+                    .height(64)
+                    .align_x(Horizontal::Center)
+                    .align_y(Vertical::Center)
+                    .class(cosmic::theme::Container::Card),
             )
             .push(
                 widget::column()

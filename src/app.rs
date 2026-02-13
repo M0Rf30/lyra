@@ -44,6 +44,7 @@ pub struct AppModel {
     selected_artist: Option<usize>,
     songs_sort: songs::SortField,
     cover_images: HashMap<String, widget::icon::Handle>,
+    artist_avatars: HashMap<String, widget::icon::Handle>,
 
     // Lyrics
     lyrics_text: Option<String>,
@@ -68,6 +69,8 @@ pub enum Message {
         tracks: Vec<Track>,
         albums: Vec<Album>,
         artists: Vec<Artist>,
+        cover_images: HashMap<String, widget::icon::Handle>,
+        artist_avatars: HashMap<String, widget::icon::Handle>,
     },
 
     // Player transport
@@ -111,6 +114,9 @@ pub enum Message {
     // Settings
     AddMusicDir,
     UpdateConfig(Config),
+
+    // Application lifecycle
+    Quit,
 }
 
 impl cosmic::Application for AppModel {
@@ -177,7 +183,13 @@ impl cosmic::Application for AppModel {
         let db = LibraryDb::open(&db_path).ok();
 
         // Initialize player
-        let player = Player::new();
+        let player = match Player::new() {
+            Ok(p) => Some(p),
+            Err(e) => {
+                log::error!("Failed to initialize audio player: {e}");
+                None
+            }
+        };
 
         let mut app = AppModel {
             core,
@@ -191,13 +203,14 @@ impl cosmic::Application for AppModel {
             all_albums: Vec::new(),
             all_artists: Vec::new(),
             library_scanning: false,
-            player: Some(player),
+            player,
             playback_position: Duration::ZERO,
             current_track: None,
             selected_album: None,
             selected_artist: None,
             songs_sort: songs::SortField::Title,
             cover_images: HashMap::new(),
+            artist_avatars: HashMap::new(),
             lyrics_text: None,
             lyrics_loading: false,
             eq_preset: None,
@@ -242,33 +255,9 @@ impl cosmic::Application for AppModel {
         vec![menu_bar.into()]
     }
 
-    /// Header bar center: playback controls + seek bar in the title bar (CSD-style).
+    /// Header bar center: empty (playback controls are in the bottom bar).
     fn header_center(&self) -> Vec<Element<'_, Self::Message>> {
-        let state = self
-            .player
-            .as_ref()
-            .map(|p| p.state())
-            .unwrap_or(PlaybackState::Stopped);
-
-        let duration = self
-            .current_track
-            .as_ref()
-            .map(|t| t.duration)
-            .unwrap_or(Duration::ZERO);
-
-        now_playing::header_playback_controls(state, self.playback_position, duration)
-            .into_iter()
-            .map(|e| e.map(|msg| match msg {
-                now_playing::NowPlayingMessage::TogglePlayback => Message::TogglePlayback,
-                now_playing::NowPlayingMessage::Next => Message::NextTrack,
-                now_playing::NowPlayingMessage::Previous => Message::PreviousTrack,
-                now_playing::NowPlayingMessage::Seek(v) => Message::Seek(v),
-                now_playing::NowPlayingMessage::SetVolume(v) => Message::SetVolume(v),
-                now_playing::NowPlayingMessage::ToggleShuffle => Message::ToggleShuffle,
-                now_playing::NowPlayingMessage::CycleRepeat => Message::CycleRepeat,
-                now_playing::NowPlayingMessage::ShowLyrics => Message::ShowLyrics,
-            }))
-            .collect()
+        vec![]
     }
 
     fn nav_model(&self) -> Option<&nav_bar::Model> {
@@ -340,7 +329,7 @@ impl cosmic::Application for AppModel {
             Page::Albums => {
                 if let Some(album_idx) = self.selected_album {
                     if let Some(album) = self.all_albums.get(album_idx) {
-                        albums::album_detail_view(album, album_idx).map(|msg| match msg {
+                        albums::album_detail_view(album, album_idx, &self.cover_images).map(|msg| match msg {
                             albums::AlbumMessage::PlayAlbum(i) => Message::PlayAlbum(i),
                             albums::AlbumMessage::PlayTrack(ai, ti) => {
                                 Message::PlayAlbumTrack(ai, ti)
@@ -368,7 +357,7 @@ impl cosmic::Application for AppModel {
             Page::Artists => {
                 if let Some(artist_idx) = self.selected_artist {
                     if let Some(artist) = self.all_artists.get(artist_idx) {
-                        artists::artist_detail_view(artist, artist_idx).map(|msg| match msg {
+                        artists::artist_detail_view(artist, artist_idx, &self.artist_avatars, &self.cover_images).map(|msg| match msg {
                             artists::ArtistMessage::PlayArtistAlbum(ai, ali) => {
                                 Message::PlayArtistAlbum(ai, ali)
                             }
@@ -382,7 +371,7 @@ impl cosmic::Application for AppModel {
                         widget::text("Artist not found").into()
                     }
                 } else {
-                    artists::artist_list_view(&self.all_artists).map(|msg| match msg {
+                    artists::artist_list_view(&self.all_artists, &self.artist_avatars).map(|msg| match msg {
                         artists::ArtistMessage::SelectArtist(i) => Message::SelectArtist(i),
                         artists::ArtistMessage::PlayArtistAlbum(ai, ali) => {
                             Message::PlayArtistAlbum(ai, ali)
@@ -403,7 +392,7 @@ impl cosmic::Application for AppModel {
             }
         };
 
-        // Main layout: content area + bottom playback bar
+        // Build bottom playback bar
         let state = self
             .player
             .as_ref()
@@ -419,6 +408,10 @@ impl cosmic::Application for AppModel {
             .as_ref()
             .map(|p| p.volume())
             .unwrap_or(self.config.volume);
+        let current_cover = self.current_track.as_ref().and_then(|track| {
+            let key = crate::library::CoverArt::album_key(&track.artist, &track.album);
+            self.cover_images.get(&key)
+        });
 
         let bar = now_playing::playback_bar(
             self.current_track.as_ref(),
@@ -427,7 +420,8 @@ impl cosmic::Application for AppModel {
             duration,
             volume,
             self.config.shuffle,
-            &self.config.repeat_mode,
+            self.config.repeat_mode,
+            current_cover,
         )
         .map(|msg| match msg {
             now_playing::NowPlayingMessage::TogglePlayback => Message::TogglePlayback,
@@ -440,9 +434,15 @@ impl cosmic::Application for AppModel {
             now_playing::NowPlayingMessage::ShowLyrics => Message::ShowLyrics,
         });
 
-        // Scanning indicator
-        let scanning_bar: Option<Element<'_, Self::Message>> = if self.library_scanning {
-            Some(
+        // Main layout: content + optional scanning indicator + bottom playback bar
+        let mut layout = widget::column().push(
+            widget::container(content)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        );
+
+        if self.library_scanning {
+            layout = layout.push(
                 widget::container(
                     widget::row()
                         .push(widget::text::caption(fl!("scanning-library")))
@@ -450,22 +450,8 @@ impl cosmic::Application for AppModel {
                         .align_y(Alignment::Center),
                 )
                 .padding(4)
-                .width(Length::Fill)
-                .into(),
-            )
-        } else {
-            None
-        };
-
-        let mut layout = widget::column()
-            .push(
-                widget::container(content)
-                    .width(Length::Fill)
-                    .height(Length::Fill),
+                .width(Length::Fill),
             );
-
-        if let Some(scanning) = scanning_bar {
-            layout = layout.push(scanning);
         }
 
         layout = layout.push(bar);
@@ -557,10 +543,14 @@ impl cosmic::Application for AppModel {
                 tracks,
                 albums,
                 artists,
+                cover_images,
+                artist_avatars,
             } => {
                 self.all_tracks = tracks;
                 self.all_albums = albums;
                 self.all_artists = artists;
+                self.cover_images = cover_images;
+                self.artist_avatars = artist_avatars;
             }
 
             // -- Playback --
@@ -575,49 +565,47 @@ impl cosmic::Application for AppModel {
                             self.current_track = self.all_tracks.first().cloned();
                             self.playback_position = Duration::ZERO;
                         }
-                    } else {
-                        player.toggle_playback();
+                    } else if let Err(e) = player.toggle_playback() {
+                        log::error!("Playback toggle failed: {e}");
                     }
                 }
             }
 
             Message::NextTrack => {
-                if let Some(ref mut player) = self.player {
-                    if player.next().is_ok() {
+                if let Some(ref mut player) = self.player
+                    && player.next().is_ok() {
                         let idx = player.queue_index();
                         self.current_track = self.all_tracks.get(idx).cloned();
                         self.playback_position = Duration::ZERO;
                         self.lyrics_text = None;
                     }
-                }
             }
 
             Message::PreviousTrack => {
-                if let Some(ref mut player) = self.player {
-                    if player.previous().is_ok() {
+                if let Some(ref mut player) = self.player
+                    && player.previous().is_ok() {
                         let idx = player.queue_index();
                         self.current_track = self.all_tracks.get(idx).cloned();
                         self.playback_position = Duration::ZERO;
                         self.lyrics_text = None;
                     }
-                }
             }
 
             Message::Seek(fraction) => {
-                if let Some(ref mut player) = self.player {
-                    if let Some(ref track) = self.current_track {
+                if let Some(ref mut player) = self.player
+                    && let Some(ref track) = self.current_track {
                         let target =
                             Duration::from_secs_f32(fraction * track.duration.as_secs_f32());
                         player.seek(target).ok();
                         self.playback_position = target;
                     }
-                }
             }
 
             Message::SetVolume(vol) => {
-                if let Some(ref mut player) = self.player {
-                    player.set_volume(vol);
-                }
+                if let Some(ref mut player) = self.player
+                    && let Err(e) = player.set_volume(vol) {
+                        log::error!("Set volume failed: {e}");
+                    }
                 self.config.volume = vol;
             }
 
@@ -626,11 +614,7 @@ impl cosmic::Application for AppModel {
             }
 
             Message::CycleRepeat => {
-                self.config.repeat_mode = match self.config.repeat_mode.as_str() {
-                    "none" => "all".to_string(),
-                    "all" => "one".to_string(),
-                    _ => "none".to_string(),
-                };
+                self.config.repeat_mode = self.config.repeat_mode.next();
             }
 
             Message::PlaybackTick => {
@@ -638,8 +622,8 @@ impl cosmic::Application for AppModel {
                 self.playback_position += Duration::from_millis(500);
 
                 // Check if track ended
-                if let Some(ref mut player) = self.player {
-                    if player.is_finished() {
+                if let Some(ref mut player) = self.player
+                    && player.is_finished().unwrap_or(false) {
                         // Auto-advance
                         if player.next().is_ok() {
                             let idx = player.queue_index();
@@ -648,7 +632,6 @@ impl cosmic::Application for AppModel {
                             self.lyrics_text = None;
                         }
                     }
-                }
             }
 
             // -- Track selection --
@@ -671,21 +654,19 @@ impl cosmic::Application for AppModel {
             }
 
             Message::PlayArtistAlbum(artist_idx, album_idx) => {
-                if let Some(artist) = self.all_artists.get(artist_idx) {
-                    if let Some(album) = artist.albums.get(album_idx) {
+                if let Some(artist) = self.all_artists.get(artist_idx)
+                    && let Some(album) = artist.albums.get(album_idx) {
                         let tracks = album.tracks.clone();
                         self.play_track_list(&tracks, 0);
                     }
-                }
             }
 
             Message::PlayArtistTrack(artist_idx, album_idx, track_idx) => {
-                if let Some(artist) = self.all_artists.get(artist_idx) {
-                    if let Some(album) = artist.albums.get(album_idx) {
+                if let Some(artist) = self.all_artists.get(artist_idx)
+                    && let Some(album) = artist.albums.get(album_idx) {
                         let tracks = album.tracks.clone();
                         self.play_track_list(&tracks, track_idx);
                     }
-                }
             }
 
             // -- View navigation --
@@ -766,6 +747,10 @@ impl cosmic::Application for AppModel {
             Message::UpdateConfig(config) => {
                 self.config = config;
             }
+
+            Message::Quit => {
+                return cosmic::iced::exit();
+            }
         }
 
         Task::none()
@@ -812,10 +797,33 @@ impl AppModel {
                 (Vec::new(), Vec::new(), Vec::new())
             };
 
+            // Extract cover art for each album
+            let mut cover_images = HashMap::new();
+            for album in &albums {
+                if let Some(first_track) = album.tracks.first() {
+                    let key = crate::library::CoverArt::album_key(&album.artist, &album.name);
+                    if let Some(bytes) = crate::library::CoverArt::get_cover_art(&first_track.path)
+                    {
+                        let handle = widget::icon::from_raster_bytes(bytes);
+                        cover_images.insert(key, handle);
+                    }
+                }
+            }
+
+            // Generate artist avatars
+            let mut artist_avatars = HashMap::new();
+            for artist in &artists {
+                let bytes = crate::library::CoverArt::generate_artist_avatar(&artist.name, 64);
+                let handle = widget::icon::from_raster_bytes(bytes);
+                artist_avatars.insert(artist.name.clone(), handle);
+            }
+
             cosmic::Action::App(Message::LibraryLoaded {
                 tracks,
                 albums,
                 artists,
+                cover_images,
+                artist_avatars,
             })
         })
     }
@@ -881,9 +889,7 @@ impl menu::action::MenuAction for MenuAction {
             MenuAction::Equalizer => Message::ToggleContextPage(ContextPage::Equalizer),
             MenuAction::ScanLibrary => Message::ScanLibrary,
             MenuAction::AddMusicDir => Message::AddMusicDir,
-            MenuAction::Quit => {
-                std::process::exit(0);
-            }
+            MenuAction::Quit => Message::Quit,
         }
     }
 }

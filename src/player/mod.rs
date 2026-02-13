@@ -5,11 +5,11 @@
 pub mod equalizer;
 
 
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 /// Represents the current playback state.
@@ -30,8 +30,7 @@ pub struct NowPlaying {
 
 /// Core audio player that manages playback through rodio.
 pub struct Player {
-    _stream: OutputStream,
-    _stream_handle: OutputStreamHandle,
+    stream: OutputStream,
     sink: Arc<Mutex<Sink>>,
     state: PlaybackState,
     current_track: Option<NowPlaying>,
@@ -41,23 +40,29 @@ pub struct Player {
 }
 
 impl Player {
-    /// Create a new player instance. Panics if audio output is unavailable.
-    pub fn new() -> Self {
-        let (stream, stream_handle) =
-            OutputStream::try_default().expect("Failed to open audio output");
-        let sink = Sink::try_new(&stream_handle).expect("Failed to create audio sink");
+    /// Create a new player instance.
+    pub fn new() -> Result<Self, String> {
+        let stream = OutputStreamBuilder::open_default_stream()
+            .map_err(|e| format!("Failed to open audio output: {e}"))?;
+        let sink = Sink::connect_new(stream.mixer());
         sink.set_volume(0.8);
 
-        Self {
-            _stream: stream,
-            _stream_handle: stream_handle,
+        Ok(Self {
+            stream,
             sink: Arc::new(Mutex::new(sink)),
             state: PlaybackState::Stopped,
             current_track: None,
             volume: 0.8,
             queue: Vec::new(),
             queue_index: 0,
-        }
+        })
+    }
+
+    /// Acquire the sink mutex lock, returning a descriptive error if poisoned.
+    fn lock_sink(&self) -> Result<MutexGuard<'_, Sink>, String> {
+        self.sink
+            .lock()
+            .map_err(|e| format!("Audio sink lock poisoned: {e}"))
     }
 
     /// Load and immediately play a file.
@@ -68,13 +73,12 @@ impl Player {
 
         let duration = source.total_duration().unwrap_or(Duration::ZERO);
 
-        let sink = self.sink.lock().unwrap();
+        let sink = self.lock_sink()?;
         sink.stop();
         // After stop, we need a new sink
         drop(sink);
 
-        let new_sink =
-            Sink::try_new(&self._stream_handle).map_err(|e| format!("Sink error: {e}"))?;
+        let new_sink = Sink::connect_new(self.stream.mixer());
         new_sink.set_volume(self.volume);
         new_sink.append(source);
 
@@ -90,34 +94,42 @@ impl Player {
     }
 
     /// Toggle play/pause.
-    pub fn toggle_playback(&mut self) {
-        let sink = self.sink.lock().unwrap();
-        match self.state {
+    pub fn toggle_playback(&mut self) -> Result<(), String> {
+        let sink = self.lock_sink()?;
+        let new_state = match self.state {
             PlaybackState::Playing => {
                 sink.pause();
-                self.state = PlaybackState::Paused;
+                Some(PlaybackState::Paused)
             }
             PlaybackState::Paused => {
                 sink.play();
-                self.state = PlaybackState::Playing;
+                Some(PlaybackState::Playing)
             }
-            PlaybackState::Stopped => {}
+            PlaybackState::Stopped => None,
+        };
+        drop(sink);
+        if let Some(state) = new_state {
+            self.state = state;
         }
+        Ok(())
     }
 
     /// Stop playback entirely.
-    pub fn stop(&mut self) {
-        let sink = self.sink.lock().unwrap();
+    pub fn stop(&mut self) -> Result<(), String> {
+        let sink = self.lock_sink()?;
         sink.stop();
+        drop(sink);
         self.state = PlaybackState::Stopped;
         self.current_track = None;
+        Ok(())
     }
 
     /// Set volume (0.0 - 1.0).
-    pub fn set_volume(&mut self, volume: f32) {
+    pub fn set_volume(&mut self, volume: f32) -> Result<(), String> {
         self.volume = volume.clamp(0.0, 1.0);
-        let sink = self.sink.lock().unwrap();
+        let sink = self.lock_sink()?;
         sink.set_volume(self.volume);
+        Ok(())
     }
 
     pub fn volume(&self) -> f32 {
@@ -126,9 +138,10 @@ impl Player {
 
     /// Seek to a position (requires re-decoding for rodio).
     pub fn seek(&mut self, position: Duration) -> Result<(), String> {
-        let sink = self.sink.lock().unwrap();
+        let sink = self.lock_sink()?;
         sink.try_seek(position)
             .map_err(|e| format!("Seek failed: {e}"))?;
+        drop(sink);
         if let Some(ref mut np) = self.current_track {
             np.position = position;
         }
@@ -146,9 +159,9 @@ impl Player {
     }
 
     /// Check if playback is finished (sink empty).
-    pub fn is_finished(&self) -> bool {
-        let sink = self.sink.lock().unwrap();
-        sink.empty()
+    pub fn is_finished(&self) -> Result<bool, String> {
+        let sink = self.lock_sink()?;
+        Ok(sink.empty())
     }
 
     // -- Queue management --

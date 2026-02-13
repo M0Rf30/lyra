@@ -2,7 +2,7 @@
 
 //! Albums grid view - displays album covers in a responsive grid (Lollypop-style).
 
-use crate::library::Album;
+use crate::library::{Album, CoverArt};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -24,7 +24,7 @@ pub enum AlbumMessage {
 /// Render the album grid view.
 pub fn album_grid_view<'a>(
     albums: &'a [Album],
-    _cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
+    cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
 ) -> cosmic::Element<'a, AlbumMessage> {
     if albums.is_empty() {
         return widget::container(
@@ -44,53 +44,52 @@ pub fn album_grid_view<'a>(
         .into();
     }
 
-    // Build album cards into rows of ~4 items
-    let cards_per_row = 4;
-    let mut rows = widget::column().spacing(16);
-    let mut current_row = widget::row().spacing(16);
-    let mut count = 0;
+    let cards: Vec<cosmic::Element<'_, AlbumMessage>> = albums
+        .iter()
+        .enumerate()
+        .map(|(index, album)| {
+            let key = CoverArt::album_key(&album.artist, &album.name);
+            let art_widget: cosmic::Element<'_, AlbumMessage> =
+                if let Some(handle) = cover_images.get(&key) {
+                    widget::icon::icon(handle.clone()).size(180).into()
+                } else {
+                    widget::icon::from_name("media-optical-cd-audio-symbolic")
+                        .size(80)
+                        .into()
+                };
 
-    for (index, album) in albums.iter().enumerate() {
-        let album_card = widget::column()
-            .push(
-                // Album art placeholder (square container with icon)
-                widget::container(
-                    widget::icon::from_name("media-optical-cd-audio-symbolic").size(80),
+            let album_card = widget::column()
+                .push(
+                    widget::container(art_widget)
+                        .width(180)
+                        .height(180)
+                        .align_x(Horizontal::Center)
+                        .align_y(Vertical::Center)
+                        .class(cosmic::theme::Container::Card),
                 )
-                .width(180)
-                .height(180)
-                .align_x(Horizontal::Center)
-                .align_y(Vertical::Center)
-                .class(cosmic::theme::Container::Card),
-            )
-            .push(
-                widget::column()
-                    .push(widget::text(album.name.as_str()).width(180))
-                    .push(widget::text::caption(album.artist.as_str()).width(180))
-                    .spacing(2),
-            )
-            .spacing(8);
+                .push(
+                    widget::column()
+                        .push(widget::text(truncate_str(&album.name, 24)).width(180))
+                        .push(
+                            widget::text::caption(truncate_str(&album.artist, 28)).width(180),
+                        )
+                        .spacing(2),
+                )
+                .spacing(8);
 
-        current_row = current_row.push(
             widget::button::custom(album_card)
                 .on_press(AlbumMessage::SelectAlbum(index))
-                .padding(8),
-        );
-        count += 1;
+                .padding(8)
+                .into()
+        })
+        .collect();
 
-        if count >= cards_per_row {
-            rows = rows.push(current_row);
-            current_row = widget::row().spacing(16);
-            count = 0;
-        }
-    }
+    let grid = widget::flex_row(cards)
+        .column_spacing(16)
+        .row_spacing(16)
+        .width(Length::Fill);
 
-    // Push remaining cards
-    if count > 0 {
-        rows = rows.push(current_row);
-    }
-
-    widget::scrollable(widget::container(rows).padding(16).width(Length::Fill))
+    widget::scrollable(widget::container(grid).padding(16).width(Length::Fill))
         .height(Length::Fill)
         .into()
 }
@@ -99,14 +98,25 @@ pub fn album_grid_view<'a>(
 pub fn album_detail_view<'a>(
     album: &'a Album,
     album_index: usize,
+    cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
 ) -> cosmic::Element<'a, AlbumMessage> {
+    let key = CoverArt::album_key(&album.artist, &album.name);
+    let art_widget: cosmic::Element<'_, AlbumMessage> =
+        if let Some(handle) = cover_images.get(&key) {
+            widget::icon::icon(handle.clone()).size(160).into()
+        } else {
+            widget::icon::from_name("media-optical-cd-audio-symbolic")
+                .size(120)
+                .into()
+        };
+
     let header = widget::row()
         .push(
             widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
                 .on_press(AlbumMessage::BackToGrid),
         )
         .push(
-            widget::container(widget::icon::from_name("media-optical-cd-audio-symbolic").size(120))
+            widget::container(art_widget)
                 .width(160)
                 .height(160)
                 .align_x(Horizontal::Center)
@@ -160,6 +170,15 @@ pub fn album_detail_view<'a>(
     )
     .height(Length::Fill)
     .into()
+}
+
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{truncated}\u{2026}")
+    }
 }
 
 fn format_duration(d: std::time::Duration) -> String {

@@ -60,18 +60,16 @@ impl LyricsProvider {
     /// Try all sources: embedded tags -> .lrc file -> online.
     pub async fn get_lyrics(path: &Path, artist: &str, title: &str) -> Option<String> {
         // 1. Embedded in tags
-        if let Some(lyrics) = Self::from_tags(path) {
-            if !lyrics.trim().is_empty() {
+        if let Some(lyrics) = Self::from_tags(path)
+            && !lyrics.trim().is_empty() {
                 return Some(lyrics);
             }
-        }
 
         // 2. .lrc sidecar file
-        if let Some(lyrics) = Self::from_lrc_file(path) {
-            if !lyrics.trim().is_empty() {
+        if let Some(lyrics) = Self::from_lrc_file(path)
+            && !lyrics.trim().is_empty() {
                 return Some(lyrics);
             }
-        }
 
         // 3. Online (LRCLIB)
         Self::fetch_online(artist, title).await
