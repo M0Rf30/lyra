@@ -6,6 +6,7 @@
 //! and the [`ProviderRegistry`] that manages active providers.
 
 pub mod local;
+pub mod mpd;
 
 use crate::library::{Album, Artist, CoverSource, Track, TrackSource};
 use std::collections::HashMap;
@@ -109,8 +110,11 @@ pub trait MusicProvider: Send + Sync {
 }
 
 /// Manages all registered music providers.
+///
+/// Wraps providers in `Arc` so they can be shared with async tasks for
+/// background library loading, scanning, and cover art fetching.
 pub struct ProviderRegistry {
-    providers: HashMap<String, Box<dyn MusicProvider>>,
+    providers: HashMap<String, Arc<dyn MusicProvider>>,
     active_provider_id: String,
 }
 
@@ -129,12 +133,22 @@ impl ProviderRegistry {
         if self.providers.is_empty() {
             self.active_provider_id = id.clone();
         }
-        self.providers.insert(id, provider);
+        self.providers.insert(id, Arc::from(provider));
     }
 
     /// Get a provider by its ID.
     pub fn get(&self, id: &str) -> Option<&dyn MusicProvider> {
         self.providers.get(id).map(|p| p.as_ref())
+    }
+
+    /// Get a shared reference to a provider for use in async tasks.
+    pub fn get_shared(&self, id: &str) -> Option<Arc<dyn MusicProvider>> {
+        self.providers.get(id).cloned()
+    }
+
+    /// Get a shared reference to the currently active provider.
+    pub fn active_shared(&self) -> Option<Arc<dyn MusicProvider>> {
+        self.get_shared(&self.active_provider_id)
     }
 
     /// Get the currently active provider (used for library browsing).
@@ -157,11 +171,28 @@ impl ProviderRegistry {
         &self.active_provider_id
     }
 
+    /// Remove all providers of a given type.
+    pub fn remove_by_type(&mut self, ptype: ProviderType) {
+        self.providers
+            .retain(|_, p| p.provider_type() != ptype);
+        // If the active provider was removed, reset to the first remaining
+        if !self.providers.contains_key(&self.active_provider_id) {
+            self.active_provider_id = self
+                .providers
+                .keys()
+                .next()
+                .cloned()
+                .unwrap_or_default();
+        }
+    }
+
     /// List all registered provider IDs and names.
-    pub fn list(&self) -> Vec<(&str, &str, ProviderType)> {
+    pub fn list(&self) -> Vec<(String, String, ProviderType)> {
         self.providers
             .values()
-            .map(|p| (p.id(), p.name(), p.provider_type()))
+            .map(|p| (p.id().to_string(), p.name().to_string(), p.provider_type()))
             .collect()
     }
 }
+
+use std::sync::Arc;

@@ -7,4 +7,5 @@ pub mod artists;
 pub mod equalizer;
 pub mod lyrics;
 pub mod now_playing;
+pub mod providers;
 pub mod songs;

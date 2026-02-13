@@ -5,6 +5,7 @@
 pub mod backend;
 pub mod equalizer;
 pub mod local_backend;
+pub mod mpd_backend;
 
 use crate::library::{Track, TrackSource};
 use backend::{PlaybackBackend, PlayerError};
@@ -25,6 +26,18 @@ pub struct NowPlaying {
     pub track: Track,
     pub duration: Duration,
     pub position: Duration,
+}
+
+/// Resolve a `Track` to its `TrackSource` based on the provider_id field.
+///
+/// This avoids coupling the Player to the ProviderRegistry.
+fn resolve_track_source(track: &Track) -> TrackSource {
+    if track.provider_id.starts_with("mpd") {
+        TrackSource::MpdFile(track.source_uri.clone())
+    } else {
+        // Default: local file
+        TrackSource::LocalFile(track.path.clone())
+    }
 }
 
 /// Core audio player that manages playback through a backend.
@@ -130,7 +143,7 @@ impl Player {
         }
         self.queue_index = (self.queue_index + 1) % self.queue.len();
         let track = self.queue[self.queue_index].clone();
-        let source = TrackSource::LocalFile(track.path.clone());
+        let source = resolve_track_source(&track);
         self.play_track(&track, source)?;
         Ok(self.queue.get(self.queue_index))
     }
@@ -146,7 +159,7 @@ impl Player {
             self.queue_index -= 1;
         }
         let track = self.queue[self.queue_index].clone();
-        let source = TrackSource::LocalFile(track.path.clone());
+        let source = resolve_track_source(&track);
         self.play_track(&track, source)?;
         Ok(self.queue.get(self.queue_index))
     }
@@ -158,7 +171,7 @@ impl Player {
         }
         self.queue_index = index;
         let track = self.queue[index].clone();
-        let source = TrackSource::LocalFile(track.path.clone());
+        let source = resolve_track_source(&track);
         self.play_track(&track, source)
     }
 

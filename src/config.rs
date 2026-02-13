@@ -4,6 +4,39 @@ use cosmic::cosmic_config::{self, cosmic_config_derive::CosmicConfigEntry, Cosmi
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Serializable configuration for an MPD server connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MpdConfigEntry {
+    /// Unique provider ID (e.g., "mpd-home").
+    pub id: String,
+    /// Human-readable name (e.g., "Home MPD Server").
+    pub name: String,
+    /// MPD server hostname.
+    pub host: String,
+    /// MPD server port (default: 6600).
+    #[serde(default = "default_mpd_port")]
+    pub port: u16,
+    /// Optional password for authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+fn default_mpd_port() -> u16 {
+    6600
+}
+
+impl Default for MpdConfigEntry {
+    fn default() -> Self {
+        Self {
+            id: "mpd".to_string(),
+            name: "MPD Server".to_string(),
+            host: "localhost".to_string(),
+            port: 6600,
+            password: None,
+        }
+    }
+}
+
 /// Repeat mode for playback queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -51,6 +84,8 @@ pub struct Config {
     pub equalizer_enabled: bool,
     /// Last active view ("albums", "artists", "songs", "playlists").
     pub last_view: String,
+    /// Configured MPD server connections.
+    pub mpd_servers: Vec<MpdConfigEntry>,
 }
 
 impl Default for Config {
@@ -71,6 +106,7 @@ impl Default for Config {
             equalizer_bands: vec![0.0; 10],
             equalizer_enabled: false,
             last_view: "albums".to_string(),
+            mpd_servers: Vec::new(),
         }
     }
 }

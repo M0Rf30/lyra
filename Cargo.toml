@@ -27,6 +27,9 @@ futures-util = "0.3"
 # Audio playback
 rodio = { version = "0.21", features = ["symphonia-all"] }
 
+# MPD protocol client
+mpd_client = "1.4"
+
 # Audio metadata (ID3, Vorbis, FLAC, etc.)
 lofty = "0.23"
 

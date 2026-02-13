@@ -5,20 +5,74 @@ use crate::fl;
 use crate::library::{Album, Artist, LibraryDb, LibraryScanner, LyricsProvider, Track};
 use crate::player::{PlaybackState, Player};
 use crate::provider::local::LocalProvider;
-use crate::provider::ProviderRegistry;
-use crate::views::{albums, artists, equalizer, lyrics, now_playing, songs};
+use crate::provider::mpd::{MpdConfig, MpdProvider};
+use crate::provider::{MusicProvider, ProviderRegistry};
+use crate::views::{albums, artists, equalizer, lyrics, now_playing, providers, songs};
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::{Alignment, Length, Subscription};
 use cosmic::widget::{self, about::About, icon, menu, nav_bar};
 use cosmic::{iced_futures, prelude::*};
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/icon.svg");
+
+/// Wrapper around `Arc<MpdProvider>` that implements `MusicProvider`.
+///
+/// This is needed so we can share the provider between the registry
+/// (which owns `Box<dyn MusicProvider>`) and async connection tasks
+/// (which need `Arc<MpdProvider>`).
+struct MpdProviderWrapper(Arc<MpdProvider>);
+
+impl crate::provider::MusicProvider for MpdProviderWrapper {
+    fn id(&self) -> &str {
+        self.0.id()
+    }
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn provider_type(&self) -> crate::provider::ProviderType {
+        self.0.provider_type()
+    }
+    fn browse_albums(&self) -> Result<Vec<Album>, crate::provider::ProviderError> {
+        self.0.browse_albums()
+    }
+    fn browse_artists(&self) -> Result<Vec<Artist>, crate::provider::ProviderError> {
+        self.0.browse_artists()
+    }
+    fn browse_tracks(&self) -> Result<Vec<Track>, crate::provider::ProviderError> {
+        self.0.browse_tracks()
+    }
+    fn search(&self, query: &str) -> Result<Vec<Track>, crate::provider::ProviderError> {
+        self.0.search(query)
+    }
+    fn resolve_audio(
+        &self,
+        track: &Track,
+    ) -> Result<crate::library::TrackSource, crate::provider::ProviderError> {
+        self.0.resolve_audio(track)
+    }
+    fn get_cover_art(
+        &self,
+        album: &Album,
+    ) -> Result<Option<Vec<u8>>, crate::provider::ProviderError> {
+        self.0.get_cover_art(album)
+    }
+    fn get_lyrics(
+        &self,
+        track: &Track,
+    ) -> Result<Option<String>, crate::provider::ProviderError> {
+        self.0.get_lyrics(track)
+    }
+    fn sync_library(&self) -> Result<usize, crate::provider::ProviderError> {
+        self.0.sync_library()
+    }
+}
 
 /// Main application model.
 pub struct AppModel {
@@ -31,6 +85,12 @@ pub struct AppModel {
 
     // Providers
     registry: ProviderRegistry,
+    /// Shared references to MPD providers for idle event subscriptions.
+    mpd_providers: Vec<Arc<MpdProvider>>,
+    /// Ordered list of (provider_id, display_name) for the selector dropdown.
+    provider_list: Vec<(String, String)>,
+    /// Index of the active provider in `provider_list`.
+    active_provider_index: Option<usize>,
 
     // Library data
     all_tracks: Vec<Track>,
@@ -56,6 +116,10 @@ pub struct AppModel {
 
     // Equalizer
     eq_preset: Option<crate::player::equalizer::EqPreset>,
+
+    // Provider settings (editing state)
+    mpd_edit_states: Vec<providers::MpdEditState>,
+    mpd_connection_status: Vec<Option<String>>,
 }
 
 /// All application messages.
@@ -118,6 +182,25 @@ pub enum Message {
     // Settings
     AddMusicDir,
     UpdateConfig(Config),
+
+    // Provider switching
+    SwitchProvider(usize),
+
+    // MPD provider configuration
+    MpdAddServer,
+    MpdEditName(usize, String),
+    MpdEditHost(usize, String),
+    MpdEditPort(usize, String),
+    MpdEditPassword(usize, String),
+    MpdSaveServer(usize),
+    MpdRemoveServer(usize),
+    MpdTestConnection(usize),
+    MpdTestResult(usize, Result<(), String>),
+
+    // MPD provider events
+    MpdConnected(String),
+    MpdConnectionFailed(String, String),
+    MpdIdleEvent(String),
 
     // Application lifecycle
     Quit,
@@ -192,6 +275,38 @@ impl cosmic::Application for AppModel {
             log::error!("Failed to open library database");
         }
 
+        // Initialize MPD providers from config.
+        // Providers are registered immediately (browse returns NotConnected until
+        // the subscription establishes the connection). The actual TCP connect +
+        // idle-event loop runs inside a COSMIC subscription (see `subscription()`).
+        let rt_handle = tokio::runtime::Handle::current();
+        let mut mpd_providers = Vec::new();
+        for entry in &config.mpd_servers {
+            let mpd_config: MpdConfig = entry.clone().into();
+            let provider = Arc::new(MpdProvider::new(mpd_config, rt_handle.clone()));
+            mpd_providers.push(Arc::clone(&provider));
+            registry.register(Box::new(MpdProviderWrapper(provider)));
+        }
+
+        // Build provider list for the dropdown selector
+        let provider_entries = registry.list();
+        let provider_list: Vec<(String, String)> = provider_entries
+            .iter()
+            .map(|(id, name, _)| (id.clone(), name.clone()))
+            .collect();
+        let active_provider_index = provider_list
+            .iter()
+            .position(|(id, _)| id == registry.active_id());
+
+        // Build editing state for MPD servers
+        let mpd_edit_states: Vec<providers::MpdEditState> = config
+            .mpd_servers
+            .iter()
+            .map(providers::MpdEditState::from_config)
+            .collect();
+        let mpd_connection_status: Vec<Option<String>> =
+            vec![None; mpd_edit_states.len()];
+
         // Initialize player
         let player = match Player::new() {
             Ok(p) => Some(p),
@@ -209,6 +324,9 @@ impl cosmic::Application for AppModel {
             config,
             context_page: ContextPage::default(),
             registry,
+            mpd_providers,
+            provider_list,
+            active_provider_index,
             all_tracks: Vec::new(),
             all_albums: Vec::new(),
             all_artists: Vec::new(),
@@ -224,6 +342,8 @@ impl cosmic::Application for AppModel {
             lyrics_text: None,
             lyrics_loading: false,
             eq_preset: None,
+            mpd_edit_states,
+            mpd_connection_status,
         };
 
         let title_cmd = app.update_title();
@@ -255,6 +375,7 @@ impl cosmic::Application for AppModel {
                     &self.key_binds,
                     vec![
                         menu::Item::Button(fl!("equalizer"), None, MenuAction::Equalizer),
+                        menu::Item::Button(fl!("providers"), None, MenuAction::Providers),
                         menu::Item::Divider,
                         menu::Item::Button(fl!("about"), None, MenuAction::About),
                     ],
@@ -268,6 +389,24 @@ impl cosmic::Application for AppModel {
     /// Header bar center: empty (playback controls are in the bottom bar).
     fn header_center(&self) -> Vec<Element<'_, Self::Message>> {
         vec![]
+    }
+
+    /// Header bar end: provider selector (shown when multiple providers are configured).
+    fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
+        if self.provider_list.len() <= 1 {
+            return vec![];
+        }
+
+        let provider_names: Vec<String> =
+            self.provider_list.iter().map(|(_, name)| name.clone()).collect();
+
+        let dropdown = widget::dropdown(
+            provider_names,
+            self.active_provider_index,
+            Message::SwitchProvider,
+        );
+
+        vec![dropdown.into()]
     }
 
     fn nav_model(&self) -> Option<&nav_bar::Model> {
@@ -302,6 +441,32 @@ impl cosmic::Application for AppModel {
                     Message::ToggleContextPage(ContextPage::Equalizer),
                 )
                 .title(fl!("equalizer"))
+            }
+            ContextPage::Providers => {
+                let providers_content = providers::providers_view(
+                    &self.mpd_edit_states,
+                    &self.mpd_connection_status,
+                )
+                .map(|msg| match msg {
+                    providers::ProvidersMessage::AddMpd => Message::MpdAddServer,
+                    providers::ProvidersMessage::EditName(i, v) => Message::MpdEditName(i, v),
+                    providers::ProvidersMessage::EditHost(i, v) => Message::MpdEditHost(i, v),
+                    providers::ProvidersMessage::EditPort(i, v) => Message::MpdEditPort(i, v),
+                    providers::ProvidersMessage::EditPassword(i, v) => {
+                        Message::MpdEditPassword(i, v)
+                    }
+                    providers::ProvidersMessage::Save(i) => Message::MpdSaveServer(i),
+                    providers::ProvidersMessage::Remove(i) => Message::MpdRemoveServer(i),
+                    providers::ProvidersMessage::TestConnection(i) => {
+                        Message::MpdTestConnection(i)
+                    }
+                });
+
+                context_drawer::context_drawer(
+                    providers_content,
+                    Message::ToggleContextPage(ContextPage::Providers),
+                )
+                .title(fl!("providers"))
             }
             ContextPage::Lyrics => {
                 let (title, artist) = self
@@ -498,6 +663,65 @@ impl cosmic::Application for AppModel {
             }));
         }
 
+        // MPD idle event subscriptions — one per configured MPD provider.
+        //
+        // Each subscription opens TWO separate TCP connections to the MPD server:
+        // 1. Idle connection — stays in idle mode, streams events via ConnectionEvents
+        // 2. Command connection — stored in MpdProvider for browse/search/playback
+        //
+        // This avoids protocol conflicts between idle mode and command execution.
+        for (idx, provider) in self.mpd_providers.iter().enumerate() {
+            let provider = Arc::clone(provider);
+            let stream = iced_futures::stream::channel(4, |mut emitter| async move {
+                loop {
+                    let pid = provider.id().to_string();
+
+                    // Step 1: Establish the idle connection
+                    // We must keep `_idle_client` alive — dropping it would
+                    // close the background task and end the `events` stream.
+                    let idle_result = provider.connect_idle().await;
+                    let (_idle_client, mut events) = match idle_result {
+                        Ok(pair) => pair,
+                        Err(e) => {
+                            _ = emitter
+                                .send(Message::MpdConnectionFailed(pid, e.to_string()))
+                                .await;
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            continue;
+                        }
+                    };
+
+                    // Step 2: Establish the command connection
+                    if let Err(e) = provider.connect_command().await {
+                        log::error!(
+                            "MPD provider '{pid}' command connection failed: {e}"
+                        );
+                        _ = emitter
+                            .send(Message::MpdConnectionFailed(pid, e.to_string()))
+                            .await;
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+
+                    // Both connections established
+                    _ = emitter.send(Message::MpdConnected(pid.clone())).await;
+
+                    // Loop on idle events until the connection drops
+                    while let Some(_event) = events.next().await {
+                        _ = emitter.send(Message::MpdIdleEvent(pid.clone())).await;
+                    }
+
+                    // Idle stream ended — connection lost. Disconnect command too.
+                    log::warn!("MPD provider '{pid}' connection lost, reconnecting...");
+                    provider.disconnect().await;
+
+                    // Backoff before reconnect
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            });
+            subs.push(Subscription::run_with_id(("mpd-idle", idx), stream));
+        }
+
         Subscription::batch(subs)
     }
 
@@ -520,26 +744,37 @@ impl cosmic::Application for AppModel {
 
             // -- Library --
             Message::ScanLibrary => {
-                self.library_scanning = true;
-                let dirs = self.config.music_dirs.clone();
-                let db_path = dirs::data_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("cosmic-music-player")
-                    .join("library.db");
-
-                return cosmic::task::future(async move {
-                    let count = if let Some(parent) = db_path.parent() {
-                        std::fs::create_dir_all(parent).ok();
-                        if let Ok(db) = LibraryDb::open(&db_path) {
-                            LibraryScanner::scan(&db, &dirs).unwrap_or(0)
-                        } else {
-                            0
+                // For remote providers (MPD), sync_library just sends an "update"
+                // command which requires an active connection. Skip if not connected —
+                // the idle subscription will trigger a reload once connected.
+                if let Some(provider) = self.registry.active_shared() {
+                    // Quick connectivity check: for MPD, browse_tracks on a disconnected
+                    // provider returns NotConnected instantly. Skip scan in that case.
+                    match provider.provider_type() {
+                        crate::provider::ProviderType::Local => {
+                            self.library_scanning = true;
+                            return cosmic::task::future(async move {
+                                let count = tokio::task::spawn_blocking(move || {
+                                    provider.sync_library().unwrap_or_else(|e| {
+                                        log::error!("sync_library failed: {e}");
+                                        0
+                                    })
+                                })
+                                .await
+                                .unwrap_or(0);
+                                cosmic::Action::App(Message::LibraryScanComplete(count))
+                            });
                         }
-                    } else {
-                        0
-                    };
-                    cosmic::Action::App(Message::LibraryScanComplete(count))
-                });
+                        _ => {
+                            // Remote providers: don't scan at startup; the idle
+                            // subscription fires MpdConnected which triggers reload.
+                            log::info!(
+                                "Skipping scan for remote provider '{}' — waiting for connection",
+                                self.registry.active_id()
+                            );
+                        }
+                    }
+                }
             }
 
             Message::LibraryScanComplete(count) => {
@@ -763,6 +998,146 @@ impl cosmic::Application for AppModel {
                 self.config = config;
             }
 
+            // -- Provider switching --
+            Message::SwitchProvider(index) => {
+                if let Some((id, _name)) = self.provider_list.get(index)
+                    && self.registry.set_active(id)
+                {
+                    self.active_provider_index = Some(index);
+                    log::info!("Switched to provider: {id}");
+                    // Clear current library data and reload from new provider
+                    self.all_tracks.clear();
+                    self.all_albums.clear();
+                    self.all_artists.clear();
+                    self.cover_images.clear();
+                    self.artist_avatars.clear();
+                    return self.reload_library();
+                }
+            }
+
+            // -- MPD server configuration --
+            Message::MpdAddServer => {
+                let idx = self.mpd_edit_states.len();
+                self.mpd_edit_states
+                    .push(providers::MpdEditState::new_default(idx));
+                self.mpd_connection_status.push(None);
+            }
+
+            Message::MpdEditName(i, v) => {
+                if let Some(state) = self.mpd_edit_states.get_mut(i) {
+                    state.name = v;
+                }
+            }
+
+            Message::MpdEditHost(i, v) => {
+                if let Some(state) = self.mpd_edit_states.get_mut(i) {
+                    state.host = v;
+                }
+            }
+
+            Message::MpdEditPort(i, v) => {
+                if let Some(state) = self.mpd_edit_states.get_mut(i) {
+                    state.port = v;
+                }
+            }
+
+            Message::MpdEditPassword(i, v) => {
+                if let Some(state) = self.mpd_edit_states.get_mut(i) {
+                    state.password = v;
+                }
+            }
+
+            Message::MpdSaveServer(i) => {
+                if let Some(state) = self.mpd_edit_states.get(i) {
+                    let entry = state.to_config();
+                    // Update or add in the config
+                    if i < self.config.mpd_servers.len() {
+                        self.config.mpd_servers[i] = entry;
+                    } else {
+                        self.config.mpd_servers.push(entry);
+                    }
+                    log::info!("MPD server config saved: {}", state.name);
+                    // Persist config via cosmic-config
+                    self.save_config();
+                    // Re-initialize providers
+                    return self.reinit_mpd_providers();
+                }
+            }
+
+            Message::MpdRemoveServer(i) => {
+                if i < self.mpd_edit_states.len() {
+                    self.mpd_edit_states.remove(i);
+                    self.mpd_connection_status.remove(i);
+                    if i < self.config.mpd_servers.len() {
+                        self.config.mpd_servers.remove(i);
+                    }
+                    log::info!("MPD server removed at index {i}");
+                    self.save_config();
+                    return self.reinit_mpd_providers();
+                }
+            }
+
+            Message::MpdTestConnection(i) => {
+                if let Some(state) = self.mpd_edit_states.get(i) {
+                    let host = state.host.clone();
+                    let port: u16 = state.port.parse().unwrap_or(6600);
+                    let password = if state.password.is_empty() {
+                        None
+                    } else {
+                        Some(state.password.clone())
+                    };
+
+                    return cosmic::task::future(async move {
+                        let addr = format!("{host}:{port}");
+                        let result = async {
+                            let stream = tokio::net::TcpStream::connect(&addr)
+                                .await
+                                .map_err(|e| format!("TCP: {e}"))?;
+                            mpd_client::Client::connect_with_password_opt(
+                                stream,
+                                password.as_deref(),
+                            )
+                            .await
+                            .map_err(|e| format!("MPD: {e}"))?;
+                            Ok(())
+                        }
+                        .await;
+                        cosmic::Action::App(Message::MpdTestResult(i, result))
+                    });
+                }
+            }
+
+            Message::MpdTestResult(i, result) => {
+                let status = match result {
+                    Ok(()) => fl!("connected"),
+                    Err(e) => format!("{}: {e}", fl!("connection-failed")),
+                };
+                if let Some(s) = self.mpd_connection_status.get_mut(i) {
+                    *s = Some(status);
+                }
+            }
+
+            // -- MPD provider events --
+            Message::MpdConnected(provider_id) => {
+                log::info!("MPD provider '{provider_id}' is now connected");
+                // Optionally trigger a library reload if this is the active provider
+                if self.registry.active_id() == provider_id {
+                    return self.reload_library();
+                }
+            }
+
+            Message::MpdConnectionFailed(provider_id, error) => {
+                log::error!("MPD provider '{provider_id}' failed to connect: {error}");
+            }
+
+            Message::MpdIdleEvent(provider_id) => {
+                log::debug!("MPD idle event from provider '{provider_id}'");
+                // If this is the active provider, reload the library to pick up changes
+                if self.registry.active_id() == provider_id {
+                    return self.reload_library();
+                }
+            }
+
             Message::Quit => {
                 return cosmic::iced::exit();
             }
@@ -797,30 +1172,63 @@ impl AppModel {
     }
 
     fn reload_library(&mut self) -> Task<cosmic::Action<Message>> {
-        let db_path = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("cosmic-music-player")
-            .join("library.db");
+        let provider = match self.registry.active_shared() {
+            Some(p) => p,
+            None => return Task::none(),
+        };
+        let provider_type = provider.provider_type();
 
         cosmic::task::future(async move {
-            let (tracks, albums, artists) = if let Ok(db) = LibraryDb::open(&db_path) {
-                let tracks = db.all_tracks(None).unwrap_or_default();
-                let albums = db.all_albums(None).unwrap_or_default();
-                let artists = db.all_artists(None).unwrap_or_default();
-                (tracks, albums, artists)
-            } else {
-                (Vec::new(), Vec::new(), Vec::new())
-            };
+            // Provider trait methods are sync (they block internally for
+            // remote providers), so run them on the blocking thread pool.
+            let provider_clone = Arc::clone(&provider);
+            let (tracks, albums, artists) =
+                tokio::task::spawn_blocking(move || {
+                    let tracks = provider_clone.browse_tracks().unwrap_or_else(|e| {
+                        log::error!("browse_tracks failed: {e}");
+                        Vec::new()
+                    });
+                    let albums = provider_clone.browse_albums().unwrap_or_else(|e| {
+                        log::error!("browse_albums failed: {e}");
+                        Vec::new()
+                    });
+                    let artists = provider_clone.browse_artists().unwrap_or_else(|e| {
+                        log::error!("browse_artists failed: {e}");
+                        Vec::new()
+                    });
+                    (tracks, albums, artists)
+                })
+                .await
+                .unwrap_or_default();
 
             // Extract cover art for each album
             let mut cover_images = HashMap::new();
             for album in &albums {
-                if let Some(first_track) = album.tracks.first() {
-                    let key = crate::library::CoverArt::album_key(&album.artist, &album.name);
-                    if let Some(bytes) = crate::library::CoverArt::get_cover_art(&first_track.path)
-                    {
-                        let handle = widget::icon::from_raster_bytes(bytes);
-                        cover_images.insert(key, handle);
+                let key = crate::library::CoverArt::album_key(&album.artist, &album.name);
+                match provider_type {
+                    crate::provider::ProviderType::Local => {
+                        // Local provider: read embedded art from the file
+                        if let Some(first_track) = album.tracks.first()
+                            && let Some(bytes) =
+                                crate::library::CoverArt::get_cover_art(&first_track.path)
+                        {
+                            let handle = widget::icon::from_raster_bytes(bytes);
+                            cover_images.insert(key, handle);
+                        }
+                    }
+                    _ => {
+                        // Remote providers: fetch cover art via the provider
+                        let prov = Arc::clone(&provider);
+                        let album_clone = album.clone();
+                        if let Ok(Some(bytes)) = tokio::task::spawn_blocking(move || {
+                            prov.get_cover_art(&album_clone)
+                        })
+                        .await
+                        .unwrap_or(Ok(None))
+                        {
+                            let handle = widget::icon::from_raster_bytes(bytes);
+                            cover_images.insert(key, handle);
+                        }
                     }
                 }
             }
@@ -841,6 +1249,69 @@ impl AppModel {
                 artist_avatars,
             })
         })
+    }
+
+    /// Persist the current config via cosmic-config.
+    fn save_config(&self) {
+        if let Ok(context) =
+            cosmic_config::Config::new(<AppModel as cosmic::Application>::APP_ID, Config::VERSION)
+            && let Err(e) = self.config.write_entry(&context)
+        {
+            log::error!("Failed to save config: {e:?}");
+        }
+    }
+
+    /// Re-initialize all MPD providers from the current config.
+    ///
+    /// Removes old MPD providers from the registry, creates new ones,
+    /// and rebuilds the provider list for the header dropdown.
+    fn reinit_mpd_providers(&mut self) -> Task<cosmic::Action<Message>> {
+        // Remove existing MPD providers from registry
+        self.registry.remove_by_type(crate::provider::ProviderType::Mpd);
+        self.mpd_providers.clear();
+
+        // Re-create from config
+        let rt_handle = tokio::runtime::Handle::current();
+        for entry in &self.config.mpd_servers {
+            let mpd_config: MpdConfig = entry.clone().into();
+            let provider = Arc::new(MpdProvider::new(mpd_config, rt_handle.clone()));
+            self.mpd_providers.push(Arc::clone(&provider));
+            self.registry
+                .register(Box::new(MpdProviderWrapper(provider)));
+        }
+
+        // Rebuild provider list for the dropdown
+        let provider_entries = self.registry.list();
+        self.provider_list = provider_entries
+            .iter()
+            .map(|(id, name, _)| (id.clone(), name.clone()))
+            .collect();
+        self.active_provider_index = self
+            .provider_list
+            .iter()
+            .position(|(id, _)| id == self.registry.active_id());
+
+        // Rebuild edit states
+        self.mpd_edit_states = self
+            .config
+            .mpd_servers
+            .iter()
+            .map(providers::MpdEditState::from_config)
+            .collect();
+        self.mpd_connection_status = vec![None; self.mpd_edit_states.len()];
+
+        // Don't reload library here — for MPD providers, the idle
+        // subscription will fire MpdConnected once connected, which
+        // triggers reload. For local, reload immediately.
+        if self
+            .registry
+            .active()
+            .is_some_and(|p| p.provider_type() == crate::provider::ProviderType::Local)
+        {
+            self.reload_library()
+        } else {
+            Task::none()
+        }
     }
 
     fn play_track_list(&mut self, tracks: &[Track], start_index: usize) {
@@ -881,6 +1352,7 @@ pub enum ContextPage {
     About,
     Equalizer,
     Lyrics,
+    Providers,
 }
 
 /// Menu bar actions.
@@ -888,6 +1360,7 @@ pub enum ContextPage {
 pub enum MenuAction {
     About,
     Equalizer,
+    Providers,
     ScanLibrary,
     AddMusicDir,
     Quit,
@@ -900,6 +1373,7 @@ impl menu::action::MenuAction for MenuAction {
         match self {
             MenuAction::About => Message::ToggleContextPage(ContextPage::About),
             MenuAction::Equalizer => Message::ToggleContextPage(ContextPage::Equalizer),
+            MenuAction::Providers => Message::ToggleContextPage(ContextPage::Providers),
             MenuAction::ScanLibrary => Message::ScanLibrary,
             MenuAction::AddMusicDir => Message::AddMusicDir,
             MenuAction::Quit => Message::Quit,
