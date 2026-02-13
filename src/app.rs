@@ -19,7 +19,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/icon.svg");
@@ -152,9 +152,10 @@ pub struct AppModel {
     player: Option<Player>,
     playback_position: Duration,
     current_track: Option<Track>,
-    /// Timestamp of last user-initiated seek. While recent (< 500ms), the
-    /// PlaybackTick skips position updates to avoid fighting the slider drag.
-    last_seek_at: Option<Instant>,
+    /// While the user is dragging the seek slider, holds the preview fraction
+    /// (0.0–1.0). `None` when not dragging. The actual backend seek happens
+    /// only on release (`SeekCommit`).
+    seeking_preview: Option<f32>,
 
     // Scrobble state (Subsonic)
     /// Whether a "now playing" notification has been sent for the current track.
@@ -216,7 +217,10 @@ pub enum Message {
     TogglePlayback,
     NextTrack,
     PreviousTrack,
-    Seek(f32),
+    /// Visual-only update while dragging the seek slider (no backend seek).
+    SeekPreview(f32),
+    /// Performs the actual backend seek when the slider is released.
+    SeekCommit,
     SetVolume(f32),
     ToggleShuffle,
     CycleRepeat,
@@ -442,7 +446,7 @@ impl cosmic::Application for AppModel {
             player,
             playback_position: Duration::ZERO,
             current_track: None,
-            last_seek_at: None,
+            seeking_preview: None,
             scrobble_now_playing_sent: false,
             scrobble_sent: false,
             selected_album: None,
@@ -740,12 +744,14 @@ impl cosmic::Application for AppModel {
             self.config.shuffle,
             self.config.repeat_mode,
             current_cover,
+            self.seeking_preview,
         )
         .map(|msg| match msg {
             now_playing::NowPlayingMessage::TogglePlayback => Message::TogglePlayback,
             now_playing::NowPlayingMessage::Next => Message::NextTrack,
             now_playing::NowPlayingMessage::Previous => Message::PreviousTrack,
-            now_playing::NowPlayingMessage::Seek(v) => Message::Seek(v),
+            now_playing::NowPlayingMessage::SeekPreview(v) => Message::SeekPreview(v),
+            now_playing::NowPlayingMessage::SeekCommit => Message::SeekCommit,
             now_playing::NowPlayingMessage::SetVolume(v) => Message::SetVolume(v),
             now_playing::NowPlayingMessage::ToggleShuffle => Message::ToggleShuffle,
             now_playing::NowPlayingMessage::CycleRepeat => Message::CycleRepeat,
@@ -1019,8 +1025,18 @@ impl cosmic::Application for AppModel {
                 }
             }
 
-            Message::Seek(fraction) => {
-                if let Some(ref mut player) = self.player
+            Message::SeekPreview(fraction) => {
+                // Visual-only: store the preview fraction so the slider and
+                // time label reflect the drag position without touching the
+                // audio backend. This avoids the rapid seek storm that
+                // causes stuttering, snapback, and restarts.
+                self.seeking_preview = Some(fraction);
+            }
+
+            Message::SeekCommit => {
+                // Mouse released on the seek slider — perform the actual seek.
+                if let Some(fraction) = self.seeking_preview.take()
+                    && let Some(ref mut player) = self.player
                     && let Some(ref track) = self.current_track
                 {
                     let target =
@@ -1028,7 +1044,6 @@ impl cosmic::Application for AppModel {
                     match player.seek(target) {
                         Ok(()) => {
                             self.playback_position = target;
-                            self.last_seek_at = Some(Instant::now());
                         }
                         Err(e) => log::warn!("Seek failed: {e}"),
                     }
@@ -1055,12 +1070,9 @@ impl cosmic::Application for AppModel {
                 // Read accurate position from the active backend.
                 if let Some(ref mut player) = self.player {
                     // Don't overwrite playback_position while the user is
-                    // actively dragging the seek slider — the slider sends
-                    // continuous Seek messages and the tick would fight it.
-                    let recently_seeked = self
-                        .last_seek_at
-                        .is_some_and(|t| t.elapsed() < Duration::from_millis(500));
-                    if !recently_seeked {
+                    // dragging the seek slider — the preview fraction is
+                    // shown instead, and we seek only on release.
+                    if self.seeking_preview.is_none() {
                         self.playback_position = player.position();
 
                         // Clamp to track duration to avoid overshooting.

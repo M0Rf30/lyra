@@ -20,7 +20,10 @@ pub enum NowPlayingMessage {
     TogglePlayback,
     Next,
     Previous,
-    Seek(f32),
+    /// Continuous update during slider drag (visual feedback only).
+    SeekPreview(f32),
+    /// Emitted on mouse release — performs the actual backend seek.
+    SeekCommit,
     SetVolume(f32),
     ToggleShuffle,
     CycleRepeat,
@@ -43,11 +46,20 @@ pub fn playback_bar<'a>(
     shuffle: bool,
     repeat_mode: RepeatMode,
     cover_art: Option<&'a widget::icon::Handle>,
+    // When `Some`, the user is dragging the seek slider — fraction 0.0–1.0.
+    seeking_preview: Option<f32>,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
-    let progress = if duration.as_secs_f32() > 0.0 {
-        position.as_secs_f32() / duration.as_secs_f32()
+    // While dragging, show the preview position; otherwise the backend position.
+    let (progress, display_position) = if let Some(frac) = seeking_preview {
+        let preview_pos = Duration::from_secs_f32(frac * duration.as_secs_f32());
+        (frac, preview_pos)
     } else {
-        0.0
+        let p = if duration.as_secs_f32() > 0.0 {
+            position.as_secs_f32() / duration.as_secs_f32()
+        } else {
+            0.0
+        };
+        (p, position)
     };
 
     // --- Left: cover art + track info ---
@@ -128,8 +140,12 @@ pub fn playback_bar<'a>(
 
     // --- Seek bar with time labels ---
     let seek_bar = widget::row()
-        .push(widget::text::caption(format_time(position)))
-        .push(widget::slider(0.0..=1.0, progress, NowPlayingMessage::Seek).width(Length::Fill))
+        .push(widget::text::caption(format_time(display_position)))
+        .push(
+            widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
+                .on_release(NowPlayingMessage::SeekCommit)
+                .width(Length::Fill),
+        )
         .push(widget::text::caption(format_time(duration)))
         .spacing(8)
         .align_y(Alignment::Center)
