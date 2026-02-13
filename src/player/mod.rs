@@ -206,6 +206,7 @@ impl Player {
 
     /// Play the next track in the queue.
     /// Returns the track that is now playing, or None if queue is empty.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<&Track>, String> {
         if self.queue.is_empty() {
             return Ok(None);

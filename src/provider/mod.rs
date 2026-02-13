@@ -119,6 +119,12 @@ pub struct ProviderRegistry {
     active_provider_id: String,
 }
 
+impl Default for ProviderRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProviderRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
