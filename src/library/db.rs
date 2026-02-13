@@ -4,6 +4,7 @@
 
 use super::{Album, Artist, Track};
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -45,6 +46,18 @@ impl LibraryDb {
     /// Open or create the database at the given path.
     pub fn open(db_path: &Path) -> Result<Self, String> {
         let conn = Connection::open(db_path).map_err(|e| format!("DB open error: {e}"))?;
+
+        // Performance-critical PRAGMAs — set before schema creation.
+        // WAL enables concurrent reads during background scans;
+        // synchronous=NORMAL is safe with WAL and reduces fsync overhead;
+        // cache_size=-8000 gives an 8 MB page cache.
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA cache_size=-8000;",
+        )
+        .map_err(|e| format!("DB PRAGMA error: {e}"))?;
+
         conn.execute_batch(SCHEMA_BASE)
             .map_err(|e| format!("DB init error: {e}"))?;
 
@@ -154,6 +167,9 @@ impl LibraryDb {
     }
 
     /// Remove tracks whose paths no longer exist on disk (local provider only).
+    ///
+    /// Uses batched `DELETE ... WHERE id IN (...)` inside a transaction for
+    /// efficiency instead of one DELETE per row.
     pub fn remove_missing_tracks(&self) -> Result<usize, String> {
         let mut stmt = self
             .conn
@@ -173,11 +189,34 @@ impl LibraryDb {
             .collect();
 
         let count = missing.len();
-        for id in &missing {
-            self.conn
-                .execute("DELETE FROM tracks WHERE id = ?1", params![id])
-                .ok();
+        if count == 0 {
+            return Ok(0);
         }
+
+        // Batch deletes in chunks of 999 (SQLite variable limit) inside a transaction.
+        self.conn
+            .execute_batch("BEGIN")
+            .map_err(|e| format!("Transaction begin error: {e}"))?;
+
+        // SQLite max variable number is 999 by default.
+        for chunk in missing.chunks(999) {
+            let placeholders: String = (1..=chunk.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("DELETE FROM tracks WHERE id IN ({placeholders})");
+            let params: Vec<&dyn rusqlite::types::ToSql> = chunk
+                .iter()
+                .map(|id| id as &dyn rusqlite::types::ToSql)
+                .collect();
+            self.conn
+                .execute(&sql, params.as_slice())
+                .map_err(|e| format!("Batch delete error: {e}"))?;
+        }
+
+        self.conn
+            .execute_batch("COMMIT")
+            .map_err(|e| format!("Transaction commit error: {e}"))?;
 
         Ok(count)
     }
@@ -236,17 +275,21 @@ impl LibraryDb {
     }
 
     /// Get all albums (grouped from tracks), optionally filtered by provider.
+    ///
+    /// Uses a HashMap index for O(1) grouping instead of linear search.
     pub fn all_albums(&self, provider: Option<&str>) -> Result<Vec<Album>, String> {
         let tracks = self.all_tracks(provider)?;
         let mut albums: Vec<Album> = Vec::new();
+        // Index maps (album_name, album_artist) → position in `albums` vec.
+        let mut index: HashMap<(String, String), usize> = HashMap::new();
 
         for track in tracks {
-            if let Some(album) = albums.iter_mut().find(|a| {
-                a.name.as_str() == track.album.as_str()
-                    && a.artist.as_str() == track.album_artist.as_str()
-            }) {
-                album.tracks.push(track);
+            let key = (track.album.clone(), track.album_artist.clone());
+            if let Some(&idx) = index.get(&key) {
+                albums[idx].tracks.push(track);
             } else {
+                let idx = albums.len();
+                index.insert(key, idx);
                 albums.push(Album {
                     name: track.album.clone(),
                     artist: track.album_artist.clone(),
@@ -262,15 +305,20 @@ impl LibraryDb {
     }
 
     /// Get all artists (grouped from albums), optionally filtered by provider.
+    ///
+    /// Uses a HashMap index for O(1) grouping instead of linear search.
     pub fn all_artists(&self, provider: Option<&str>) -> Result<Vec<Artist>, String> {
         let albums = self.all_albums(provider)?;
         let mut artists: Vec<Artist> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
 
         for album in albums {
-            if let Some(artist) = artists.iter_mut().find(|a| a.name == album.artist) {
-                artist.albums.push(album);
+            if let Some(&idx) = index.get(&album.artist) {
+                artists[idx].albums.push(album);
             } else {
+                let idx = artists.len();
                 let name = album.artist.clone();
+                index.insert(name.clone(), idx);
                 artists.push(Artist {
                     name,
                     albums: vec![album],
