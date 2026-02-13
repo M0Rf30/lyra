@@ -4,6 +4,7 @@
 
 use crate::fl;
 use cosmic::iced::Alignment;
+use cosmic::iced_core::Color;
 use cosmic::prelude::*;
 use cosmic::widget;
 
@@ -218,7 +219,7 @@ fn mpd_server_card<'a>(
         .push(widget::button::destructive(fl!("remove")).on_press(ProvidersMessage::Remove(index)));
 
     if let Some(status) = connection_status {
-        buttons = buttons.push(widget::text::caption(status.to_string()));
+        buttons = buttons.push(status_label(status));
     }
 
     widget::column()
@@ -274,7 +275,7 @@ fn subsonic_server_card<'a>(
     );
 
     if let Some(status) = connection_status {
-        buttons = buttons.push(widget::text::caption(status.to_string()));
+        buttons = buttons.push(status_label(status));
     }
 
     widget::column()
@@ -291,5 +292,27 @@ fn subsonic_server_card<'a>(
         .push(buttons)
         .push(widget::divider::horizontal::default())
         .spacing(8)
+        .into()
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+/// Render a connection status label with color coding.
+///
+/// Green for "Connected", red for anything else (connection failed + error).
+fn status_label<'a, M: 'a>(status: &str) -> cosmic::Element<'a, M> {
+    let connected_text = crate::fl!("connected");
+    let is_connected = status == connected_text;
+
+    let color = if is_connected {
+        Color::from_rgb(0.2, 0.8, 0.2) // green
+    } else {
+        Color::from_rgb(0.9, 0.2, 0.2) // red
+    };
+
+    let dot = "● ";
+
+    widget::text::caption(format!("{dot}{status}"))
+        .class(cosmic::theme::Text::Color(color))
         .into()
 }

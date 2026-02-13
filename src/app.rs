@@ -156,6 +156,12 @@ pub struct AppModel {
     /// PlaybackTick skips position updates to avoid fighting the slider drag.
     last_seek_at: Option<Instant>,
 
+    // Scrobble state (Subsonic)
+    /// Whether a "now playing" notification has been sent for the current track.
+    scrobble_now_playing_sent: bool,
+    /// Whether the current track has been scrobbled (to avoid duplicates).
+    scrobble_sent: bool,
+
     // View state
     selected_album: Option<usize>,
     selected_artist: Option<usize>,
@@ -437,6 +443,8 @@ impl cosmic::Application for AppModel {
             playback_position: Duration::ZERO,
             current_track: None,
             last_seek_at: None,
+            scrobble_now_playing_sent: false,
+            scrobble_sent: false,
             selected_album: None,
             selected_artist: None,
             songs_sort: songs::SortField::Title,
@@ -1070,8 +1078,17 @@ impl cosmic::Application for AppModel {
                             self.current_track = Some(track.clone());
                             self.playback_position = Duration::ZERO;
                             self.lyrics_text = None;
+                            self.scrobble_now_playing_sent = false;
+                            self.scrobble_sent = false;
                         }
                     }
+                }
+
+                // Subsonic scrobbling: send "now playing" on first tick,
+                // scrobble at 50% or 4 minutes (whichever is first).
+                // Clone track to avoid borrow conflict with &mut self.
+                if let Some(track) = self.current_track.clone() {
+                    self.handle_scrobble(track);
                 }
             }
 
@@ -1315,6 +1332,17 @@ impl cosmic::Application for AppModel {
             // -- MPD provider events --
             Message::MpdConnected(provider_id) => {
                 log::info!("MPD provider '{provider_id}' is now connected");
+
+                // Update connection status for the matching provider card.
+                if let Some(idx) = self
+                    .mpd_edit_states
+                    .iter()
+                    .position(|s| s.id == provider_id)
+                    && let Some(s) = self.mpd_connection_status.get_mut(idx)
+                {
+                    *s = Some(fl!("connected"));
+                }
+
                 // If this is the active provider, recreate the player with MpdBackend
                 // and reload the library.
                 if self.registry.active_id() == provider_id {
@@ -1325,6 +1353,16 @@ impl cosmic::Application for AppModel {
 
             Message::MpdConnectionFailed(provider_id, error) => {
                 log::error!("MPD provider '{provider_id}' failed to connect: {error}");
+
+                // Update connection status for the matching provider card.
+                if let Some(idx) = self
+                    .mpd_edit_states
+                    .iter()
+                    .position(|s| s.id == provider_id)
+                    && let Some(s) = self.mpd_connection_status.get_mut(idx)
+                {
+                    *s = Some(format!("{}: {error}", fl!("connection-failed")));
+                }
             }
 
             Message::MpdIdleEvent(provider_id) => {
@@ -1866,6 +1904,44 @@ impl AppModel {
         }
     }
 
+    /// Handle scrobble logic for the current track.
+    ///
+    /// Sends a "now playing" notification on first call for a track, then
+    /// scrobbles when playback reaches 50% of duration or 4 minutes
+    /// (whichever comes first). Only applies to Subsonic tracks.
+    fn handle_scrobble(&mut self, track: Track) {
+        // Only scrobble Subsonic tracks.
+        let provider = match self
+            .subsonic_providers
+            .iter()
+            .find(|p| p.id() == track.provider_id)
+        {
+            Some(p) => Arc::clone(p),
+            None => return,
+        };
+
+        // The Subsonic song ID is stored in track.path (set by child_to_track).
+        let song_id = track.path.to_string_lossy().to_string();
+
+        // Send "now playing" notification once per track.
+        if !self.scrobble_now_playing_sent {
+            self.scrobble_now_playing_sent = true;
+            provider.now_playing(&song_id);
+        }
+
+        // Scrobble at 50% of duration or 4 minutes, whichever is first.
+        if !self.scrobble_sent {
+            let half_duration = track.duration / 2;
+            let four_minutes = Duration::from_secs(240);
+            let threshold = half_duration.min(four_minutes);
+
+            if self.playback_position >= threshold && threshold > Duration::ZERO {
+                self.scrobble_sent = true;
+                provider.scrobble(&song_id);
+            }
+        }
+    }
+
     /// Rebuild the `all_artists` list by grouping `all_albums` by artist name.
     ///
     /// Called after each incremental batch to keep the artist view in sync
@@ -1901,6 +1977,8 @@ impl AppModel {
                 self.current_track = tracks.get(start_index).cloned();
                 self.playback_position = Duration::ZERO;
                 self.lyrics_text = None;
+                self.scrobble_now_playing_sent = false;
+                self.scrobble_sent = false;
             }
         }
     }
