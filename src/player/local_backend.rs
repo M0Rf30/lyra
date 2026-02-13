@@ -10,7 +10,7 @@ use super::PlaybackState;
 use crate::library::TrackSource;
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use std::fs::File;
-use std::io::{BufReader, Cursor};
+use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -74,10 +74,16 @@ impl LocalBackend {
 
     /// Internal: play an HTTP stream (e.g. Subsonic `stream` URL).
     ///
-    /// Downloads the audio in a background thread so the UI stays responsive.
-    /// The sink is created immediately (in paused/empty state), and once the
-    /// download+decode finishes the source is appended and playback begins.
+    /// Uses [`HttpRangeReader`] to stream audio from the server. The reader
+    /// implements `Read + Seek` via HTTP Range requests, so:
+    /// - Playback starts immediately (no full download needed).
+    /// - Seeking works by re-requesting with `Range: bytes=N-`.
+    ///
+    /// The initial connection + probe is done in a background thread to
+    /// avoid blocking the UI.
     fn play_http_stream(&mut self, url: String) -> Result<(), PlayerError> {
+        use super::http_range_reader::HttpRangeReader;
+
         // Stop current playback
         let sink = self.lock_sink()?;
         sink.stop();
@@ -87,15 +93,14 @@ impl LocalBackend {
         // will append the decoded source and un-pause.
         let new_sink = Sink::connect_new(self.stream.mixer());
         new_sink.set_volume(self.volume);
-        new_sink.pause(); // Don't play until audio is ready
+        new_sink.pause();
         let sink_arc = Arc::new(Mutex::new(new_sink));
         self.sink = Arc::clone(&sink_arc);
 
-        // Transition to Playing state with zero duration (updated later).
         self.state = PlaybackState::Playing;
         *self.current_duration.lock().unwrap() = Duration::ZERO;
         self.base_position = Duration::ZERO;
-        *self.play_started_at.lock().unwrap() = None; // Set once download completes
+        *self.play_started_at.lock().unwrap() = None;
         self.loading.store(true, Ordering::Release);
 
         let duration_arc = Arc::clone(&self.current_duration);
@@ -104,24 +109,23 @@ impl LocalBackend {
 
         std::thread::spawn(move || {
             let result = (|| -> Result<(), String> {
-                let bytes = reqwest::blocking::get(&url)
-                    .map_err(|e| format!("HTTP stream request failed: {e}"))?
-                    .bytes()
-                    .map_err(|e| format!("HTTP stream read failed: {e}"))?;
+                let reader = HttpRangeReader::new(url)?;
+                let byte_len = reader.content_length();
 
-                log::info!(
-                    "HTTP stream downloaded: {} bytes from {}",
-                    bytes.len(),
-                    url.split('?').next().unwrap_or(&url)
-                );
-
-                let cursor = Cursor::new(bytes.to_vec());
-                let source =
-                    Decoder::new(cursor).map_err(|e| format!("Cannot decode HTTP stream: {e}"))?;
+                // Use rodio's builder to set byte_len (enables seeking + duration).
+                let source = if byte_len > 0 {
+                    Decoder::builder()
+                        .with_data(reader)
+                        .with_byte_len(byte_len)
+                        .build()
+                } else {
+                    // Unknown length — seeking won't work but playback will.
+                    Decoder::builder().with_data(reader).build()
+                }
+                .map_err(|e| format!("Cannot decode HTTP stream: {e}"))?;
 
                 let duration = source.total_duration().unwrap_or(Duration::ZERO);
 
-                // Append decoded audio and start playback.
                 if let Ok(sink) = sink_arc.lock() {
                     sink.append(source);
                     sink.play();
@@ -137,7 +141,6 @@ impl LocalBackend {
             if let Err(e) = result {
                 log::error!("HTTP stream playback failed: {e}");
                 loading.store(false, Ordering::Release);
-                // Stop the (empty) sink so is_finished() can detect failure.
                 if let Ok(sink) = sink_arc.lock() {
                     sink.stop();
                 }

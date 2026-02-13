@@ -4,6 +4,7 @@
 
 pub mod backend;
 pub mod equalizer;
+mod http_range_reader;
 pub mod local_backend;
 pub mod mpd_backend;
 
