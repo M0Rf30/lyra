@@ -24,106 +24,6 @@ use std::time::Duration;
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/icon.svg");
 
-/// Wrapper around `Arc<MpdProvider>` that implements `MusicProvider`.
-///
-/// This is needed so we can share the provider between the registry
-/// (which owns `Box<dyn MusicProvider>`) and async connection tasks
-/// (which need `Arc<MpdProvider>`).
-struct MpdProviderWrapper(Arc<MpdProvider>);
-
-impl crate::provider::MusicProvider for MpdProviderWrapper {
-    fn id(&self) -> &str {
-        self.0.id()
-    }
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-    fn provider_type(&self) -> crate::provider::ProviderType {
-        self.0.provider_type()
-    }
-    fn browse_albums(&self) -> Result<Vec<Album>, crate::provider::ProviderError> {
-        self.0.browse_albums()
-    }
-    fn browse_artists(&self) -> Result<Vec<Artist>, crate::provider::ProviderError> {
-        self.0.browse_artists()
-    }
-    fn browse_tracks(&self) -> Result<Vec<Track>, crate::provider::ProviderError> {
-        self.0.browse_tracks()
-    }
-    fn search(&self, query: &str) -> Result<Vec<Track>, crate::provider::ProviderError> {
-        self.0.search(query)
-    }
-    fn resolve_audio(
-        &self,
-        track: &Track,
-    ) -> Result<crate::library::TrackSource, crate::provider::ProviderError> {
-        self.0.resolve_audio(track)
-    }
-    fn get_cover_art(
-        &self,
-        album: &Album,
-    ) -> Result<Option<Vec<u8>>, crate::provider::ProviderError> {
-        self.0.get_cover_art(album)
-    }
-    fn get_lyrics(
-        &self,
-        track: &Track,
-    ) -> Result<Option<String>, crate::provider::ProviderError> {
-        self.0.get_lyrics(track)
-    }
-    fn sync_library(&self) -> Result<usize, crate::provider::ProviderError> {
-        self.0.sync_library()
-    }
-}
-
-/// Wrapper around `Arc<SubsonicProvider>` that implements `MusicProvider`.
-struct SubsonicProviderWrapper(Arc<SubsonicProvider>);
-
-impl crate::provider::MusicProvider for SubsonicProviderWrapper {
-    fn id(&self) -> &str {
-        self.0.id()
-    }
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-    fn provider_type(&self) -> crate::provider::ProviderType {
-        self.0.provider_type()
-    }
-    fn browse_albums(&self) -> Result<Vec<Album>, crate::provider::ProviderError> {
-        self.0.browse_albums()
-    }
-    fn browse_artists(&self) -> Result<Vec<Artist>, crate::provider::ProviderError> {
-        self.0.browse_artists()
-    }
-    fn browse_tracks(&self) -> Result<Vec<Track>, crate::provider::ProviderError> {
-        self.0.browse_tracks()
-    }
-    fn search(&self, query: &str) -> Result<Vec<Track>, crate::provider::ProviderError> {
-        self.0.search(query)
-    }
-    fn resolve_audio(
-        &self,
-        track: &Track,
-    ) -> Result<crate::library::TrackSource, crate::provider::ProviderError> {
-        self.0.resolve_audio(track)
-    }
-    fn get_cover_art(
-        &self,
-        album: &Album,
-    ) -> Result<Option<Vec<u8>>, crate::provider::ProviderError> {
-        self.0.get_cover_art(album)
-    }
-    fn get_lyrics(
-        &self,
-        track: &Track,
-    ) -> Result<Option<String>, crate::provider::ProviderError> {
-        self.0.get_lyrics(track)
-    }
-    fn sync_library(&self) -> Result<usize, crate::provider::ProviderError> {
-        self.0.sync_library()
-    }
-}
-
 /// Main application model.
 pub struct AppModel {
     core: cosmic::Core,
@@ -293,6 +193,30 @@ pub enum Message {
     Quit,
 }
 
+impl From<albums::AlbumMessage> for Message {
+    fn from(msg: albums::AlbumMessage) -> Self {
+        match msg {
+            albums::AlbumMessage::PlayAlbum(i) => Message::PlayAlbum(i),
+            albums::AlbumMessage::PlayTrack(ai, ti) => Message::PlayAlbumTrack(ai, ti),
+            albums::AlbumMessage::SelectAlbum(i) => Message::SelectAlbum(i),
+            albums::AlbumMessage::BackToGrid => Message::BackToAlbumGrid,
+        }
+    }
+}
+
+impl From<artists::ArtistMessage> for Message {
+    fn from(msg: artists::ArtistMessage) -> Self {
+        match msg {
+            artists::ArtistMessage::PlayArtistAlbum(ai, ali) => Message::PlayArtistAlbum(ai, ali),
+            artists::ArtistMessage::PlayTrack(ai, ali, ti) => {
+                Message::PlayArtistTrack(ai, ali, ti)
+            }
+            artists::ArtistMessage::SelectArtist(i) => Message::SelectArtist(i),
+            artists::ArtistMessage::BackToList => Message::BackToArtistList,
+        }
+    }
+}
+
 impl cosmic::Application for AppModel {
     type Executor = cosmic::executor::Default;
     type Flags = ();
@@ -357,7 +281,7 @@ impl cosmic::Application for AppModel {
         let mut registry = ProviderRegistry::new();
         if let Ok(db) = LibraryDb::open(&db_path) {
             let local = LocalProvider::new(db, config.music_dirs.clone());
-            registry.register(Box::new(local));
+            registry.register(Arc::new(local));
         } else {
             log::error!("Failed to open library database");
         }
@@ -372,7 +296,7 @@ impl cosmic::Application for AppModel {
             let mpd_config: MpdConfig = entry.clone().into();
             let provider = Arc::new(MpdProvider::new(mpd_config, rt_handle.clone()));
             mpd_providers.push(Arc::clone(&provider));
-            registry.register(Box::new(MpdProviderWrapper(provider)));
+            registry.register(Arc::clone(&provider) as Arc<dyn MusicProvider>);
         }
 
         // Initialize Subsonic providers from config.
@@ -383,23 +307,13 @@ impl cosmic::Application for AppModel {
                 Ok(provider) => {
                     let provider = Arc::new(provider);
                     subsonic_providers.push(Arc::clone(&provider));
-                    registry.register(Box::new(SubsonicProviderWrapper(provider)));
+                    registry.register(Arc::clone(&provider) as Arc<dyn MusicProvider>);
                 }
                 Err(e) => {
                     log::error!("Failed to create Subsonic provider '{}': {e}", entry.name);
                 }
             }
         }
-
-        // Build provider list for the dropdown selector
-        let provider_entries = registry.list();
-        let provider_list: Vec<(String, String)> = provider_entries
-            .iter()
-            .map(|(id, name, _)| (id.clone(), name.clone()))
-            .collect();
-        let active_provider_index = provider_list
-            .iter()
-            .position(|(id, _)| id == registry.active_id());
 
         // Build editing state for MPD servers
         let mpd_edit_states: Vec<providers::MpdEditState> = config
@@ -437,8 +351,8 @@ impl cosmic::Application for AppModel {
             context_page: ContextPage::default(),
             registry,
             mpd_providers,
-            provider_list,
-            active_provider_index,
+            provider_list: Vec::new(),
+            active_provider_index: None,
             all_tracks: Vec::new(),
             all_albums: Vec::new(),
             all_artists: Vec::new(),
@@ -464,6 +378,7 @@ impl cosmic::Application for AppModel {
             subsonic_providers,
         };
 
+        app.rebuild_provider_list();
         let title_cmd = app.update_title();
 
         // Trigger initial library scan
@@ -651,58 +566,33 @@ impl cosmic::Application for AppModel {
             Page::Albums => {
                 if let Some(album_idx) = self.selected_album {
                     if let Some(album) = self.all_albums.get(album_idx) {
-                        albums::album_detail_view(album, album_idx, &self.cover_images).map(|msg| match msg {
-                            albums::AlbumMessage::PlayAlbum(i) => Message::PlayAlbum(i),
-                            albums::AlbumMessage::PlayTrack(ai, ti) => {
-                                Message::PlayAlbumTrack(ai, ti)
-                            }
-                            albums::AlbumMessage::SelectAlbum(i) => Message::SelectAlbum(i),
-                            albums::AlbumMessage::BackToGrid => Message::BackToAlbumGrid,
-                        })
+                        albums::album_detail_view(album, album_idx, &self.cover_images)
+                            .map(Message::from)
                     } else {
                         widget::text("Album not found").into()
                     }
                 } else {
-                    albums::album_grid_view(&self.all_albums, &self.cover_images).map(|msg| {
-                        match msg {
-                            albums::AlbumMessage::SelectAlbum(i) => Message::SelectAlbum(i),
-                            albums::AlbumMessage::PlayAlbum(i) => Message::PlayAlbum(i),
-                            albums::AlbumMessage::PlayTrack(ai, ti) => {
-                                Message::PlayAlbumTrack(ai, ti)
-                            }
-                            albums::AlbumMessage::BackToGrid => Message::BackToAlbumGrid,
-                        }
-                    })
+                    albums::album_grid_view(&self.all_albums, &self.cover_images)
+                        .map(Message::from)
                 }
             }
 
             Page::Artists => {
                 if let Some(artist_idx) = self.selected_artist {
                     if let Some(artist) = self.all_artists.get(artist_idx) {
-                        artists::artist_detail_view(artist, artist_idx, &self.artist_avatars, &self.cover_images).map(|msg| match msg {
-                            artists::ArtistMessage::PlayArtistAlbum(ai, ali) => {
-                                Message::PlayArtistAlbum(ai, ali)
-                            }
-                            artists::ArtistMessage::PlayTrack(ai, ali, ti) => {
-                                Message::PlayArtistTrack(ai, ali, ti)
-                            }
-                            artists::ArtistMessage::SelectArtist(i) => Message::SelectArtist(i),
-                            artists::ArtistMessage::BackToList => Message::BackToArtistList,
-                        })
+                        artists::artist_detail_view(
+                            artist,
+                            artist_idx,
+                            &self.artist_avatars,
+                            &self.cover_images,
+                        )
+                        .map(Message::from)
                     } else {
                         widget::text("Artist not found").into()
                     }
                 } else {
-                    artists::artist_list_view(&self.all_artists, &self.artist_avatars).map(|msg| match msg {
-                        artists::ArtistMessage::SelectArtist(i) => Message::SelectArtist(i),
-                        artists::ArtistMessage::PlayArtistAlbum(ai, ali) => {
-                            Message::PlayArtistAlbum(ai, ali)
-                        }
-                        artists::ArtistMessage::PlayTrack(ai, ali, ti) => {
-                            Message::PlayArtistTrack(ai, ali, ti)
-                        }
-                        artists::ArtistMessage::BackToList => Message::BackToArtistList,
-                    })
+                    artists::artist_list_view(&self.all_artists, &self.artist_avatars)
+                        .map(Message::from)
                 }
             }
 
@@ -1507,6 +1397,22 @@ impl cosmic::Application for AppModel {
 }
 
 impl AppModel {
+    /// Rebuild `provider_list` and `active_provider_index` from the registry.
+    ///
+    /// Call after any change to the set of registered providers (init,
+    /// reinit_mpd_providers, reinit_subsonic_providers).
+    fn rebuild_provider_list(&mut self) {
+        let entries = self.registry.list();
+        self.provider_list = entries
+            .iter()
+            .map(|(id, name, _)| (id.clone(), name.clone()))
+            .collect();
+        self.active_provider_index = self
+            .provider_list
+            .iter()
+            .position(|(id, _)| id == self.registry.active_id());
+    }
+
     fn update_title(&mut self) -> Task<cosmic::Action<Message>> {
         let mut title = fl!("app-title");
 
@@ -1791,19 +1697,10 @@ impl AppModel {
             let provider = Arc::new(MpdProvider::new(mpd_config, rt_handle.clone()));
             self.mpd_providers.push(Arc::clone(&provider));
             self.registry
-                .register(Box::new(MpdProviderWrapper(provider)));
+                .register(Arc::clone(&provider) as Arc<dyn MusicProvider>);
         }
 
-        // Rebuild provider list for the dropdown
-        let provider_entries = self.registry.list();
-        self.provider_list = provider_entries
-            .iter()
-            .map(|(id, name, _)| (id.clone(), name.clone()))
-            .collect();
-        self.active_provider_index = self
-            .provider_list
-            .iter()
-            .position(|(id, _)| id == self.registry.active_id());
+        self.rebuild_provider_list();
 
         // Rebuild edit states
         self.mpd_edit_states = self
@@ -1847,7 +1744,7 @@ impl AppModel {
                     let provider = Arc::new(provider);
                     self.subsonic_providers.push(Arc::clone(&provider));
                     self.registry
-                        .register(Box::new(SubsonicProviderWrapper(provider)));
+                        .register(Arc::clone(&provider) as Arc<dyn MusicProvider>);
                 }
                 Err(e) => {
                     log::error!("Failed to create Subsonic provider '{}': {e}", entry.name);
@@ -1855,16 +1752,7 @@ impl AppModel {
             }
         }
 
-        // Rebuild provider list for the dropdown
-        let provider_entries = self.registry.list();
-        self.provider_list = provider_entries
-            .iter()
-            .map(|(id, name, _)| (id.clone(), name.clone()))
-            .collect();
-        self.active_provider_index = self
-            .provider_list
-            .iter()
-            .position(|(id, _)| id == self.registry.active_id());
+        self.rebuild_provider_list();
 
         // Rebuild edit states
         self.subsonic_edit_states = self

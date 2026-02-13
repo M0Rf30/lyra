@@ -19,6 +19,11 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
+/// Helper to wrap MPD errors into `ProviderError::Io` with a labeled context.
+fn mpd_err<E: std::fmt::Display>(op: &str) -> impl FnOnce(E) -> ProviderError + '_ {
+    move |e| ProviderError::Io(format!("MPD {op}: {e}"))
+}
+
 /// Configuration for connecting to an MPD server.
 #[derive(Debug, Clone)]
 pub struct MpdConfig {
@@ -186,7 +191,7 @@ impl MpdProvider {
         let album_list = client
             .command(List::new(Tag::Album))
             .await
-            .map_err(|e| ProviderError::Io(format!("MPD list album: {e}")))?;
+            .map_err(mpd_err("list album"))?;
 
         Ok(album_list
             .into_iter()
@@ -211,35 +216,20 @@ impl MpdProvider {
             let songs = client
                 .command(Find::new(filter))
                 .await
-                .map_err(|e| ProviderError::Io(format!("MPD find: {e}")))?;
+                .map_err(mpd_err("find"))?;
 
             if songs.is_empty() {
                 continue;
             }
 
             let mut tracks: Vec<Track> = songs.iter().map(|s| self.song_to_track(s)).collect();
-            tracks.sort_by(|a, b| {
-                a.disc_number
-                    .cmp(&b.disc_number)
-                    .then(a.track_number.cmp(&b.track_number))
-            });
+            Track::sort_by_disc_and_track(&mut tracks);
 
-            let artist = tracks
-                .first()
-                .map(|t| t.album_artist.clone())
-                .unwrap_or_default();
-            let year = tracks.first().map(|t| t.year).unwrap_or(0);
             let cover_source = tracks
                 .first()
                 .map(|t| CoverSource::MpdAlbumArt(t.source_uri.clone()));
 
-            albums.push(Album {
-                name: album_name.clone(),
-                artist,
-                year,
-                tracks,
-                cover_source,
-            });
+            albums.push(Album::from_tracks(album_name.clone(), tracks, cover_source));
         }
 
         Ok(albums)
@@ -251,7 +241,7 @@ impl MpdProvider {
         client
             .command(Status)
             .await
-            .map_err(|e| ProviderError::Io(format!("MPD status: {e}")))
+            .map_err(mpd_err("status"))
     }
 
     /// Query current song (async).
@@ -262,7 +252,7 @@ impl MpdProvider {
         client
             .command(CurrentSong)
             .await
-            .map_err(|e| ProviderError::Io(format!("MPD currentsong: {e}")))
+            .map_err(mpd_err("currentsong"))
     }
 
     /// Convert an `mpd_client` Song to our Track model.
@@ -331,59 +321,8 @@ impl MusicProvider for MpdProvider {
 
     fn browse_albums(&self) -> Result<Vec<Album>, ProviderError> {
         self.block_on(async {
-            let client = self.get_client().await?;
-
-            // Get all unique album names
-            let album_list = client
-                .command(List::new(Tag::Album))
-                .await
-                .map_err(|e| ProviderError::Io(format!("MPD list album: {e}")))?;
-
-            let album_names: Vec<String> = album_list.into_iter().collect();
-            let mut albums = Vec::new();
-
-            for album_name in &album_names {
-                if album_name.is_empty() {
-                    continue;
-                }
-
-                // Find all songs in this album
-                let filter = Filter::tag(Tag::Album, album_name);
-                let songs = client
-                    .command(Find::new(filter))
-                    .await
-                    .map_err(|e| ProviderError::Io(format!("MPD find: {e}")))?;
-
-                if songs.is_empty() {
-                    continue;
-                }
-
-                let mut tracks: Vec<Track> =
-                    songs.iter().map(|s| self.song_to_track(s)).collect();
-                tracks.sort_by(|a, b| {
-                    a.disc_number
-                        .cmp(&b.disc_number)
-                        .then(a.track_number.cmp(&b.track_number))
-                });
-
-                let artist = tracks
-                    .first()
-                    .map(|t| t.album_artist.clone())
-                    .unwrap_or_default();
-                let year = tracks.first().map(|t| t.year).unwrap_or(0);
-                let cover_source = tracks
-                    .first()
-                    .map(|t| CoverSource::MpdAlbumArt(t.source_uri.clone()));
-
-                albums.push(Album {
-                    name: album_name.clone(),
-                    artist,
-                    year,
-                    tracks,
-                    cover_source,
-                });
-            }
-
+            let names = self.list_album_names().await?;
+            let mut albums = self.browse_albums_batch(&names).await?;
             albums.sort_by(|a, b| a.name.cmp(&b.name));
             Ok(albums)
         })
@@ -396,7 +335,7 @@ impl MusicProvider for MpdProvider {
             let artist_list = client
                 .command(List::new(Tag::AlbumArtist))
                 .await
-                .map_err(|e| ProviderError::Io(format!("MPD list albumartist: {e}")))?;
+                .map_err(mpd_err("list albumartist"))?;
 
             let artist_names: Vec<String> = artist_list.into_iter().collect();
             let mut artists = Vec::new();
@@ -411,7 +350,7 @@ impl MusicProvider for MpdProvider {
                 let album_list = client
                     .command(List::new(Tag::Album).filter(filter))
                     .await
-                    .map_err(|e| ProviderError::Io(format!("MPD list album: {e}")))?;
+                    .map_err(mpd_err("list album"))?;
 
                 let album_names: Vec<String> = album_list.into_iter().collect();
                 let mut artist_albums = Vec::new();
@@ -426,28 +365,19 @@ impl MusicProvider for MpdProvider {
                     let songs = client
                         .command(Find::new(filter))
                         .await
-                        .map_err(|e| ProviderError::Io(format!("MPD find: {e}")))?;
+                        .map_err(mpd_err("find"))?;
 
                     let mut tracks: Vec<Track> =
                         songs.iter().map(|s| self.song_to_track(s)).collect();
-                    tracks.sort_by(|a, b| {
-                        a.disc_number
-                            .cmp(&b.disc_number)
-                            .then(a.track_number.cmp(&b.track_number))
-                    });
+                    Track::sort_by_disc_and_track(&mut tracks);
 
-                    let year = tracks.first().map(|t| t.year).unwrap_or(0);
                     let cover_source = tracks
                         .first()
                         .map(|t| CoverSource::MpdAlbumArt(t.source_uri.clone()));
 
-                    artist_albums.push(Album {
-                        name: album_name.clone(),
-                        artist: artist_name.clone(),
-                        year,
-                        tracks,
-                        cover_source,
-                    });
+                    let mut album = Album::from_tracks(album_name.clone(), tracks, cover_source);
+                    album.artist = artist_name.clone();
+                    artist_albums.push(album);
                 }
 
                 artist_albums.sort_by(|a, b| a.year.cmp(&b.year));
@@ -471,7 +401,7 @@ impl MusicProvider for MpdProvider {
             let songs = client
                 .command(commands::ListAllIn::root())
                 .await
-                .map_err(|e| ProviderError::Io(format!("MPD listallinfo: {e}")))?;
+                .map_err(mpd_err("listallinfo"))?;
 
             let mut tracks: Vec<Track> = songs.iter().map(|s| self.song_to_track(s)).collect();
             tracks.sort_by(|a, b| a.title.cmp(&b.title));
@@ -491,7 +421,7 @@ impl MusicProvider for MpdProvider {
             let songs = client
                 .command(Find::new(filter))
                 .await
-                .map_err(|e| ProviderError::Io(format!("MPD search: {e}")))?;
+                .map_err(mpd_err("search"))?;
 
             let tracks: Vec<Track> = songs.iter().map(|s| self.song_to_track(s)).collect();
             Ok(tracks)
@@ -533,7 +463,7 @@ impl MusicProvider for MpdProvider {
             client
                 .command(Update::new())
                 .await
-                .map_err(|e| ProviderError::Io(format!("MPD update: {e}")))?;
+                .map_err(mpd_err("update"))?;
             Ok(0)
         })
     }

@@ -12,6 +12,11 @@ use opensubsonic::{Auth, Client};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Helper to wrap Subsonic errors into `ProviderError::Io` with a labeled context.
+fn subsonic_err<E: std::fmt::Display>(op: &str) -> impl FnOnce(E) -> ProviderError + '_ {
+    move |e| ProviderError::Io(format!("Subsonic {op}: {e}"))
+}
+
 /// Configuration for connecting to a Subsonic-compatible server.
 #[derive(Debug, Clone)]
 pub struct SubsonicConfig {
@@ -168,8 +173,57 @@ impl SubsonicProvider {
         offset: i32,
         page_size: i32,
     ) -> Result<(Vec<Album>, bool), ProviderError> {
-        let album_list = self
-            .client
+        let album_list = self.fetch_album_list(page_size, offset).await?;
+
+        let count = album_list.len();
+        let mut albums = Vec::with_capacity(count);
+
+        for album_id3 in &album_list {
+            let album_detail = self
+                .client
+                .get_album(&album_id3.id)
+                .await
+                .map_err(subsonic_err("getAlbum"))?;
+
+            let mut tracks: Vec<Track> = album_detail
+                .song
+                .iter()
+                .map(|s| self.child_to_track(s))
+                .collect();
+            Track::sort_by_disc_and_track(&mut tracks);
+
+            let cover_source = self.cover_source_from_id(&album_detail.cover_art);
+
+            let mut album = Album::from_tracks(album_detail.name.clone(), tracks, cover_source);
+            // Override artist from album metadata (more reliable than first track).
+            if let Some(artist) = &album_detail.artist {
+                album.artist = artist.clone();
+            }
+            album.year = album_detail.year.unwrap_or(0) as u32;
+            albums.push(album);
+        }
+
+        let has_more = count >= page_size as usize;
+        Ok((albums, has_more))
+    }
+
+    /// Build a `CoverSource` from a Subsonic cover art ID.
+    fn cover_source_from_id(&self, cover_id: &Option<String>) -> Option<CoverSource> {
+        cover_id.as_ref().and_then(|id| {
+            self.client
+                .cover_art_url(id, Some(300))
+                .ok()
+                .map(|url| CoverSource::Url(url.to_string()))
+        })
+    }
+
+    /// Fetch a page of album stubs from `getAlbumList2`.
+    async fn fetch_album_list(
+        &self,
+        page_size: i32,
+        offset: i32,
+    ) -> Result<Vec<opensubsonic::data::AlbumId3>, ProviderError> {
+        self.client
             .get_album_list2(
                 opensubsonic::AlbumListType::AlphabeticalByName,
                 Some(page_size),
@@ -180,53 +234,7 @@ impl SubsonicProvider {
                 None,
             )
             .await
-            .map_err(|e| ProviderError::Io(format!("Subsonic getAlbumList2: {e}")))?;
-
-        let count = album_list.len();
-        let mut albums = Vec::with_capacity(count);
-
-        for album_id3 in &album_list {
-            let album_detail = self
-                .client
-                .get_album(&album_id3.id)
-                .await
-                .map_err(|e| ProviderError::Io(format!("Subsonic getAlbum: {e}")))?;
-
-            let mut tracks: Vec<Track> = album_detail
-                .song
-                .iter()
-                .map(|s| self.child_to_track(s))
-                .collect();
-            tracks.sort_by(|a, b| {
-                a.disc_number
-                    .cmp(&b.disc_number)
-                    .then(a.track_number.cmp(&b.track_number))
-            });
-
-            let artist = album_detail
-                .artist
-                .clone()
-                .unwrap_or_else(|| "Unknown Artist".to_string());
-            let year = album_detail.year.unwrap_or(0) as u32;
-
-            let cover_source = album_detail.cover_art.as_ref().and_then(|cover_id| {
-                self.client
-                    .cover_art_url(cover_id, Some(300))
-                    .ok()
-                    .map(|url| CoverSource::Url(url.to_string()))
-            });
-
-            albums.push(Album {
-                name: album_detail.name.clone(),
-                artist,
-                year,
-                tracks,
-                cover_source,
-            });
-        }
-
-        let has_more = count >= page_size as usize;
-        Ok((albums, has_more))
+            .map_err(subsonic_err("getAlbumList2"))
     }
 
     /// Scrobble a track (mark as played) on the Subsonic server.
@@ -272,77 +280,21 @@ impl MusicProvider for SubsonicProvider {
 
     fn browse_albums(&self) -> Result<Vec<Album>, ProviderError> {
         self.block_on(async {
-            // Paginate through all albums using getAlbumList2 (ID3-based).
             let mut all_albums = Vec::new();
-            let page_size = 500;
             let mut offset = 0;
+            let page_size = 500;
 
             loop {
-                let album_list = self
-                    .client
-                    .get_album_list2(
-                        opensubsonic::AlbumListType::AlphabeticalByName,
-                        Some(page_size),
-                        Some(offset),
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                    .await
-                    .map_err(|e| ProviderError::Io(format!("Subsonic getAlbumList2: {e}")))?;
-
-                let count = album_list.len();
-                if count == 0 {
+                let (batch, has_more) = self.browse_albums_page(offset, page_size).await?;
+                if batch.is_empty() {
                     break;
                 }
-
-                for album_id3 in &album_list {
-                    // Fetch full album details (with songs) for each album.
-                    let album_detail = self
-                        .client
-                        .get_album(&album_id3.id)
-                        .await
-                        .map_err(|e| ProviderError::Io(format!("Subsonic getAlbum: {e}")))?;
-
-                    let mut tracks: Vec<Track> = album_detail
-                        .song
-                        .iter()
-                        .map(|s| self.child_to_track(s))
-                        .collect();
-                    tracks.sort_by(|a, b| {
-                        a.disc_number
-                            .cmp(&b.disc_number)
-                            .then(a.track_number.cmp(&b.track_number))
-                    });
-
-                    let artist = album_detail
-                        .artist
-                        .clone()
-                        .unwrap_or_else(|| "Unknown Artist".to_string());
-                    let year = album_detail.year.unwrap_or(0) as u32;
-
-                    // Build cover source from cover art ID.
-                    let cover_source = album_detail.cover_art.as_ref().and_then(|cover_id| {
-                        self.client
-                            .cover_art_url(cover_id, Some(300))
-                            .ok()
-                            .map(|url| CoverSource::Url(url.to_string()))
-                    });
-
-                    all_albums.push(Album {
-                        name: album_detail.name.clone(),
-                        artist,
-                        year,
-                        tracks,
-                        cover_source,
-                    });
-                }
-
-                if count < page_size as usize {
+                let count = batch.len();
+                all_albums.extend(batch);
+                if !has_more {
                     break;
                 }
-                offset += page_size;
+                offset += count as i32;
             }
 
             all_albums.sort_by(|a, b| a.name.cmp(&b.name));
@@ -356,7 +308,7 @@ impl MusicProvider for SubsonicProvider {
                 .client
                 .get_artists(None)
                 .await
-                .map_err(|e| ProviderError::Io(format!("Subsonic getArtists: {e}")))?;
+                .map_err(subsonic_err("getArtists"))?;
 
             let mut artists = Vec::new();
 
@@ -367,7 +319,7 @@ impl MusicProvider for SubsonicProvider {
                         .client
                         .get_artist(&artist_id3.id)
                         .await
-                        .map_err(|e| ProviderError::Io(format!("Subsonic getArtist: {e}")))?;
+                        .map_err(subsonic_err("getArtist"))?;
 
                     let mut artist_albums = Vec::new();
 
@@ -377,35 +329,25 @@ impl MusicProvider for SubsonicProvider {
                             .client
                             .get_album(&album_id3.id)
                             .await
-                            .map_err(|e| ProviderError::Io(format!("Subsonic getAlbum: {e}")))?;
+                            .map_err(subsonic_err("getAlbum"))?;
 
                         let mut tracks: Vec<Track> = album_detail
                             .song
                             .iter()
                             .map(|s| self.child_to_track(s))
                             .collect();
-                        tracks.sort_by(|a, b| {
-                            a.disc_number
-                                .cmp(&b.disc_number)
-                                .then(a.track_number.cmp(&b.track_number))
-                        });
+                        Track::sort_by_disc_and_track(&mut tracks);
 
-                        let year = album_detail.year.unwrap_or(0) as u32;
-                        let cover_source =
-                            album_detail.cover_art.as_ref().and_then(|cover_id| {
-                                self.client
-                                    .cover_art_url(cover_id, Some(300))
-                                    .ok()
-                                    .map(|url| CoverSource::Url(url.to_string()))
-                            });
+                        let cover_source = self.cover_source_from_id(&album_detail.cover_art);
 
-                        artist_albums.push(Album {
-                            name: album_detail.name.clone(),
-                            artist: artist_id3.name.clone(),
-                            year,
+                        let mut album = Album::from_tracks(
+                            album_detail.name.clone(),
                             tracks,
                             cover_source,
-                        });
+                        );
+                        album.artist = artist_id3.name.clone();
+                        album.year = album_detail.year.unwrap_or(0) as u32;
+                        artist_albums.push(album);
                     }
 
                     artist_albums.sort_by(|a, b| a.year.cmp(&b.year));
@@ -424,25 +366,12 @@ impl MusicProvider for SubsonicProvider {
 
     fn browse_tracks(&self) -> Result<Vec<Track>, ProviderError> {
         self.block_on(async {
-            // Collect all tracks by paginating through albums and extracting songs.
             let mut all_tracks = Vec::new();
             let page_size = 500;
             let mut offset = 0;
 
             loop {
-                let album_list = self
-                    .client
-                    .get_album_list2(
-                        opensubsonic::AlbumListType::AlphabeticalByName,
-                        Some(page_size),
-                        Some(offset),
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                    .await
-                    .map_err(|e| ProviderError::Io(format!("Subsonic getAlbumList2: {e}")))?;
+                let album_list = self.fetch_album_list(page_size, offset).await?;
 
                 let count = album_list.len();
                 if count == 0 {
@@ -454,7 +383,7 @@ impl MusicProvider for SubsonicProvider {
                         .client
                         .get_album(&album_id3.id)
                         .await
-                        .map_err(|e| ProviderError::Io(format!("Subsonic getAlbum: {e}")))?;
+                        .map_err(subsonic_err("getAlbum"))?;
 
                     for song in &album_detail.song {
                         all_tracks.push(self.child_to_track(song));
@@ -488,7 +417,7 @@ impl MusicProvider for SubsonicProvider {
                     None,
                 )
                 .await
-                .map_err(|e| ProviderError::Io(format!("Subsonic search3: {e}")))?;
+                .map_err(subsonic_err("search3"))?;
 
             let tracks: Vec<Track> = results
                 .song
@@ -504,7 +433,7 @@ impl MusicProvider for SubsonicProvider {
         let url = self
             .client
             .stream_url(&track.source_uri, None, None)
-            .map_err(|e| ProviderError::Io(format!("Subsonic stream_url: {e}")))?;
+            .map_err(subsonic_err("stream_url"))?;
         Ok(TrackSource::HttpStream(url.to_string()))
     }
 
@@ -516,11 +445,11 @@ impl MusicProvider for SubsonicProvider {
                 self.block_on(async {
                     let resp = reqwest::get(url)
                         .await
-                        .map_err(|e| ProviderError::Io(format!("Cover art fetch: {e}")))?;
+                        .map_err(subsonic_err("cover art fetch"))?;
                     let bytes = resp
                         .bytes()
                         .await
-                        .map_err(|e| ProviderError::Io(format!("Cover art read: {e}")))?;
+                        .map_err(subsonic_err("cover art read"))?;
                     Ok(Some(bytes.to_vec()))
                 })
             }

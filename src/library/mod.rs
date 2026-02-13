@@ -65,6 +65,15 @@ impl Track {
         let secs = self.duration.as_secs();
         format!("{}:{:02}", secs / 60, secs % 60)
     }
+
+    /// Sort tracks by disc number, then track number.
+    pub fn sort_by_disc_and_track(tracks: &mut [Track]) {
+        tracks.sort_by(|a, b| {
+            a.disc_number
+                .cmp(&b.disc_number)
+                .then(a.track_number.cmp(&b.track_number))
+        });
+    }
 }
 
 /// An album aggregated from library tracks.
@@ -78,6 +87,24 @@ pub struct Album {
 }
 
 impl Album {
+    /// Construct an album from a name, sorted track list, and optional cover source.
+    ///
+    /// Extracts artist and year from the first track.
+    pub fn from_tracks(name: String, tracks: Vec<Track>, cover_source: Option<CoverSource>) -> Self {
+        let artist = tracks
+            .first()
+            .map(|t| t.album_artist.clone())
+            .unwrap_or_default();
+        let year = tracks.first().map(|t| t.year).unwrap_or(0);
+        Self {
+            name,
+            artist,
+            year,
+            tracks,
+            cover_source,
+        }
+    }
+
     /// Total duration of all tracks.
     pub fn total_duration(&self) -> Duration {
         self.tracks.iter().map(|t| t.duration).sum()

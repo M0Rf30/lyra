@@ -129,12 +129,12 @@ impl ProviderRegistry {
     }
 
     /// Register a provider. If this is the first provider, it becomes active.
-    pub fn register(&mut self, provider: Box<dyn MusicProvider>) {
+    pub fn register(&mut self, provider: Arc<dyn MusicProvider>) {
         let id = provider.id().to_string();
         if self.providers.is_empty() {
             self.active_provider_id = id.clone();
         }
-        self.providers.insert(id, Arc::from(provider));
+        self.providers.insert(id, provider);
     }
 
     /// Get a provider by its ID.
