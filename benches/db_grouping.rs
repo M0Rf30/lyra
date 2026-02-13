@@ -3,8 +3,8 @@
 //! Benchmarks for `LibraryDb::all_albums()` and `LibraryDb::all_artists()`
 //! grouping performance at various dataset sizes.
 
-use cosmic_music_player::library::{LibraryDb, Track};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use lyra::library::{LibraryDb, Track};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

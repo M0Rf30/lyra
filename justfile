@@ -1,7 +1,7 @@
 # Name of the application's binary.
-name := 'cosmic-music-player'
+name := 'lyra'
 # The unique ID of the application.
-appid := 'io.github.m0rf30.CosmicMusicPlayer'
+appid := 'io.github.m0rf30.Lyra'
 
 # Path to root file system, which defaults to `/`.
 rootdir := ''
@@ -63,7 +63,7 @@ install:
     install -Dm0755 {{ cargo-target-dir / 'release' / name }} {{bin-dst}}
     install -Dm0644 {{ 'resources' / desktop }} {{desktop-dst}}
     install -Dm0644 {{ 'resources' / appdata }} {{appdata-dst}}
-    install -Dm0644 resources/icons/hicolor/scalable/apps/icon.svg {{icon-svg-dst}}/{{appid}}.svg
+    install -Dm0644 resources/icons/hicolor/scalable/apps/{{appid}}.svg {{icon-svg-dst}}/{{appid}}.svg
 
 # Uninstalls installed files
 uninstall:

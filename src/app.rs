@@ -22,7 +22,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
-const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/icon.svg");
+const APP_ICON: &[u8] =
+    include_bytes!("../resources/icons/hicolor/scalable/apps/io.github.m0rf30.Lyra.svg");
 
 /// Main application model.
 pub struct AppModel {
@@ -230,7 +231,7 @@ impl cosmic::Application for AppModel {
     type Executor = cosmic::executor::Default;
     type Flags = ();
     type Message = Message;
-    const APP_ID: &'static str = "io.github.m0rf30.CosmicMusicPlayer";
+    const APP_ID: &'static str = "io.github.m0rf30.Lyra";
 
     fn core(&self) -> &cosmic::Core {
         &self.core
@@ -280,7 +281,7 @@ impl cosmic::Application for AppModel {
         // Open library database and initialize provider registry
         let db_path = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("cosmic-music-player")
+            .join("lyra")
             .join("library.db");
 
         if let Some(parent) = db_path.parent() {

@@ -13,7 +13,7 @@ fn main() -> cosmic::iced::Result {
     let requested_languages = i18n_embed::DesktopLanguageRequester::requested_languages();
 
     // Enable localizations to be applied.
-    cosmic_music_player::i18n::init(&requested_languages);
+    lyra::i18n::init(&requested_languages);
 
     // Settings for configuring the application window and iced runtime.
     let settings = cosmic::app::Settings::default().size_limits(
@@ -23,5 +23,5 @@ fn main() -> cosmic::iced::Result {
     );
 
     // Starts the application's event loop.
-    cosmic::app::run::<cosmic_music_player::app::AppModel>(settings, ())
+    cosmic::app::run::<lyra::app::AppModel>(settings, ())
 }

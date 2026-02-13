@@ -1,10 +1,10 @@
 [Desktop Entry]
-Name=Cosmic Music Player
+Name=Lyra
 Comment=A modern music player for the COSMIC desktop
-Exec=cosmic-music-player
-Icon=io.github.m0rf30.CosmicMusicPlayer
+Exec=lyra
+Icon=io.github.m0rf30.Lyra
 Terminal=false
 Type=Application
 Categories=Audio;Music;Player;
-Keywords=music;audio;player;mp3;flac;
+Keywords=music;audio;player;mp3;flac;lyra;
 MimeType=audio/mpeg;audio/flac;audio/ogg;audio/x-vorbis+ogg;audio/mp4;audio/aac;audio/x-wav;

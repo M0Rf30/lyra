@@ -83,7 +83,7 @@ impl SubsonicProvider {
         let auth = Auth::token(&config.password);
         let mut client = Client::new(&config.url, &config.username, auth)
             .map_err(|e| ProviderError::NotConnected(format!("Invalid Subsonic URL: {e}")))?
-            .with_client_name("cosmic-music-player");
+            .with_client_name("lyra");
 
         if config.accept_invalid_certs {
             client = client

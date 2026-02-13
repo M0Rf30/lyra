@@ -1,10 +1,10 @@
 [package]
-name = "cosmic-music-player"
+name = "lyra"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0"
 description = "A modern music player for the COSMIC desktop"
-repository = "https://github.com/M0Rf30/rust-music-player"
+repository = "https://github.com/M0Rf30/lyra"
 
 [dependencies]
 # COSMIC / UI framework

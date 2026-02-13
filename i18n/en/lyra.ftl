@@ -1,4 +1,4 @@
-app-title = Cosmic Music Player
+app-title = Lyra
 about = About
 repository = Repository
 file = File

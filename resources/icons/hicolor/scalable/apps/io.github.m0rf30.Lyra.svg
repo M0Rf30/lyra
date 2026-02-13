@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <!-- Deep night-sky gradient background -->
+    <linearGradient id="bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2d1b69"/>
+      <stop offset="0.5" stop-color="#1a1145"/>
+      <stop offset="1" stop-color="#0f0a2e"/>
+    </linearGradient>
+    <!-- Warm gold for the lyre -->
+    <linearGradient id="lyre" x1="30" y1="20" x2="98" y2="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f0d060"/>
+      <stop offset="0.4" stop-color="#d4a030"/>
+      <stop offset="1" stop-color="#b07820"/>
+    </linearGradient>
+    <!-- String shimmer -->
+    <linearGradient id="strings" x1="64" y1="28" x2="64" y2="95" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fffbe8" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#d4a030" stop-opacity="0.6"/>
+    </linearGradient>
+    <!-- Star glow -->
+    <radialGradient id="starglow">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="0.5" stop-color="#c8d8ff" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#c8d8ff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="1.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="softglow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="128" height="128" rx="26" fill="url(#bg)"/>
+
+  <!-- Faint ambient stars (tiny dots for atmosphere) -->
+  <g fill="#aabbdd" opacity="0.3">
+    <circle cx="15" cy="22" r="0.6"/>
+    <circle cx="108" cy="18" r="0.5"/>
+    <circle cx="22" cy="95" r="0.5"/>
+    <circle cx="112" cy="72" r="0.7"/>
+    <circle cx="45" cy="12" r="0.4"/>
+    <circle cx="88" cy="115" r="0.5"/>
+    <circle cx="18" cy="58" r="0.4"/>
+    <circle cx="110" cy="42" r="0.4"/>
+    <circle cx="75" cy="10" r="0.5"/>
+    <circle cx="35" cy="118" r="0.4"/>
+  </g>
+
+  <!-- Lyre body — elegant flowing curves -->
+  <g fill="none" stroke="url(#lyre)" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Left arm: sweeps out from the yoke, curves wide, then in to the soundbox -->
+    <path d="M48,28 C42,26 34,30 30,40 C26,52 28,66 34,78 C38,86 44,92 52,96"
+          stroke-width="3.5"/>
+    <!-- Right arm: mirror -->
+    <path d="M80,28 C86,26 94,30 98,40 C102,52 100,66 94,78 C90,86 84,92 76,96"
+          stroke-width="3.5"/>
+    <!-- Yoke / crossbar with slight upward curve -->
+    <path d="M48,28 C52,24 58,22 64,22 C70,22 76,24 80,28"
+          stroke-width="3.2"/>
+    <!-- Soundbox base — a warm rounded base -->
+    <path d="M52,96 C52,104 56,110 64,110 C72,110 76,104 76,96"
+          stroke-width="3.8"/>
+    <!-- Inner decorative scroll — left -->
+    <path d="M48,28 C46,34 44,42 46,50 C47,54 50,56 52,54"
+          stroke-width="1.8" opacity="0.6"/>
+    <!-- Inner decorative scroll — right -->
+    <path d="M80,28 C82,34 84,42 82,50 C81,54 78,56 76,54"
+          stroke-width="1.8" opacity="0.6"/>
+  </g>
+
+  <!-- Strings — five thin luminous lines fanning from yoke to soundbox -->
+  <g stroke="url(#strings)" stroke-width="1.0" stroke-linecap="round" fill="none">
+    <line x1="53" y1="26" x2="56" y2="104"/>
+    <line x1="57" y1="23.5" x2="60" y2="108"/>
+    <line x1="64" y1="22" x2="64" y2="110"/>
+    <line x1="71" y1="23.5" x2="68" y2="108"/>
+    <line x1="75" y1="26" x2="72" y2="104"/>
+  </g>
+
+  <!-- Lyra constellation stars — positioned to overlay the lyre shape -->
+  <!-- The constellation maps onto the instrument: Vega at the yoke, -->
+  <!-- the parallelogram (β, γ, δ, ζ) across the arms and body -->
+  <g filter="url(#glow)">
+    <!-- α Lyrae (Vega) — brightest, at the top center/yoke -->
+    <circle cx="64" cy="18" r="3.2" fill="white"/>
+    <!-- ε Lyrae — near Vega, upper left -->
+    <circle cx="48" cy="28" r="1.8" fill="white"/>
+    <!-- ζ Lyrae — near Vega, upper right -->
+    <circle cx="80" cy="28" r="1.8" fill="white"/>
+    <!-- β Lyrae (Sheliak) — lower left of parallelogram -->
+    <circle cx="52" cy="96" r="2.0" fill="white"/>
+    <!-- γ Lyrae (Sulafat) — lower right of parallelogram -->
+    <circle cx="76" cy="96" r="2.0" fill="white"/>
+  </g>
+
+  <!-- Constellation lines connecting the stars (subtle) -->
+  <g stroke="#c8d8ff" stroke-width="0.7" stroke-linecap="round" opacity="0.35" fill="none">
+    <!-- Vega to ε -->
+    <line x1="64" y1="18" x2="48" y2="28"/>
+    <!-- Vega to ζ -->
+    <line x1="64" y1="18" x2="80" y2="28"/>
+    <!-- ε to β -->
+    <line x1="48" y1="28" x2="52" y2="96"/>
+    <!-- ζ to γ -->
+    <line x1="80" y1="28" x2="76" y2="96"/>
+    <!-- β to γ (base) -->
+    <line x1="52" y1="96" x2="76" y2="96"/>
+    <!-- ε to ζ -->
+    <line x1="48" y1="28" x2="80" y2="28"/>
+  </g>
+</svg>
