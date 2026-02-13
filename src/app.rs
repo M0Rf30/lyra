@@ -261,6 +261,7 @@ pub enum Message {
     SubsonicEditUrl(usize, String),
     SubsonicEditUsername(usize, String),
     SubsonicEditPassword(usize, String),
+    SubsonicToggleCerts(usize, bool),
     SubsonicSaveServer(usize),
     SubsonicRemoveServer(usize),
     SubsonicTestConnection(usize),
@@ -568,6 +569,9 @@ impl cosmic::Application for AppModel {
                     }
                     providers::ProvidersMessage::SubsonicEditPassword(i, v) => {
                         Message::SubsonicEditPassword(i, v)
+                    }
+                    providers::ProvidersMessage::SubsonicToggleCerts(i, v) => {
+                        Message::SubsonicToggleCerts(i, v)
                     }
                     providers::ProvidersMessage::SubsonicSave(i) => {
                         Message::SubsonicSaveServer(i)
@@ -1288,6 +1292,12 @@ impl cosmic::Application for AppModel {
                 }
             }
 
+            Message::SubsonicToggleCerts(i, v) => {
+                if let Some(state) = self.subsonic_edit_states.get_mut(i) {
+                    state.accept_invalid_certs = v;
+                }
+            }
+
             Message::SubsonicSaveServer(i) => {
                 if let Some(state) = self.subsonic_edit_states.get(i) {
                     let entry = state.to_config();
@@ -1320,12 +1330,18 @@ impl cosmic::Application for AppModel {
                     let url = state.url.clone();
                     let username = state.username.clone();
                     let password = state.password.clone();
+                    let accept_invalid_certs = state.accept_invalid_certs;
 
                     return cosmic::task::future(async move {
                         let result = async {
                             let auth = opensubsonic::Auth::token(&password);
-                            let client = opensubsonic::Client::new(&url, &username, auth)
+                            let mut client = opensubsonic::Client::new(&url, &username, auth)
                                 .map_err(|e| format!("Client: {e}"))?;
+                            if accept_invalid_certs {
+                                client = client
+                                    .with_danger_accept_invalid_certs()
+                                    .map_err(|e| format!("TLS: {e}"))?;
+                            }
                             client
                                 .ping()
                                 .await

@@ -71,6 +71,7 @@ pub struct SubsonicEditState {
     pub url: String,
     pub username: String,
     pub password: String,
+    pub accept_invalid_certs: bool,
 }
 
 impl SubsonicEditState {
@@ -82,6 +83,7 @@ impl SubsonicEditState {
             url: entry.url.clone(),
             username: entry.username.clone(),
             password: entry.password.clone().unwrap_or_default(),
+            accept_invalid_certs: entry.accept_invalid_certs,
         }
     }
 
@@ -97,6 +99,7 @@ impl SubsonicEditState {
             } else {
                 Some(self.password.clone())
             },
+            accept_invalid_certs: self.accept_invalid_certs,
         }
     }
 
@@ -108,6 +111,7 @@ impl SubsonicEditState {
             url: "https://".to_string(),
             username: String::new(),
             password: String::new(),
+            accept_invalid_certs: false,
         }
     }
 }
@@ -133,6 +137,7 @@ pub enum ProvidersMessage {
     SubsonicEditUrl(usize, String),
     SubsonicEditUsername(usize, String),
     SubsonicEditPassword(usize, String),
+    SubsonicToggleCerts(usize, bool),
     SubsonicSave(usize),
     SubsonicRemove(usize),
     SubsonicTestConnection(usize),
@@ -251,6 +256,10 @@ fn subsonic_server_card<'a>(
     let password_input = widget::text_input(fl!("subsonic-password"), &server.password)
         .on_input(move |v| ProvidersMessage::SubsonicEditPassword(index, v));
 
+    let tls_toggle = widget::toggler(server.accept_invalid_certs)
+        .label(fl!("subsonic-accept-invalid-certs"))
+        .on_toggle(move |v| ProvidersMessage::SubsonicToggleCerts(index, v));
+
     let mut buttons = widget::row().spacing(8).align_y(Alignment::Center);
     buttons = buttons.push(
         widget::button::standard(fl!("save")).on_press(ProvidersMessage::SubsonicSave(index)),
@@ -278,6 +287,7 @@ fn subsonic_server_card<'a>(
                 .push(password_input)
                 .spacing(8),
         )
+        .push(tls_toggle)
         .push(buttons)
         .push(widget::divider::horizontal::default())
         .spacing(8)

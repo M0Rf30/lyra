@@ -40,4 +40,5 @@ subsonic-name = Name
 subsonic-url = Server URL
 subsonic-username = Username
 subsonic-password = Password
+subsonic-accept-invalid-certs = Accept invalid TLS certificates
 no-providers = No remote providers configured

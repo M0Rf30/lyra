@@ -25,6 +25,8 @@ pub struct SubsonicConfig {
     pub username: String,
     /// Password for authentication.
     pub password: String,
+    /// Accept invalid TLS certificates (self-signed, Tailscale, etc.).
+    pub accept_invalid_certs: bool,
 }
 
 impl Default for SubsonicConfig {
@@ -35,6 +37,7 @@ impl Default for SubsonicConfig {
             url: "https://music.example.com".to_string(),
             username: String::new(),
             password: String::new(),
+            accept_invalid_certs: false,
         }
     }
 }
@@ -47,6 +50,7 @@ impl From<crate::config::SubsonicConfigEntry> for SubsonicConfig {
             url: entry.url,
             username: entry.username,
             password: entry.password.unwrap_or_default(),
+            accept_invalid_certs: entry.accept_invalid_certs,
         }
     }
 }
@@ -66,9 +70,15 @@ impl SubsonicProvider {
     /// but no network call is made until `ping()` or a browse method is called.
     pub fn new(config: SubsonicConfig, runtime: tokio::runtime::Handle) -> Result<Self, ProviderError> {
         let auth = Auth::token(&config.password);
-        let client = Client::new(&config.url, &config.username, auth)
+        let mut client = Client::new(&config.url, &config.username, auth)
             .map_err(|e| ProviderError::NotConnected(format!("Invalid Subsonic URL: {e}")))?
             .with_client_name("cosmic-music-player");
+
+        if config.accept_invalid_certs {
+            client = client
+                .with_danger_accept_invalid_certs()
+                .map_err(|e| ProviderError::NotConnected(format!("TLS config error: {e}")))?;
+        }
 
         Ok(Self {
             config,

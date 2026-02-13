@@ -51,6 +51,9 @@ pub struct SubsonicConfigEntry {
     /// Password (stored as plaintext for now; keyring TODO).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// Accept invalid TLS certificates (self-signed, Tailscale, etc.).
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
 }
 
 impl Default for SubsonicConfigEntry {
@@ -61,6 +64,7 @@ impl Default for SubsonicConfigEntry {
             url: "https://music.example.com".to_string(),
             username: String::new(),
             password: None,
+            accept_invalid_certs: false,
         }
     }
 }
