@@ -6,6 +6,7 @@ use crate::library::{Album, Artist, LibraryDb, LibraryScanner, LyricsProvider, T
 use crate::player::{PlaybackState, Player};
 use crate::provider::local::LocalProvider;
 use crate::provider::mpd::{MpdConfig, MpdProvider};
+use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{MusicProvider, ProviderRegistry};
 use crate::views::{albums, artists, equalizer, lyrics, now_playing, providers, songs};
 use cosmic::app::context_drawer;
@@ -30,6 +31,54 @@ const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps
 struct MpdProviderWrapper(Arc<MpdProvider>);
 
 impl crate::provider::MusicProvider for MpdProviderWrapper {
+    fn id(&self) -> &str {
+        self.0.id()
+    }
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn provider_type(&self) -> crate::provider::ProviderType {
+        self.0.provider_type()
+    }
+    fn browse_albums(&self) -> Result<Vec<Album>, crate::provider::ProviderError> {
+        self.0.browse_albums()
+    }
+    fn browse_artists(&self) -> Result<Vec<Artist>, crate::provider::ProviderError> {
+        self.0.browse_artists()
+    }
+    fn browse_tracks(&self) -> Result<Vec<Track>, crate::provider::ProviderError> {
+        self.0.browse_tracks()
+    }
+    fn search(&self, query: &str) -> Result<Vec<Track>, crate::provider::ProviderError> {
+        self.0.search(query)
+    }
+    fn resolve_audio(
+        &self,
+        track: &Track,
+    ) -> Result<crate::library::TrackSource, crate::provider::ProviderError> {
+        self.0.resolve_audio(track)
+    }
+    fn get_cover_art(
+        &self,
+        album: &Album,
+    ) -> Result<Option<Vec<u8>>, crate::provider::ProviderError> {
+        self.0.get_cover_art(album)
+    }
+    fn get_lyrics(
+        &self,
+        track: &Track,
+    ) -> Result<Option<String>, crate::provider::ProviderError> {
+        self.0.get_lyrics(track)
+    }
+    fn sync_library(&self) -> Result<usize, crate::provider::ProviderError> {
+        self.0.sync_library()
+    }
+}
+
+/// Wrapper around `Arc<SubsonicProvider>` that implements `MusicProvider`.
+struct SubsonicProviderWrapper(Arc<SubsonicProvider>);
+
+impl crate::provider::MusicProvider for SubsonicProviderWrapper {
     fn id(&self) -> &str {
         self.0.id()
     }
@@ -120,6 +169,10 @@ pub struct AppModel {
     // Provider settings (editing state)
     mpd_edit_states: Vec<providers::MpdEditState>,
     mpd_connection_status: Vec<Option<String>>,
+    subsonic_edit_states: Vec<providers::SubsonicEditState>,
+    subsonic_connection_status: Vec<Option<String>>,
+    /// Shared references to Subsonic providers for scrobbling.
+    subsonic_providers: Vec<Arc<SubsonicProvider>>,
 }
 
 /// All application messages.
@@ -201,6 +254,17 @@ pub enum Message {
     MpdConnected(String),
     MpdConnectionFailed(String, String),
     MpdIdleEvent(String),
+
+    // Subsonic provider configuration
+    SubsonicAddServer,
+    SubsonicEditName(usize, String),
+    SubsonicEditUrl(usize, String),
+    SubsonicEditUsername(usize, String),
+    SubsonicEditPassword(usize, String),
+    SubsonicSaveServer(usize),
+    SubsonicRemoveServer(usize),
+    SubsonicTestConnection(usize),
+    SubsonicTestResult(usize, Result<(), String>),
 
     // Application lifecycle
     Quit,
@@ -288,6 +352,22 @@ impl cosmic::Application for AppModel {
             registry.register(Box::new(MpdProviderWrapper(provider)));
         }
 
+        // Initialize Subsonic providers from config.
+        let mut subsonic_providers = Vec::new();
+        for entry in &config.subsonic_servers {
+            let subsonic_config: SubsonicConfig = entry.clone().into();
+            match SubsonicProvider::new(subsonic_config, rt_handle.clone()) {
+                Ok(provider) => {
+                    let provider = Arc::new(provider);
+                    subsonic_providers.push(Arc::clone(&provider));
+                    registry.register(Box::new(SubsonicProviderWrapper(provider)));
+                }
+                Err(e) => {
+                    log::error!("Failed to create Subsonic provider '{}': {e}", entry.name);
+                }
+            }
+        }
+
         // Build provider list for the dropdown selector
         let provider_entries = registry.list();
         let provider_list: Vec<(String, String)> = provider_entries
@@ -306,6 +386,15 @@ impl cosmic::Application for AppModel {
             .collect();
         let mpd_connection_status: Vec<Option<String>> =
             vec![None; mpd_edit_states.len()];
+
+        // Build editing state for Subsonic servers
+        let subsonic_edit_states: Vec<providers::SubsonicEditState> = config
+            .subsonic_servers
+            .iter()
+            .map(providers::SubsonicEditState::from_config)
+            .collect();
+        let subsonic_connection_status: Vec<Option<String>> =
+            vec![None; subsonic_edit_states.len()];
 
         // Initialize player
         let player = match Player::new() {
@@ -344,6 +433,9 @@ impl cosmic::Application for AppModel {
             eq_preset: None,
             mpd_edit_states,
             mpd_connection_status,
+            subsonic_edit_states,
+            subsonic_connection_status,
+            subsonic_providers,
         };
 
         let title_cmd = app.update_title();
@@ -446,8 +538,11 @@ impl cosmic::Application for AppModel {
                 let providers_content = providers::providers_view(
                     &self.mpd_edit_states,
                     &self.mpd_connection_status,
+                    &self.subsonic_edit_states,
+                    &self.subsonic_connection_status,
                 )
                 .map(|msg| match msg {
+                    // MPD
                     providers::ProvidersMessage::AddMpd => Message::MpdAddServer,
                     providers::ProvidersMessage::EditName(i, v) => Message::MpdEditName(i, v),
                     providers::ProvidersMessage::EditHost(i, v) => Message::MpdEditHost(i, v),
@@ -459,6 +554,29 @@ impl cosmic::Application for AppModel {
                     providers::ProvidersMessage::Remove(i) => Message::MpdRemoveServer(i),
                     providers::ProvidersMessage::TestConnection(i) => {
                         Message::MpdTestConnection(i)
+                    }
+                    // Subsonic
+                    providers::ProvidersMessage::AddSubsonic => Message::SubsonicAddServer,
+                    providers::ProvidersMessage::SubsonicEditName(i, v) => {
+                        Message::SubsonicEditName(i, v)
+                    }
+                    providers::ProvidersMessage::SubsonicEditUrl(i, v) => {
+                        Message::SubsonicEditUrl(i, v)
+                    }
+                    providers::ProvidersMessage::SubsonicEditUsername(i, v) => {
+                        Message::SubsonicEditUsername(i, v)
+                    }
+                    providers::ProvidersMessage::SubsonicEditPassword(i, v) => {
+                        Message::SubsonicEditPassword(i, v)
+                    }
+                    providers::ProvidersMessage::SubsonicSave(i) => {
+                        Message::SubsonicSaveServer(i)
+                    }
+                    providers::ProvidersMessage::SubsonicRemove(i) => {
+                        Message::SubsonicRemoveServer(i)
+                    }
+                    providers::ProvidersMessage::SubsonicTestConnection(i) => {
+                        Message::SubsonicTestConnection(i)
                     }
                 });
 
@@ -1138,6 +1256,98 @@ impl cosmic::Application for AppModel {
                 }
             }
 
+            // -- Subsonic server configuration --
+            Message::SubsonicAddServer => {
+                let idx = self.subsonic_edit_states.len();
+                self.subsonic_edit_states
+                    .push(providers::SubsonicEditState::new_default(idx));
+                self.subsonic_connection_status.push(None);
+            }
+
+            Message::SubsonicEditName(i, v) => {
+                if let Some(state) = self.subsonic_edit_states.get_mut(i) {
+                    state.name = v;
+                }
+            }
+
+            Message::SubsonicEditUrl(i, v) => {
+                if let Some(state) = self.subsonic_edit_states.get_mut(i) {
+                    state.url = v;
+                }
+            }
+
+            Message::SubsonicEditUsername(i, v) => {
+                if let Some(state) = self.subsonic_edit_states.get_mut(i) {
+                    state.username = v;
+                }
+            }
+
+            Message::SubsonicEditPassword(i, v) => {
+                if let Some(state) = self.subsonic_edit_states.get_mut(i) {
+                    state.password = v;
+                }
+            }
+
+            Message::SubsonicSaveServer(i) => {
+                if let Some(state) = self.subsonic_edit_states.get(i) {
+                    let entry = state.to_config();
+                    if i < self.config.subsonic_servers.len() {
+                        self.config.subsonic_servers[i] = entry;
+                    } else {
+                        self.config.subsonic_servers.push(entry);
+                    }
+                    log::info!("Subsonic server config saved: {}", state.name);
+                    self.save_config();
+                    return self.reinit_subsonic_providers();
+                }
+            }
+
+            Message::SubsonicRemoveServer(i) => {
+                if i < self.subsonic_edit_states.len() {
+                    self.subsonic_edit_states.remove(i);
+                    self.subsonic_connection_status.remove(i);
+                    if i < self.config.subsonic_servers.len() {
+                        self.config.subsonic_servers.remove(i);
+                    }
+                    log::info!("Subsonic server removed at index {i}");
+                    self.save_config();
+                    return self.reinit_subsonic_providers();
+                }
+            }
+
+            Message::SubsonicTestConnection(i) => {
+                if let Some(state) = self.subsonic_edit_states.get(i) {
+                    let url = state.url.clone();
+                    let username = state.username.clone();
+                    let password = state.password.clone();
+
+                    return cosmic::task::future(async move {
+                        let result = async {
+                            let auth = opensubsonic::Auth::token(&password);
+                            let client = opensubsonic::Client::new(&url, &username, auth)
+                                .map_err(|e| format!("Client: {e}"))?;
+                            client
+                                .ping()
+                                .await
+                                .map_err(|e| format!("Ping: {e}"))?;
+                            Ok(())
+                        }
+                        .await;
+                        cosmic::Action::App(Message::SubsonicTestResult(i, result))
+                    });
+                }
+            }
+
+            Message::SubsonicTestResult(i, result) => {
+                let status = match result {
+                    Ok(()) => fl!("connected"),
+                    Err(e) => format!("{}: {e}", fl!("connection-failed")),
+                };
+                if let Some(s) = self.subsonic_connection_status.get_mut(i) {
+                    *s = Some(status);
+                }
+            }
+
             Message::Quit => {
                 return cosmic::iced::exit();
             }
@@ -1307,6 +1517,66 @@ impl AppModel {
             .registry
             .active()
             .is_some_and(|p| p.provider_type() == crate::provider::ProviderType::Local)
+        {
+            self.reload_library()
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Re-initialize all Subsonic providers from the current config.
+    ///
+    /// Removes old Subsonic providers from the registry, creates new ones,
+    /// and rebuilds the provider list for the header dropdown.
+    fn reinit_subsonic_providers(&mut self) -> Task<cosmic::Action<Message>> {
+        // Remove existing Subsonic providers from registry
+        self.registry
+            .remove_by_type(crate::provider::ProviderType::Subsonic);
+        self.subsonic_providers.clear();
+
+        // Re-create from config
+        let rt_handle = tokio::runtime::Handle::current();
+        for entry in &self.config.subsonic_servers {
+            let subsonic_config: SubsonicConfig = entry.clone().into();
+            match SubsonicProvider::new(subsonic_config, rt_handle.clone()) {
+                Ok(provider) => {
+                    let provider = Arc::new(provider);
+                    self.subsonic_providers.push(Arc::clone(&provider));
+                    self.registry
+                        .register(Box::new(SubsonicProviderWrapper(provider)));
+                }
+                Err(e) => {
+                    log::error!("Failed to create Subsonic provider '{}': {e}", entry.name);
+                }
+            }
+        }
+
+        // Rebuild provider list for the dropdown
+        let provider_entries = self.registry.list();
+        self.provider_list = provider_entries
+            .iter()
+            .map(|(id, name, _)| (id.clone(), name.clone()))
+            .collect();
+        self.active_provider_index = self
+            .provider_list
+            .iter()
+            .position(|(id, _)| id == self.registry.active_id());
+
+        // Rebuild edit states
+        self.subsonic_edit_states = self
+            .config
+            .subsonic_servers
+            .iter()
+            .map(providers::SubsonicEditState::from_config)
+            .collect();
+        self.subsonic_connection_status = vec![None; self.subsonic_edit_states.len()];
+
+        // For Subsonic providers, we can reload the library immediately
+        // since they connect on demand (no idle subscription).
+        if self
+            .registry
+            .active()
+            .is_some_and(|p| p.provider_type() == crate::provider::ProviderType::Subsonic)
         {
             self.reload_library()
         } else {

@@ -10,7 +10,7 @@ use super::PlaybackState;
 use crate::library::TrackSource;
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Cursor};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -58,6 +58,40 @@ impl LocalBackend {
         let source =
             Decoder::new(reader).map_err(|e| PlayerError(format!("Cannot decode file: {e}")))?;
 
+        self.start_source(source)
+    }
+
+    /// Internal: play an HTTP stream (e.g. Subsonic `stream` URL).
+    ///
+    /// Downloads the entire response body into memory, then feeds it to
+    /// rodio's decoder. This supports seeking and works with any format
+    /// that symphonia handles (mp3, flac, opus, aac, etc.).
+    fn play_http_stream(&mut self, url: String) -> Result<(), PlayerError> {
+        // We're in a sync context (PlaybackBackend::play is sync).
+        // Use a blocking reqwest call to fetch the audio data.
+        let bytes = reqwest::blocking::get(&url)
+            .map_err(|e| PlayerError(format!("HTTP stream request failed: {e}")))?
+            .bytes()
+            .map_err(|e| PlayerError(format!("HTTP stream read failed: {e}")))?;
+
+        log::info!(
+            "HTTP stream downloaded: {} bytes from {}",
+            bytes.len(),
+            url.split('?').next().unwrap_or(&url)
+        );
+
+        let cursor = Cursor::new(bytes.to_vec());
+        let source = Decoder::new(cursor)
+            .map_err(|e| PlayerError(format!("Cannot decode HTTP stream: {e}")))?;
+
+        self.start_source(source)
+    }
+
+    /// Common playback start: stop current sink, create new one, append source.
+    fn start_source<S>(&mut self, source: S) -> Result<(), PlayerError>
+    where
+        S: Source<Item = f32> + Send + 'static,
+    {
         let duration = source.total_duration().unwrap_or(Duration::ZERO);
 
         let sink = self.lock_sink()?;
@@ -81,12 +115,7 @@ impl PlaybackBackend for LocalBackend {
     fn play(&mut self, source: TrackSource) -> Result<(), PlayerError> {
         match source {
             TrackSource::LocalFile(path) => self.play_local_file(path),
-            TrackSource::HttpStream(_url) => {
-                // TODO: Phase 3 — HTTP streaming via reqwest + symphonia
-                Err(PlayerError(
-                    "HTTP streaming not yet implemented".to_string(),
-                ))
-            }
+            TrackSource::HttpStream(url) => self.play_http_stream(url),
             TrackSource::MpdFile(_) => Err(PlayerError(
                 "MPD files should use MpdBackend, not LocalBackend".to_string(),
             )),

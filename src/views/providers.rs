@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0
 
-//! Provider settings view — configure MPD (and future Subsonic) servers.
+//! Provider settings view — configure MPD and Subsonic servers.
 
 use crate::fl;
 use cosmic::iced::Alignment;
 use cosmic::prelude::*;
 use cosmic::widget;
+
+// ── MPD editing state ──────────────────────────────────────────────────────
 
 /// Editing state for a single MPD server entry.
 ///
@@ -59,52 +61,130 @@ impl MpdEditState {
     }
 }
 
+// ── Subsonic editing state ─────────────────────────────────────────────────
+
+/// Editing state for a single Subsonic/Navidrome server entry.
+#[derive(Debug, Clone)]
+pub struct SubsonicEditState {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub username: String,
+    pub password: String,
+}
+
+impl SubsonicEditState {
+    /// Create from a config entry.
+    pub fn from_config(entry: &crate::config::SubsonicConfigEntry) -> Self {
+        Self {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+            url: entry.url.clone(),
+            username: entry.username.clone(),
+            password: entry.password.clone().unwrap_or_default(),
+        }
+    }
+
+    /// Convert back to a config entry.
+    pub fn to_config(&self) -> crate::config::SubsonicConfigEntry {
+        crate::config::SubsonicConfigEntry {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            url: self.url.clone(),
+            username: self.username.clone(),
+            password: if self.password.is_empty() {
+                None
+            } else {
+                Some(self.password.clone())
+            },
+        }
+    }
+
+    /// Create a new empty entry with a generated id.
+    pub fn new_default(index: usize) -> Self {
+        Self {
+            id: format!("subsonic-{index}"),
+            name: "Subsonic Server".to_string(),
+            url: "https://".to_string(),
+            username: String::new(),
+            password: String::new(),
+        }
+    }
+}
+
+// ── Messages ───────────────────────────────────────────────────────────────
+
 /// Messages emitted by the providers settings view.
 #[derive(Debug, Clone)]
 pub enum ProvidersMessage {
-    /// User wants to add a new MPD server (shows the form with defaults).
+    // MPD
     AddMpd,
-    /// Editing field changed for the server at the given index.
     EditName(usize, String),
     EditHost(usize, String),
     EditPort(usize, String),
     EditPassword(usize, String),
-    /// Save changes for the server at the given index.
     Save(usize),
-    /// Remove the server at the given index.
     Remove(usize),
-    /// Test connection for the server at the given index.
     TestConnection(usize),
+
+    // Subsonic
+    AddSubsonic,
+    SubsonicEditName(usize, String),
+    SubsonicEditUrl(usize, String),
+    SubsonicEditUsername(usize, String),
+    SubsonicEditPassword(usize, String),
+    SubsonicSave(usize),
+    SubsonicRemove(usize),
+    SubsonicTestConnection(usize),
 }
 
+// ── View ───────────────────────────────────────────────────────────────────
+
 /// Render the providers settings panel (shown in the context drawer).
-///
-/// `servers` is the current list of MPD edit states.
-/// `connection_status` maps server index to an optional status string.
 pub fn providers_view<'a>(
-    servers: &'a [MpdEditState],
-    connection_status: &'a [Option<String>],
+    mpd_servers: &'a [MpdEditState],
+    mpd_connection_status: &'a [Option<String>],
+    subsonic_servers: &'a [SubsonicEditState],
+    subsonic_connection_status: &'a [Option<String>],
 ) -> cosmic::Element<'a, ProvidersMessage> {
     let mut col = widget::column().spacing(16).padding(16);
 
-    if servers.is_empty() {
+    let has_any = !mpd_servers.is_empty() || !subsonic_servers.is_empty();
+
+    if !has_any {
         col = col.push(widget::text::body(fl!("no-providers")));
     }
 
-    for (i, server) in servers.iter().enumerate() {
-        let status = connection_status.get(i).and_then(|s| s.as_deref());
-        let card = mpd_server_card(i, server, status);
-        col = col.push(card);
+    // MPD servers
+    for (i, server) in mpd_servers.iter().enumerate() {
+        let status = mpd_connection_status.get(i).and_then(|s| s.as_deref());
+        col = col.push(mpd_server_card(i, server, status));
     }
 
-    // "Add MPD Server" button
-    col = col
-        .push(widget::button::standard(fl!("add-mpd-server")).on_press(ProvidersMessage::AddMpd));
+    // Subsonic servers
+    for (i, server) in subsonic_servers.iter().enumerate() {
+        let status = subsonic_connection_status.get(i).and_then(|s| s.as_deref());
+        col = col.push(subsonic_server_card(i, server, status));
+    }
+
+    // Add buttons
+    col = col.push(
+        widget::row()
+            .push(
+                widget::button::standard(fl!("add-mpd-server")).on_press(ProvidersMessage::AddMpd),
+            )
+            .push(
+                widget::button::standard(fl!("add-subsonic-server"))
+                    .on_press(ProvidersMessage::AddSubsonic),
+            )
+            .spacing(8),
+    );
 
     col.into()
 }
 
-/// Render a single MPD server configuration card.
+// ── MPD card ───────────────────────────────────────────────────────────────
+
 fn mpd_server_card<'a>(
     index: usize,
     server: &'a MpdEditState,
@@ -123,19 +203,15 @@ fn mpd_server_card<'a>(
         .on_input(move |v| ProvidersMessage::EditPassword(index, v));
 
     let mut buttons = widget::row().spacing(8).align_y(Alignment::Center);
-
     buttons =
         buttons.push(widget::button::standard(fl!("save")).on_press(ProvidersMessage::Save(index)));
-
     buttons = buttons.push(
         widget::button::standard(fl!("test-connection"))
             .on_press(ProvidersMessage::TestConnection(index)),
     );
-
     buttons = buttons
         .push(widget::button::destructive(fl!("remove")).on_press(ProvidersMessage::Remove(index)));
 
-    // Status indicator
     if let Some(status) = connection_status {
         buttons = buttons.push(widget::text::caption(status.to_string()));
     }
@@ -147,6 +223,58 @@ fn mpd_server_card<'a>(
         .push(
             widget::row()
                 .push(port_input)
+                .push(password_input)
+                .spacing(8),
+        )
+        .push(buttons)
+        .push(widget::divider::horizontal::default())
+        .spacing(8)
+        .into()
+}
+
+// ── Subsonic card ──────────────────────────────────────────────────────────
+
+fn subsonic_server_card<'a>(
+    index: usize,
+    server: &'a SubsonicEditState,
+    connection_status: Option<&'a str>,
+) -> cosmic::Element<'a, ProvidersMessage> {
+    let name_input = widget::text_input(fl!("subsonic-name"), &server.name)
+        .on_input(move |v| ProvidersMessage::SubsonicEditName(index, v));
+
+    let url_input = widget::text_input(fl!("subsonic-url"), &server.url)
+        .on_input(move |v| ProvidersMessage::SubsonicEditUrl(index, v));
+
+    let username_input = widget::text_input(fl!("subsonic-username"), &server.username)
+        .on_input(move |v| ProvidersMessage::SubsonicEditUsername(index, v));
+
+    let password_input = widget::text_input(fl!("subsonic-password"), &server.password)
+        .on_input(move |v| ProvidersMessage::SubsonicEditPassword(index, v));
+
+    let mut buttons = widget::row().spacing(8).align_y(Alignment::Center);
+    buttons = buttons.push(
+        widget::button::standard(fl!("save")).on_press(ProvidersMessage::SubsonicSave(index)),
+    );
+    buttons = buttons.push(
+        widget::button::standard(fl!("test-connection"))
+            .on_press(ProvidersMessage::SubsonicTestConnection(index)),
+    );
+    buttons = buttons.push(
+        widget::button::destructive(fl!("remove"))
+            .on_press(ProvidersMessage::SubsonicRemove(index)),
+    );
+
+    if let Some(status) = connection_status {
+        buttons = buttons.push(widget::text::caption(status.to_string()));
+    }
+
+    widget::column()
+        .push(widget::text::title4(format!("Subsonic: {}", &server.name)))
+        .push(name_input)
+        .push(url_input)
+        .push(
+            widget::row()
+                .push(username_input)
                 .push(password_input)
                 .spacing(8),
         )

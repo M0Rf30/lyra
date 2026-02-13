@@ -37,6 +37,34 @@ impl Default for MpdConfigEntry {
     }
 }
 
+/// Serializable configuration for an OpenSubsonic/Navidrome server connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubsonicConfigEntry {
+    /// Unique provider ID (e.g., "subsonic-home").
+    pub id: String,
+    /// Human-readable name (e.g., "Navidrome").
+    pub name: String,
+    /// Server base URL (e.g., "https://music.example.com").
+    pub url: String,
+    /// Subsonic username.
+    pub username: String,
+    /// Password (stored as plaintext for now; keyring TODO).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+impl Default for SubsonicConfigEntry {
+    fn default() -> Self {
+        Self {
+            id: "subsonic".to_string(),
+            name: "Subsonic Server".to_string(),
+            url: "https://music.example.com".to_string(),
+            username: String::new(),
+            password: None,
+        }
+    }
+}
+
 /// Repeat mode for playback queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -86,6 +114,8 @@ pub struct Config {
     pub last_view: String,
     /// Configured MPD server connections.
     pub mpd_servers: Vec<MpdConfigEntry>,
+    /// Configured OpenSubsonic/Navidrome server connections.
+    pub subsonic_servers: Vec<SubsonicConfigEntry>,
 }
 
 impl Default for Config {
@@ -107,6 +137,7 @@ impl Default for Config {
             equalizer_enabled: false,
             last_view: "albums".to_string(),
             mpd_servers: Vec::new(),
+            subsonic_servers: Vec::new(),
         }
     }
 }

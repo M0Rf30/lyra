@@ -7,6 +7,7 @@
 
 pub mod local;
 pub mod mpd;
+pub mod subsonic;
 
 use crate::library::{Album, Artist, CoverSource, Track, TrackSource};
 use std::collections::HashMap;

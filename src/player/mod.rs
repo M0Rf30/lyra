@@ -34,6 +34,9 @@ pub struct NowPlaying {
 fn resolve_track_source(track: &Track) -> TrackSource {
     if track.provider_id.starts_with("mpd") {
         TrackSource::MpdFile(track.source_uri.clone())
+    } else if track.provider_id.starts_with("subsonic") {
+        // source_uri contains the pre-built authenticated stream URL.
+        TrackSource::HttpStream(track.source_uri.clone())
     } else {
         // Default: local file
         TrackSource::LocalFile(track.path.clone())
