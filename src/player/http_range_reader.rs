@@ -34,8 +34,8 @@ impl HttpRangeReader {
     /// Makes an initial GET request to start streaming and reads
     /// `Content-Length` from the response. Returns an error if the
     /// request fails or the server doesn't provide Content-Length.
-    pub fn new(url: String) -> Result<Self, String> {
-        let client = reqwest::blocking::Client::new();
+    pub fn new(url: String, client: Option<reqwest::blocking::Client>) -> Result<Self, String> {
+        let client = client.unwrap_or_default();
 
         // Start streaming from byte 0.
         let response = client

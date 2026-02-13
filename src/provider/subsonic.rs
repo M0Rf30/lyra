@@ -70,6 +70,9 @@ pub struct SubsonicProvider {
     /// Shared provider ID for zero-copy assignment to tracks.
     provider_id: Arc<str>,
     client: Client,
+    /// Shared HTTP client for cover art fetches (avoids creating a new
+    /// connection pool per request).
+    http_client: reqwest::Client,
     runtime: tokio::runtime::Handle,
 }
 
@@ -89,10 +92,12 @@ impl SubsonicProvider {
         }
 
         let provider_id: Arc<str> = Arc::from(config.id.as_str());
+        let http_client = reqwest::Client::new();
         Ok(Self {
             config,
             provider_id,
             client,
+            http_client,
             runtime,
         })
     }
@@ -452,8 +457,11 @@ impl MusicProvider for SubsonicProvider {
         // Fetch the image bytes for display.
         match &album.cover_source {
             Some(CoverSource::Url(url)) => {
+                let http = self.http_client.clone();
                 self.block_on(async {
-                    let resp = reqwest::get(url)
+                    let resp = http
+                        .get(url)
+                        .send()
                         .await
                         .map_err(subsonic_err("cover art fetch"))?;
                     let bytes = resp

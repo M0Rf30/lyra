@@ -32,6 +32,8 @@ pub struct LocalBackend {
     /// `true` while a background thread is downloading an HTTP stream.
     /// While loading: `position()` returns ZERO, `is_finished()` returns false.
     loading: Arc<AtomicBool>,
+    /// Shared blocking HTTP client for HTTP stream playback.
+    http_client: reqwest::blocking::Client,
 }
 
 impl LocalBackend {
@@ -52,6 +54,7 @@ impl LocalBackend {
             base_position: Duration::ZERO,
             play_started_at: Arc::new(Mutex::new(None)),
             loading: Arc::new(AtomicBool::new(false)),
+            http_client: reqwest::blocking::Client::new(),
         })
     }
 
@@ -106,10 +109,11 @@ impl LocalBackend {
         let duration_arc = Arc::clone(&self.current_duration);
         let loading = Arc::clone(&self.loading);
         let started_at = Arc::clone(&self.play_started_at);
+        let http_client = self.http_client.clone();
 
         std::thread::spawn(move || {
             let result = (|| -> Result<(), String> {
-                let reader = HttpRangeReader::new(url)?;
+                let reader = HttpRangeReader::new(url, Some(http_client))?;
                 let byte_len = reader.content_length();
 
                 // Use rodio's builder to set byte_len (enables seeking + duration).
