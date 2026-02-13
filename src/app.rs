@@ -842,9 +842,8 @@ impl cosmic::Application for AppModel {
                 albums,
                 cover_images,
             } => {
-                // Append new albums
+                // Append new albums and extract tracks
                 for album in &albums {
-                    // Extract tracks from the album
                     for track in &album.tracks {
                         self.all_tracks.push(track.clone());
                     }
@@ -853,8 +852,8 @@ impl cosmic::Application for AppModel {
                 // Merge cover images
                 self.cover_images.extend(cover_images);
 
-                // Rebuild artists from all albums accumulated so far
-                self.rebuild_artists_from_albums();
+                // Incrementally merge only the new batch into artists
+                self.merge_artists_from_batch(&albums);
             }
 
             Message::LibraryLoadComplete => {
@@ -996,36 +995,32 @@ impl cosmic::Application for AppModel {
 
             // -- Track selection --
             Message::PlayTrackIndex(index) => {
-                self.play_track_list(&self.all_tracks.clone(), index);
+                self.play_track_list(self.all_tracks.clone(), index);
             }
 
             Message::PlayAlbum(album_idx) => {
                 if let Some(album) = self.all_albums.get(album_idx) {
-                    let tracks = album.tracks.clone();
-                    self.play_track_list(&tracks, 0);
+                    self.play_track_list(album.tracks.clone(), 0);
                 }
             }
 
             Message::PlayAlbumTrack(album_idx, track_idx) => {
                 if let Some(album) = self.all_albums.get(album_idx) {
-                    let tracks = album.tracks.clone();
-                    self.play_track_list(&tracks, track_idx);
+                    self.play_track_list(album.tracks.clone(), track_idx);
                 }
             }
 
             Message::PlayArtistAlbum(artist_idx, album_idx) => {
                 if let Some(artist) = self.all_artists.get(artist_idx)
                     && let Some(album) = artist.albums.get(album_idx) {
-                        let tracks = album.tracks.clone();
-                        self.play_track_list(&tracks, 0);
+                        self.play_track_list(album.tracks.clone(), 0);
                     }
             }
 
             Message::PlayArtistTrack(artist_idx, album_idx, track_idx) => {
                 if let Some(artist) = self.all_artists.get(artist_idx)
                     && let Some(album) = artist.albums.get(album_idx) {
-                        let tracks = album.tracks.clone();
-                        self.play_track_list(&tracks, track_idx);
+                        self.play_track_list(album.tracks.clone(), track_idx);
                     }
             }
 
@@ -1568,9 +1563,9 @@ impl AppModel {
                                 &album.name,
                             );
                             let prov2 = Arc::clone(&prov);
-                            let album_clone = album.clone();
+                            let hint = album.cover_hint();
                             if let Ok(Some(bytes)) = tokio::task::spawn_blocking(move || {
-                                prov2.get_cover_art(&album_clone)
+                                prov2.get_cover_art(&hint)
                             })
                             .await
                             .unwrap_or(Ok(None))
@@ -1627,9 +1622,9 @@ impl AppModel {
                                 &album.name,
                             );
                             let prov2 = Arc::clone(&prov);
-                            let album_clone = album.clone();
+                            let hint = album.cover_hint();
                             if let Ok(Some(bytes)) = tokio::task::spawn_blocking(move || {
-                                prov2.get_cover_art(&album_clone)
+                                prov2.get_cover_art(&hint)
                             })
                             .await
                             .unwrap_or(Ok(None))
@@ -1814,7 +1809,7 @@ impl AppModel {
         let provider = match self
             .subsonic_providers
             .iter()
-            .find(|p| p.id() == track.provider_id)
+            .find(|p| p.id() == &*track.provider_id)
         {
             Some(p) => Arc::clone(p),
             None => return,
@@ -1842,39 +1837,53 @@ impl AppModel {
         }
     }
 
-    /// Rebuild the `all_artists` list by grouping `all_albums` by artist name.
+    /// Incrementally merge new albums into `all_artists`.
     ///
-    /// Called after each incremental batch to keep the artist view in sync
-    /// without requiring a separate API call.
-    fn rebuild_artists_from_albums(&mut self) {
-        use std::collections::BTreeMap;
-
-        let mut artist_map: BTreeMap<String, Vec<Album>> = BTreeMap::new();
-        for album in &self.all_albums {
-            artist_map
-                .entry(album.artist.clone())
-                .or_default()
-                .push(album.clone());
-        }
-
-        self.all_artists = artist_map
-            .into_iter()
-            .map(|(name, mut albums)| {
-                albums.sort_by(|a, b| a.year.cmp(&b.year));
-                // Generate avatar
-                let bytes = crate::library::CoverArt::generate_artist_avatar(&name, 64);
-                let handle = widget::icon::from_raster_bytes(bytes);
-                self.artist_avatars.insert(name.clone(), handle);
-                Artist { name, albums }
-            })
+    /// Only processes the `new_albums` slice (the batch that just arrived),
+    /// appending to existing artists or creating new ones.  Avatars are only
+    /// generated for newly-seen artist names — existing entries in
+    /// `artist_avatars` are reused.
+    fn merge_artists_from_batch(&mut self, new_albums: &[Album]) {
+        // Build an index over the current artists list for O(1) lookup.
+        let mut index: HashMap<String, usize> = self
+            .all_artists
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (a.name.clone(), i))
             .collect();
+
+        for album in new_albums {
+            if let Some(&idx) = index.get(&album.artist) {
+                self.all_artists[idx].albums.push(album.clone());
+            } else {
+                let idx = self.all_artists.len();
+                index.insert(album.artist.clone(), idx);
+                self.all_artists.push(Artist {
+                    name: album.artist.clone(),
+                    albums: vec![album.clone()],
+                });
+
+                // Generate avatar only for new artists.
+                if !self.artist_avatars.contains_key(&album.artist) {
+                    let bytes =
+                        crate::library::CoverArt::generate_artist_avatar(&album.artist, 64);
+                    let handle = widget::icon::from_raster_bytes(bytes);
+                    self.artist_avatars.insert(album.artist.clone(), handle);
+                }
+            }
+        }
     }
 
-    fn play_track_list(&mut self, tracks: &[Track], start_index: usize) {
+    /// Start playback from the given queue at `start_index`.
+    ///
+    /// Takes ownership of the track list to avoid an extra clone — the
+    /// caller is responsible for providing an owned `Vec<Track>`.
+    fn play_track_list(&mut self, tracks: Vec<Track>, start_index: usize) {
         if let Some(ref mut player) = self.player {
-            player.set_queue(tracks.to_vec());
+            let current = tracks.get(start_index).cloned();
+            player.set_queue(tracks);
             if player.play_index(start_index).is_ok() {
-                self.current_track = tracks.get(start_index).cloned();
+                self.current_track = current;
                 self.playback_position = Duration::ZERO;
                 self.lyrics_text = None;
                 self.scrobble_now_playing_sent = false;

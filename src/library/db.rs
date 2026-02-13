@@ -6,6 +6,7 @@ use super::{Album, Artist, Track};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Base schema for the tracks table.
@@ -158,7 +159,7 @@ impl LibraryDb {
                     track.bitrate,
                     track.sample_rate,
                     mtime,
-                    track.provider_id,
+                    &*track.provider_id,
                     track.source_uri,
                 ],
             )
@@ -400,7 +401,7 @@ impl LibraryDb {
             duration: Duration::from_millis(row.get::<_, i64>(10)? as u64),
             bitrate: row.get(11)?,
             sample_rate: row.get(12)?,
-            provider_id: row.get(13)?,
+            provider_id: Arc::from(row.get::<_, String>(13)?),
             source_uri: row.get(14)?,
         })
     }

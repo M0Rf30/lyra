@@ -13,6 +13,7 @@ pub use lyrics::LyricsProvider;
 pub use scanner::LibraryScanner;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Resolved audio source for the playback backend.
@@ -54,7 +55,10 @@ pub struct Track {
     pub bitrate: u32,
     pub sample_rate: u32,
     /// Which provider owns this track (e.g., "local", "mpd-home", "navidrome").
-    pub provider_id: String,
+    ///
+    /// Stored as `Arc<str>` so all tracks from the same provider share one
+    /// allocation instead of cloning a `String` per track.
+    pub provider_id: Arc<str>,
     /// Provider-specific identifier (file path for local, MPD relative path, Subsonic song ID).
     pub source_uri: String,
 }
@@ -102,6 +106,20 @@ impl Album {
             year,
             tracks,
             cover_source,
+        }
+    }
+
+    /// Create a lightweight clone for cover art fetching.
+    ///
+    /// Contains `cover_source` and at most the first track — avoids
+    /// cloning the entire track list when only cover art metadata is needed.
+    pub fn cover_hint(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            artist: self.artist.clone(),
+            year: self.year,
+            tracks: self.tracks.first().cloned().into_iter().collect(),
+            cover_source: self.cover_source.clone(),
         }
     }
 

@@ -6,6 +6,7 @@ use super::{db::LibraryDb, Track};
 use lofty::prelude::*;
 use lofty::probe::Probe;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 /// Supported audio file extensions.
@@ -159,7 +160,7 @@ impl LibraryScanner {
             duration,
             bitrate: properties.audio_bitrate().unwrap_or(0),
             sample_rate: properties.sample_rate().unwrap_or(0),
-            provider_id: "local".to_string(),
+            provider_id: Arc::from("local"),
             source_uri,
         })
     }

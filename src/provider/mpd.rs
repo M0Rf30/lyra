@@ -78,6 +78,8 @@ impl From<crate::config::MpdConfigEntry> for MpdConfig {
 /// connection.
 pub struct MpdProvider {
     config: MpdConfig,
+    /// Shared provider ID for zero-copy assignment to tracks.
+    provider_id: Arc<str>,
     /// Command connection — used for browse, search, playback, etc.
     client: Arc<Mutex<Option<Client>>>,
     runtime: tokio::runtime::Handle,
@@ -86,8 +88,10 @@ pub struct MpdProvider {
 impl MpdProvider {
     /// Create a new MPD provider. Does NOT connect yet — call `connect_idle()` first.
     pub fn new(config: MpdConfig, runtime: tokio::runtime::Handle) -> Self {
+        let provider_id: Arc<str> = Arc::from(config.id.as_str());
         Self {
             config,
+            provider_id,
             client: Arc::new(Mutex::new(None)),
             runtime,
         }
@@ -300,7 +304,7 @@ impl MpdProvider {
             duration,
             bitrate: 0,
             sample_rate: 0,
-            provider_id: self.config.id.clone(),
+            provider_id: Arc::clone(&self.provider_id),
             source_uri: uri,
         }
     }

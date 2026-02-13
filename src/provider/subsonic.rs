@@ -10,6 +10,7 @@ use super::{MusicProvider, ProviderError, ProviderType};
 use crate::library::{Album, Artist, CoverSource, Track, TrackSource};
 use opensubsonic::{Auth, Client};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Helper to wrap Subsonic errors into `ProviderError::Io` with a labeled context.
@@ -66,6 +67,8 @@ impl From<crate::config::SubsonicConfigEntry> for SubsonicConfig {
 /// trait is synchronous, so we bridge using `runtime.block_on()`.
 pub struct SubsonicProvider {
     config: SubsonicConfig,
+    /// Shared provider ID for zero-copy assignment to tracks.
+    provider_id: Arc<str>,
     client: Client,
     runtime: tokio::runtime::Handle,
 }
@@ -85,8 +88,10 @@ impl SubsonicProvider {
                 .map_err(|e| ProviderError::NotConnected(format!("TLS config error: {e}")))?;
         }
 
+        let provider_id: Arc<str> = Arc::from(config.id.as_str());
         Ok(Self {
             config,
+            provider_id,
             client,
             runtime,
         })
@@ -158,7 +163,7 @@ impl SubsonicProvider {
             duration,
             bitrate,
             sample_rate,
-            provider_id: self.config.id.clone(),
+            provider_id: Arc::clone(&self.provider_id),
             source_uri,
         }
     }
