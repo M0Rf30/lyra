@@ -163,6 +163,11 @@ impl MpdProvider {
         })
     }
 
+    /// Get a clone of the tokio runtime handle (for MpdBackend creation).
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.clone()
+    }
+
     /// Run an async block on the tokio runtime (bridging sync MusicProvider to async mpd_client).
     fn block_on<F, T>(&self, future: F) -> T
     where

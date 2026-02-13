@@ -3,6 +3,7 @@
 use crate::config::Config;
 use crate::fl;
 use crate::library::{Album, Artist, LibraryDb, LibraryScanner, LyricsProvider, Track};
+use crate::player::mpd_backend::MpdBackend;
 use crate::player::{PlaybackState, Player};
 use crate::provider::local::LocalProvider;
 use crate::provider::mpd::{MpdConfig, MpdProvider};
@@ -18,7 +19,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] = include_bytes!("../resources/icons/hicolor/scalable/apps/icon.svg");
@@ -151,6 +152,9 @@ pub struct AppModel {
     player: Option<Player>,
     playback_position: Duration,
     current_track: Option<Track>,
+    /// Timestamp of last user-initiated seek. While recent (< 500ms), the
+    /// PlaybackTick skips position updates to avoid fighting the slider drag.
+    last_seek_at: Option<Instant>,
 
     // View state
     selected_album: Option<usize>,
@@ -406,7 +410,7 @@ impl cosmic::Application for AppModel {
             vec![None; subsonic_edit_states.len()];
 
         // Initialize player
-        let player = match Player::new() {
+        let player = match Player::new(None) {
             Ok(p) => Some(p),
             Err(e) => {
                 log::error!("Failed to initialize audio player: {e}");
@@ -432,6 +436,7 @@ impl cosmic::Application for AppModel {
             player,
             playback_position: Duration::ZERO,
             current_track: None,
+            last_seek_at: None,
             selected_album: None,
             selected_artist: None,
             songs_sort: songs::SortField::Title,
@@ -1008,12 +1013,18 @@ impl cosmic::Application for AppModel {
 
             Message::Seek(fraction) => {
                 if let Some(ref mut player) = self.player
-                    && let Some(ref track) = self.current_track {
-                        let target =
-                            Duration::from_secs_f32(fraction * track.duration.as_secs_f32());
-                        player.seek(target).ok();
-                        self.playback_position = target;
+                    && let Some(ref track) = self.current_track
+                {
+                    let target =
+                        Duration::from_secs_f32(fraction * track.duration.as_secs_f32());
+                    match player.seek(target) {
+                        Ok(()) => {
+                            self.playback_position = target;
+                            self.last_seek_at = Some(Instant::now());
+                        }
+                        Err(e) => log::warn!("Seek failed: {e}"),
                     }
+                }
             }
 
             Message::SetVolume(vol) => {
@@ -1033,12 +1044,27 @@ impl cosmic::Application for AppModel {
             }
 
             Message::PlaybackTick => {
-                // Advance position estimate
-                self.playback_position += Duration::from_millis(500);
+                // Read accurate position from the active backend.
+                if let Some(ref mut player) = self.player {
+                    // Don't overwrite playback_position while the user is
+                    // actively dragging the seek slider — the slider sends
+                    // continuous Seek messages and the tick would fight it.
+                    let recently_seeked = self
+                        .last_seek_at
+                        .is_some_and(|t| t.elapsed() < Duration::from_millis(500));
+                    if !recently_seeked {
+                        self.playback_position = player.position();
 
-                // Check if track ended
-                if let Some(ref mut player) = self.player
-                    && player.is_finished().unwrap_or(false) {
+                        // Clamp to track duration to avoid overshooting.
+                        if let Some(ref track) = self.current_track
+                            && self.playback_position > track.duration
+                        {
+                            self.playback_position = track.duration;
+                        }
+                    }
+
+                    // Check if track ended
+                    if player.is_finished().unwrap_or(false) {
                         // Auto-advance
                         if let Ok(Some(track)) = player.next() {
                             self.current_track = Some(track.clone());
@@ -1046,6 +1072,7 @@ impl cosmic::Application for AppModel {
                             self.lyrics_text = None;
                         }
                     }
+                }
             }
 
             // -- Track selection --
@@ -1169,6 +1196,10 @@ impl cosmic::Application for AppModel {
                 {
                     self.active_provider_index = Some(index);
                     log::info!("Switched to provider: {id}");
+
+                    // Recreate player with the correct backend for the new provider.
+                    self.recreate_player();
+
                     // Clear current library data and reload from new provider
                     self.all_tracks.clear();
                     self.all_albums.clear();
@@ -1284,8 +1315,10 @@ impl cosmic::Application for AppModel {
             // -- MPD provider events --
             Message::MpdConnected(provider_id) => {
                 log::info!("MPD provider '{provider_id}' is now connected");
-                // Optionally trigger a library reload if this is the active provider
+                // If this is the active provider, recreate the player with MpdBackend
+                // and reload the library.
                 if self.registry.active_id() == provider_id {
+                    self.recreate_player();
                     return self.reload_library();
                 }
             }
@@ -1802,6 +1835,34 @@ impl AppModel {
             self.reload_library()
         } else {
             Task::none()
+        }
+    }
+
+    /// Try to create an `MpdBackend` for the currently active provider.
+    ///
+    /// Returns `Some(MpdBackend)` if the active provider is an MPD provider
+    /// and has a connected client. Returns `None` otherwise.
+    fn make_mpd_backend(&self) -> Option<MpdBackend> {
+        let active_id = self.registry.active_id();
+        self.mpd_providers
+            .iter()
+            .find(|p| p.id() == active_id)
+            .and_then(|mpd| {
+                let client = mpd.client_clone()?;
+                let handle = mpd.runtime_handle();
+                Some(MpdBackend::new(client, handle))
+            })
+    }
+
+    /// Recreate the Player with the appropriate backend for the current provider.
+    fn recreate_player(&mut self) {
+        let mpd_backend = self.make_mpd_backend();
+        match Player::new(mpd_backend) {
+            Ok(p) => self.player = Some(p),
+            Err(e) => {
+                log::error!("Failed to recreate player: {e}");
+                self.player = None;
+            }
         }
     }
 

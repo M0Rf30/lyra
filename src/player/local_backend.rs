@@ -2,7 +2,7 @@
 
 //! Local audio playback backend using rodio.
 //!
-//! Handles `TrackSource::LocalFile` (and in future, `TrackSource::HttpStream`)
+//! Handles `TrackSource::LocalFile` and `TrackSource::HttpStream`
 //! by decoding audio locally and outputting to the system sound device.
 
 use super::backend::{PlaybackBackend, PlayerError};
@@ -13,7 +13,7 @@ use std::fs::File;
 use std::io::{BufReader, Cursor};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Rodio-based local audio playback backend.
 pub struct LocalBackend {
@@ -22,7 +22,10 @@ pub struct LocalBackend {
     state: PlaybackState,
     volume: f32,
     current_duration: Duration,
-    current_position: Duration,
+    /// Position at the time playback started or was last seeked.
+    base_position: Duration,
+    /// When playback started (or resumed). `None` when paused/stopped.
+    play_started_at: Option<Instant>,
 }
 
 impl LocalBackend {
@@ -40,7 +43,8 @@ impl LocalBackend {
             state: PlaybackState::Stopped,
             volume,
             current_duration: Duration::ZERO,
-            current_position: Duration::ZERO,
+            base_position: Duration::ZERO,
+            play_started_at: None,
         })
     }
 
@@ -66,9 +70,10 @@ impl LocalBackend {
     /// Downloads the entire response body into memory, then feeds it to
     /// rodio's decoder. This supports seeking and works with any format
     /// that symphonia handles (mp3, flac, opus, aac, etc.).
+    ///
+    /// Note: this blocks the UI thread during the download. A future
+    /// improvement could offload this to a COSMIC task.
     fn play_http_stream(&mut self, url: String) -> Result<(), PlayerError> {
-        // We're in a sync context (PlaybackBackend::play is sync).
-        // Use a blocking reqwest call to fetch the audio data.
         let bytes = reqwest::blocking::get(&url)
             .map_err(|e| PlayerError(format!("HTTP stream request failed: {e}")))?
             .bytes()
@@ -105,7 +110,8 @@ impl LocalBackend {
         self.sink = Arc::new(Mutex::new(new_sink));
         self.state = PlaybackState::Playing;
         self.current_duration = duration;
-        self.current_position = Duration::ZERO;
+        self.base_position = Duration::ZERO;
+        self.play_started_at = Some(Instant::now());
 
         Ok(())
     }
@@ -124,6 +130,10 @@ impl PlaybackBackend for LocalBackend {
 
     fn pause(&mut self) -> Result<(), PlayerError> {
         if self.state == PlaybackState::Playing {
+            // Freeze position: save current elapsed, clear the timer.
+            self.base_position = self.position();
+            self.play_started_at = None;
+
             let sink = self.lock_sink()?;
             sink.pause();
             drop(sink);
@@ -137,6 +147,8 @@ impl PlaybackBackend for LocalBackend {
             let sink = self.lock_sink()?;
             sink.play();
             drop(sink);
+            // Resume the timer from saved base_position.
+            self.play_started_at = Some(Instant::now());
             self.state = PlaybackState::Playing;
         }
         Ok(())
@@ -148,7 +160,8 @@ impl PlaybackBackend for LocalBackend {
         drop(sink);
         self.state = PlaybackState::Stopped;
         self.current_duration = Duration::ZERO;
-        self.current_position = Duration::ZERO;
+        self.base_position = Duration::ZERO;
+        self.play_started_at = None;
         Ok(())
     }
 
@@ -157,7 +170,10 @@ impl PlaybackBackend for LocalBackend {
         sink.try_seek(position)
             .map_err(|e| PlayerError(format!("Seek failed: {e}")))?;
         drop(sink);
-        self.current_position = position;
+        self.base_position = position;
+        if self.state == PlaybackState::Playing {
+            self.play_started_at = Some(Instant::now());
+        }
         Ok(())
     }
 
@@ -177,7 +193,17 @@ impl PlaybackBackend for LocalBackend {
     }
 
     fn position(&self) -> Duration {
-        self.current_position
+        match self.state {
+            PlaybackState::Playing => {
+                let elapsed = self
+                    .play_started_at
+                    .map(|t| t.elapsed())
+                    .unwrap_or(Duration::ZERO);
+                self.base_position + elapsed
+            }
+            PlaybackState::Paused => self.base_position,
+            PlaybackState::Stopped => Duration::ZERO,
+        }
     }
 
     fn duration(&self) -> Duration {
@@ -185,6 +211,13 @@ impl PlaybackBackend for LocalBackend {
     }
 
     fn is_finished(&self) -> Result<bool, PlayerError> {
+        // Only consider "finished" if we were actively playing and the
+        // sink ran out of sources (i.e. the track ended naturally).
+        // Stopped/Paused states are never "finished" — they represent
+        // explicit user actions, not natural track completion.
+        if self.state != PlaybackState::Playing {
+            return Ok(false);
+        }
         let sink = self.lock_sink()?;
         Ok(sink.empty())
     }

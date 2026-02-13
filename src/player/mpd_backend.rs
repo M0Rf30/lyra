@@ -13,21 +13,39 @@ use mpd_client::commands::{
 };
 use mpd_client::responses::PlayState;
 use mpd_client::Client;
-use std::time::Duration;
+use std::cell::RefCell;
+use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
+
+/// How often we query MPD for fresh status (position, state, duration).
+const STATUS_TTL: Duration = Duration::from_millis(200);
+
+/// Cached MPD status fields, refreshed on demand via `ensure_fresh()`.
+struct CachedStatus {
+    state: PlaybackState,
+    position: Duration,
+    duration: Duration,
+    volume: f32,
+    last_refresh: Instant,
+}
 
 /// MPD-based playback backend.
 ///
 /// Playback happens on the MPD server. This backend sends protocol commands
 /// and queries status. The `Client` is `Clone + Send + Sync` so we hold
 /// it directly. A tokio `Handle` is used to bridge sync calls to async.
+///
+/// The cached status uses `RefCell` for interior mutability so that
+/// `position()`, `state()`, `duration()`, and `is_finished()` (which take
+/// `&self` per the `PlaybackBackend` trait) can transparently refresh the
+/// cache when it goes stale.
 pub struct MpdBackend {
     client: Client,
     runtime: Handle,
-    volume: f32,
-    cached_state: PlaybackState,
-    cached_position: Duration,
-    cached_duration: Duration,
+    cache: RefCell<CachedStatus>,
+    /// Set `true` on `play()`, cleared on `stop()`.
+    /// Used by `is_finished()` to distinguish "track ended" from "never played".
+    was_playing: bool,
 }
 
 impl MpdBackend {
@@ -36,30 +54,46 @@ impl MpdBackend {
         Self {
             client,
             runtime,
-            volume: 1.0,
-            cached_state: PlaybackState::Stopped,
-            cached_position: Duration::ZERO,
-            cached_duration: Duration::ZERO,
+            cache: RefCell::new(CachedStatus {
+                state: PlaybackState::Stopped,
+                position: Duration::ZERO,
+                duration: Duration::ZERO,
+                volume: 1.0,
+                last_refresh: Instant::now(),
+            }),
+            was_playing: false,
         }
     }
 
-    /// Refresh cached state from MPD status.
-    pub fn refresh_status(&mut self) -> Result<(), PlayerError> {
+    /// Refresh cached state from MPD status (unconditionally).
+    fn refresh_status(&self) -> Result<(), PlayerError> {
         let status = self
             .runtime
             .block_on(self.client.command(Status))
             .map_err(|e| PlayerError(format!("MPD status: {e}")))?;
 
-        self.cached_state = match status.state {
+        let mut cache = self.cache.borrow_mut();
+        cache.state = match status.state {
             PlayState::Playing => PlaybackState::Playing,
             PlayState::Paused => PlaybackState::Paused,
             PlayState::Stopped => PlaybackState::Stopped,
         };
-        self.cached_position = status.elapsed.unwrap_or(Duration::ZERO);
-        self.cached_duration = status.duration.unwrap_or(Duration::ZERO);
-        self.volume = status.volume as f32 / 100.0;
+        cache.position = status.elapsed.unwrap_or(Duration::ZERO);
+        cache.duration = status.duration.unwrap_or(Duration::ZERO);
+        cache.volume = status.volume as f32 / 100.0;
+        cache.last_refresh = Instant::now();
 
         Ok(())
+    }
+
+    /// Refresh the cache only if it is older than `STATUS_TTL`.
+    fn ensure_fresh(&self) {
+        let stale = self.cache.borrow().last_refresh.elapsed() > STATUS_TTL;
+        if stale
+            && let Err(e) = self.refresh_status()
+        {
+            log::warn!("MpdBackend: failed to refresh status: {e}");
+        }
     }
 }
 
@@ -75,8 +109,12 @@ impl PlaybackBackend for MpdBackend {
                     })
                     .map_err(|e| PlayerError(format!("MPD play: {e}")))?;
 
-                self.cached_state = PlaybackState::Playing;
-                self.cached_position = Duration::ZERO;
+                self.was_playing = true;
+                {
+                    let mut cache = self.cache.borrow_mut();
+                    cache.state = PlaybackState::Playing;
+                    cache.position = Duration::ZERO;
+                }
                 // Refresh to get duration
                 self.refresh_status().ok();
                 Ok(())
@@ -91,7 +129,7 @@ impl PlaybackBackend for MpdBackend {
         self.runtime
             .block_on(self.client.command(SetPause(true)))
             .map_err(|e| PlayerError(format!("MPD pause: {e}")))?;
-        self.cached_state = PlaybackState::Paused;
+        self.cache.borrow_mut().state = PlaybackState::Paused;
         Ok(())
     }
 
@@ -99,7 +137,7 @@ impl PlaybackBackend for MpdBackend {
         self.runtime
             .block_on(self.client.command(SetPause(false)))
             .map_err(|e| PlayerError(format!("MPD resume: {e}")))?;
-        self.cached_state = PlaybackState::Playing;
+        self.cache.borrow_mut().state = PlaybackState::Playing;
         Ok(())
     }
 
@@ -107,9 +145,13 @@ impl PlaybackBackend for MpdBackend {
         self.runtime
             .block_on(self.client.command(Stop))
             .map_err(|e| PlayerError(format!("MPD stop: {e}")))?;
-        self.cached_state = PlaybackState::Stopped;
-        self.cached_position = Duration::ZERO;
-        self.cached_duration = Duration::ZERO;
+        self.was_playing = false;
+        {
+            let mut cache = self.cache.borrow_mut();
+            cache.state = PlaybackState::Stopped;
+            cache.position = Duration::ZERO;
+            cache.duration = Duration::ZERO;
+        }
         Ok(())
     }
 
@@ -117,7 +159,11 @@ impl PlaybackBackend for MpdBackend {
         self.runtime
             .block_on(self.client.command(Seek(SeekMode::Absolute(position))))
             .map_err(|e| PlayerError(format!("MPD seek: {e}")))?;
-        self.cached_position = position;
+        let mut cache = self.cache.borrow_mut();
+        cache.position = position;
+        // Mark cache as fresh so we don't immediately override
+        // the seek target with a stale status query.
+        cache.last_refresh = Instant::now();
         Ok(())
     }
 
@@ -126,29 +172,33 @@ impl PlaybackBackend for MpdBackend {
         self.runtime
             .block_on(self.client.command(SetVolume(vol_int)))
             .map_err(|e| PlayerError(format!("MPD setvol: {e}")))?;
-        self.volume = volume.clamp(0.0, 1.0);
+        self.cache.borrow_mut().volume = volume.clamp(0.0, 1.0);
         Ok(())
     }
 
     fn volume(&self) -> f32 {
-        self.volume
+        self.cache.borrow().volume
     }
 
     fn state(&self) -> PlaybackState {
-        self.cached_state
+        self.ensure_fresh();
+        self.cache.borrow().state
     }
 
     fn position(&self) -> Duration {
-        self.cached_position
+        self.ensure_fresh();
+        self.cache.borrow().position
     }
 
     fn duration(&self) -> Duration {
-        self.cached_duration
+        self.ensure_fresh();
+        self.cache.borrow().duration
     }
 
     fn is_finished(&self) -> Result<bool, PlayerError> {
-        // For MPD, "finished" means stopped and we had been playing.
-        // We rely on refresh_status() being called periodically via tick/idle.
-        Ok(self.cached_state == PlaybackState::Stopped && self.cached_position > Duration::ZERO)
+        self.ensure_fresh();
+        let state = self.cache.borrow().state;
+        // Track ended naturally: MPD reports Stopped, and we had been playing.
+        Ok(state == PlaybackState::Stopped && self.was_playing)
     }
 }

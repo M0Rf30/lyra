@@ -10,6 +10,7 @@ pub mod mpd_backend;
 use crate::library::{Track, TrackSource};
 use backend::{PlaybackBackend, PlayerError};
 use local_backend::LocalBackend;
+use mpd_backend::MpdBackend;
 use std::time::Duration;
 
 /// Represents the current playback state.
@@ -25,7 +26,6 @@ pub enum PlaybackState {
 pub struct NowPlaying {
     pub track: Track,
     pub duration: Duration,
-    pub position: Duration,
 }
 
 /// Resolve a `Track` to its `TrackSource` based on the provider_id field.
@@ -43,9 +43,23 @@ fn resolve_track_source(track: &Track) -> TrackSource {
     }
 }
 
-/// Core audio player that manages playback through a backend.
+/// Which backend is currently active for playback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveBackend {
+    /// Local rodio-based playback (local files + HTTP streams).
+    Local,
+    /// MPD server playback.
+    Mpd,
+}
+
+/// Core audio player that manages playback through concrete backends.
+///
+/// Instead of dynamic dispatch via `Box<dyn PlaybackBackend>`, we hold
+/// each backend in a named field and switch via `active_backend`.
 pub struct Player {
-    backend: Box<dyn PlaybackBackend>,
+    local_backend: LocalBackend,
+    mpd_backend: Option<MpdBackend>,
+    active_backend: ActiveBackend,
     current_track: Option<NowPlaying>,
     volume: f32,
     queue: Vec<Track>,
@@ -53,12 +67,16 @@ pub struct Player {
 }
 
 impl Player {
-    /// Create a new player instance with a local (rodio) backend.
-    pub fn new() -> Result<Self, String> {
-        let backend = LocalBackend::new().map_err(|e| e.to_string())?;
+    /// Create a new player instance.
+    ///
+    /// `mpd_backend` should be `Some(...)` when an MPD provider is active.
+    pub fn new(mpd_backend: Option<MpdBackend>) -> Result<Self, String> {
+        let local_backend = LocalBackend::new().map_err(|e| e.to_string())?;
 
         Ok(Self {
-            backend: Box::new(backend),
+            local_backend,
+            mpd_backend,
+            active_backend: ActiveBackend::Local,
             current_track: None,
             volume: 0.8,
             queue: Vec::new(),
@@ -66,40 +84,76 @@ impl Player {
         })
     }
 
+    /// Get a reference to the currently active backend.
+    fn active(&self) -> &dyn PlaybackBackend {
+        match self.active_backend {
+            ActiveBackend::Local => &self.local_backend,
+            ActiveBackend::Mpd => self
+                .mpd_backend
+                .as_ref()
+                .expect("MPD backend not available"),
+        }
+    }
+
+    /// Get a mutable reference to the currently active backend.
+    fn active_mut(&mut self) -> &mut dyn PlaybackBackend {
+        match self.active_backend {
+            ActiveBackend::Local => &mut self.local_backend,
+            ActiveBackend::Mpd => self
+                .mpd_backend
+                .as_mut()
+                .expect("MPD backend not available"),
+        }
+    }
+
     /// Play a track by resolving its source.
     pub fn play_track(&mut self, track: &Track, source: TrackSource) -> Result<(), String> {
-        self.backend.play(source).map_err(|e| e.to_string())?;
-        self.volume = self.backend.volume();
+        // Select the appropriate backend based on the track source.
+        match &source {
+            TrackSource::LocalFile(_) | TrackSource::HttpStream(_) => {
+                self.active_backend = ActiveBackend::Local;
+            }
+            TrackSource::MpdFile(_) => {
+                if self.mpd_backend.is_none() {
+                    return Err("MPD backend not available for MpdFile source".into());
+                }
+                self.active_backend = ActiveBackend::Mpd;
+            }
+        }
+
+        self.active_mut().play(source).map_err(|e| e.to_string())?;
+        self.volume = self.active().volume();
         self.current_track = Some(NowPlaying {
             track: track.clone(),
-            duration: self.backend.duration(),
-            position: Duration::ZERO,
+            duration: self.active().duration(),
         });
         Ok(())
     }
 
     /// Toggle play/pause.
     pub fn toggle_playback(&mut self) -> Result<(), String> {
-        match self.backend.state() {
-            PlaybackState::Playing => self.backend.pause().map_err(|e| e.to_string()),
-            PlaybackState::Paused => self.backend.resume().map_err(|e| e.to_string()),
+        match self.active().state() {
+            PlaybackState::Playing => self.active_mut().pause().map_err(|e| e.to_string()),
+            PlaybackState::Paused => self.active_mut().resume().map_err(|e| e.to_string()),
             PlaybackState::Stopped => Ok(()),
         }
     }
 
     /// Stop playback entirely.
     pub fn stop(&mut self) -> Result<(), String> {
-        self.backend.stop().map_err(|e| e.to_string())?;
+        self.active_mut().stop().map_err(|e| e.to_string())?;
         self.current_track = None;
         Ok(())
     }
 
     /// Set volume (0.0 - 1.0).
     pub fn set_volume(&mut self, volume: f32) -> Result<(), String> {
-        self.volume = volume.clamp(0.0, 1.0);
-        self.backend
-            .set_volume(self.volume)
-            .map_err(|e| e.to_string())
+        let clamped = volume.clamp(0.0, 1.0);
+        self.active_mut()
+            .set_volume(clamped)
+            .map_err(|e| e.to_string())?;
+        self.volume = clamped;
+        Ok(())
     }
 
     pub fn volume(&self) -> f32 {
@@ -108,16 +162,24 @@ impl Player {
 
     /// Seek to a position.
     pub fn seek(&mut self, position: Duration) -> Result<(), String> {
-        self.backend.seek(position).map_err(|e| e.to_string())?;
-        if let Some(ref mut np) = self.current_track {
-            np.position = position;
-        }
-        Ok(())
+        self.active_mut()
+            .seek(position)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Get the current playback position from the active backend.
+    pub fn position(&self) -> Duration {
+        self.active().position()
+    }
+
+    /// Get the current track duration from the active backend.
+    pub fn duration(&self) -> Duration {
+        self.active().duration()
     }
 
     /// Get the current playback state.
     pub fn state(&self) -> PlaybackState {
-        self.backend.state()
+        self.active().state()
     }
 
     /// Get current track info.
@@ -125,9 +187,9 @@ impl Player {
         self.current_track.as_ref()
     }
 
-    /// Check if playback is finished (sink empty).
+    /// Check if playback is finished (sink empty / track ended).
     pub fn is_finished(&self) -> Result<bool, String> {
-        self.backend.is_finished().map_err(|e| e.to_string())
+        self.active().is_finished().map_err(|e| e.to_string())
     }
 
     // -- Queue management --
