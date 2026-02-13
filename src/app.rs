@@ -866,12 +866,7 @@ impl cosmic::Application for AppModel {
 
             // -- Library --
             Message::ScanLibrary => {
-                // For remote providers (MPD), sync_library just sends an "update"
-                // command which requires an active connection. Skip if not connected —
-                // the idle subscription will trigger a reload once connected.
                 if let Some(provider) = self.registry.active_shared() {
-                    // Quick connectivity check: for MPD, browse_tracks on a disconnected
-                    // provider returns NotConnected instantly. Skip scan in that case.
                     match provider.provider_type() {
                         crate::provider::ProviderType::Local => {
                             self.library_scanning = true;
@@ -887,11 +882,17 @@ impl cosmic::Application for AppModel {
                                 cosmic::Action::App(Message::LibraryScanComplete(count))
                             });
                         }
-                        _ => {
-                            // Remote providers: don't scan at startup; the idle
+                        crate::provider::ProviderType::Subsonic => {
+                            // Subsonic providers connect on demand — no idle subscription.
+                            // Trigger a library reload directly.
+                            self.library_scanning = true;
+                            return self.reload_library();
+                        }
+                        crate::provider::ProviderType::Mpd => {
+                            // MPD providers: don't scan at startup; the idle
                             // subscription fires MpdConnected which triggers reload.
                             log::info!(
-                                "Skipping scan for remote provider '{}' — waiting for connection",
+                                "Skipping scan for MPD provider '{}' — waiting for connection",
                                 self.registry.active_id()
                             );
                         }
@@ -913,6 +914,7 @@ impl cosmic::Application for AppModel {
                 cover_images,
                 artist_avatars,
             } => {
+                self.library_scanning = false;
                 self.all_tracks = tracks;
                 self.all_albums = albums;
                 self.all_artists = artists;
