@@ -1,0 +1,64 @@
+[package]
+name = "cosmic-music-player"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0"
+description = "A modern music player for the COSMIC desktop"
+repository = "https://github.com/M0Rf30/rust-music-player"
+
+[dependencies]
+# COSMIC / UI framework
+libcosmic = { git = "https://github.com/pop-os/libcosmic.git", features = [
+    "a11y",
+    "about",
+    "dbus-config",
+    "multi-window",
+    "single-instance",
+    "tokio",
+    "winit",
+    "wayland",
+    "wgpu",
+] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+# Audio playback
+rodio = "0.20"
+
+# Audio metadata (ID3, Vorbis, FLAC, etc.)
+lofty = "0.22"
+
+# Database for music library
+rusqlite = { version = "0.33", features = ["bundled"] }
+
+# Lyrics fetching
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Image handling for cover art
+image = "0.25"
+
+# Internationalization
+i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
+i18n-embed-fl = "0.10"
+rust-embed = "8"
+
+# File system watching for library updates
+notify = "8"
+
+# Misc
+open = "5"
+dirs = "6"
+walkdir = "2"
+log = "0.4"
+env_logger = "0.11"
+chrono = "0.4"
+
+# Uncomment to test a locally-cloned libcosmic
+# [patch.'https://github.com/pop-os/libcosmic']
+# libcosmic = { path = "../libcosmic" }
+# cosmic-config = { path = "../libcosmic/cosmic-config" }
+# cosmic-theme = { path = "../libcosmic/cosmic-theme" }

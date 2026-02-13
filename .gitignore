@@ -1,0 +1,9 @@
+/target
+/.cargo
+/vendor
+/vendor.tar
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
