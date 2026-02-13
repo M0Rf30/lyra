@@ -51,7 +51,7 @@ pub fn album_grid_view<'a>(
             let key = CoverArt::album_key(&album.artist, &album.name);
             let art_widget: cosmic::Element<'_, AlbumMessage> =
                 if let Some(handle) = cover_images.get(&key) {
-                    widget::icon::icon(handle.clone()).size(180).into()
+                    widget::icon::icon(handle.clone()).size(150).into()
                 } else {
                     widget::icon::from_name("media-optical-cd-audio-symbolic")
                         .size(80)
@@ -61,18 +61,15 @@ pub fn album_grid_view<'a>(
             let album_card = widget::column()
                 .push(
                     widget::container(art_widget)
-                        .width(180)
-                        .height(180)
+                        .width(150)
+                        .height(150)
                         .align_x(Horizontal::Center)
-                        .align_y(Vertical::Center)
-                        .class(cosmic::theme::Container::Card),
+                        .align_y(Vertical::Center),
                 )
                 .push(
                     widget::column()
-                        .push(widget::text(truncate_str(&album.name, 24)).width(180))
-                        .push(
-                            widget::text::caption(truncate_str(&album.artist, 28)).width(180),
-                        )
+                        .push(widget::text(truncate_str(&album.name, 20)).width(150))
+                        .push(widget::text::caption(truncate_str(&album.artist, 24)).width(150))
                         .spacing(2),
                 )
                 .spacing(8);
@@ -80,6 +77,7 @@ pub fn album_grid_view<'a>(
             widget::button::custom(album_card)
                 .on_press(AlbumMessage::SelectAlbum(index))
                 .padding(8)
+                .class(cosmic::theme::Button::Text)
                 .into()
         })
         .collect();
@@ -101,14 +99,14 @@ pub fn album_detail_view<'a>(
     cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
 ) -> cosmic::Element<'a, AlbumMessage> {
     let key = CoverArt::album_key(&album.artist, &album.name);
-    let art_widget: cosmic::Element<'_, AlbumMessage> =
-        if let Some(handle) = cover_images.get(&key) {
-            widget::icon::icon(handle.clone()).size(160).into()
-        } else {
-            widget::icon::from_name("media-optical-cd-audio-symbolic")
-                .size(120)
-                .into()
-        };
+    let art_widget: cosmic::Element<'_, AlbumMessage> = if let Some(handle) = cover_images.get(&key)
+    {
+        widget::icon::icon(handle.clone()).size(160).into()
+    } else {
+        widget::icon::from_name("media-optical-cd-audio-symbolic")
+            .size(120)
+            .into()
+    };
 
     let header = widget::row()
         .push(
@@ -120,8 +118,7 @@ pub fn album_detail_view<'a>(
                 .width(160)
                 .height(160)
                 .align_x(Horizontal::Center)
-                .align_y(Vertical::Center)
-                .class(cosmic::theme::Container::Card),
+                .align_y(Vertical::Center),
         )
         .push(
             widget::column()
@@ -155,7 +152,8 @@ pub fn album_detail_view<'a>(
                 .padding(4),
         )
         .on_press(AlbumMessage::PlayTrack(album_index, track_idx))
-        .width(Length::Fill);
+        .width(Length::Fill)
+        .class(cosmic::theme::Button::Text);
 
         track_list = track_list.push(row);
     }

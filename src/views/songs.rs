@@ -47,24 +47,44 @@ pub fn songs_list_view<'a>(
     let header = widget::row()
         .push(widget::text("#").width(40))
         .push(
-            widget::button::text(sort_label("Title", SortField::Title, current_sort))
-                .on_press(SongMessage::SortBy(SortField::Title))
-                .width(Length::Fill),
+            widget::button::custom(widget::text(sort_label(
+                "Title",
+                SortField::Title,
+                current_sort,
+            )))
+            .on_press(SongMessage::SortBy(SortField::Title))
+            .width(Length::Fill)
+            .class(cosmic::theme::Button::Text),
         )
         .push(
-            widget::button::text(sort_label("Artist", SortField::Artist, current_sort))
-                .on_press(SongMessage::SortBy(SortField::Artist))
-                .width(200),
+            widget::button::custom(widget::text(sort_label(
+                "Artist",
+                SortField::Artist,
+                current_sort,
+            )))
+            .on_press(SongMessage::SortBy(SortField::Artist))
+            .width(200)
+            .class(cosmic::theme::Button::Text),
         )
         .push(
-            widget::button::text(sort_label("Album", SortField::Album, current_sort))
-                .on_press(SongMessage::SortBy(SortField::Album))
-                .width(200),
+            widget::button::custom(widget::text(sort_label(
+                "Album",
+                SortField::Album,
+                current_sort,
+            )))
+            .on_press(SongMessage::SortBy(SortField::Album))
+            .width(200)
+            .class(cosmic::theme::Button::Text),
         )
         .push(
-            widget::button::text(sort_label("Duration", SortField::Duration, current_sort))
-                .on_press(SongMessage::SortBy(SortField::Duration))
-                .width(80),
+            widget::button::custom(widget::text(sort_label(
+                "Duration",
+                SortField::Duration,
+                current_sort,
+            )))
+            .on_press(SongMessage::SortBy(SortField::Duration))
+            .width(80)
+            .class(cosmic::theme::Button::Text),
         )
         .spacing(8)
         .align_y(Alignment::Center)
@@ -85,7 +105,8 @@ pub fn songs_list_view<'a>(
                 .padding([4, 8]),
         )
         .on_press(SongMessage::PlayTrack(index))
-        .width(Length::Fill);
+        .width(Length::Fill)
+        .class(cosmic::theme::Button::Text);
 
         track_list = track_list.push(row);
     }

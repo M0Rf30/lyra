@@ -67,7 +67,8 @@ pub fn artist_list_view<'a>(
                 .padding(8),
         )
         .on_press(ArtistMessage::SelectArtist(index))
-        .width(Length::Fill);
+        .width(Length::Fill)
+        .class(cosmic::theme::Button::Text);
 
         list = list.push(row);
     }
@@ -131,8 +132,7 @@ pub fn artist_detail_view<'a>(
                     .width(64)
                     .height(64)
                     .align_x(Horizontal::Center)
-                    .align_y(Vertical::Center)
-                    .class(cosmic::theme::Container::Card),
+                    .align_y(Vertical::Center),
             )
             .push(
                 widget::column()
@@ -169,7 +169,8 @@ pub fn artist_detail_view<'a>(
                     .padding(4),
             )
             .on_press(ArtistMessage::PlayTrack(artist_index, album_idx, track_idx))
-            .width(Length::Fill);
+            .width(Length::Fill)
+            .class(cosmic::theme::Button::Text);
 
             track_list = track_list.push(row);
         }
