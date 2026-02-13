@@ -55,12 +55,14 @@ rust-embed = "8"
 # File system watching for library updates
 notify = "8"
 
+# Tracing / logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 # Misc
 open = "5"
 dirs = "6"
 walkdir = "2"
-log = "0.4"
-env_logger = "0.11"
 chrono = "0.4"
 
 # Uncomment to test a locally-cloned libcosmic

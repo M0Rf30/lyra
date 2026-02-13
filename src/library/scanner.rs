@@ -20,12 +20,13 @@ pub struct LibraryScanner;
 impl LibraryScanner {
     /// Scan the given directories and upsert tracks into the database.
     /// Returns the number of new or updated tracks.
+    #[tracing::instrument(skip(db), level = "debug")]
     pub fn scan(db: &LibraryDb, dirs: &[PathBuf]) -> Result<usize, String> {
         let mut count = 0;
 
         for dir in dirs {
             if !dir.exists() {
-                log::warn!("Music directory does not exist: {}", dir.display());
+                tracing::warn!("Music directory does not exist: {}", dir.display());
                 continue;
             }
 
@@ -57,13 +58,13 @@ impl LibraryScanner {
                 match Self::read_metadata(path) {
                     Ok(track) => {
                         if let Err(e) = db.upsert_track(&track, mtime) {
-                            log::error!("Failed to insert track {}: {e}", path.display());
+                            tracing::error!("Failed to insert track {}: {e}", path.display());
                         } else {
                             count += 1;
                         }
                     }
                     Err(e) => {
-                        log::warn!("Failed to read metadata for {}: {e}", path.display());
+                        tracing::warn!("Failed to read metadata for {}: {e}", path.display());
                     }
                 }
             }
@@ -72,7 +73,7 @@ impl LibraryScanner {
         // Clean up tracks that no longer exist
         if let Ok(removed) = db.remove_missing_tracks()
             && removed > 0 {
-                log::info!("Removed {removed} missing tracks from library");
+                tracing::info!("Removed {removed} missing tracks from library");
             }
 
         Ok(count)

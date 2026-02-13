@@ -108,6 +108,7 @@ impl Player {
     }
 
     /// Play a track by resolving its source.
+    #[tracing::instrument(skip(self, track, source), level = "debug")]
     pub fn play_track(&mut self, track: &Track, source: TrackSource) -> Result<(), String> {
         // Select the appropriate backend based on the track source.
         match &source {
@@ -132,6 +133,7 @@ impl Player {
     }
 
     /// Toggle play/pause.
+    #[tracing::instrument(skip(self), level = "debug")]
     pub fn toggle_playback(&mut self) -> Result<(), String> {
         match self.active().state() {
             PlaybackState::Playing => self.active_mut().pause().map_err(|e| e.to_string()),
@@ -162,6 +164,7 @@ impl Player {
     }
 
     /// Seek to a position.
+    #[tracing::instrument(skip(self), level = "debug")]
     pub fn seek(&mut self, position: Duration) -> Result<(), String> {
         self.active_mut()
             .seek(position)

@@ -116,7 +116,7 @@ impl MpdProvider {
                     }
                 })?;
 
-        log::info!(
+        tracing::info!(
             "Connected to MPD at {} (protocol {})",
             addr,
             client.protocol_version()
@@ -323,6 +323,7 @@ impl MusicProvider for MpdProvider {
         ProviderType::Mpd
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
     fn browse_albums(&self) -> Result<Vec<Album>, ProviderError> {
         self.block_on(async {
             let names = self.list_album_names().await?;
@@ -332,6 +333,7 @@ impl MusicProvider for MpdProvider {
         })
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
     fn browse_artists(&self) -> Result<Vec<Artist>, ProviderError> {
         self.block_on(async {
             let client = self.get_client().await?;
@@ -397,6 +399,7 @@ impl MusicProvider for MpdProvider {
         })
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
     fn browse_tracks(&self) -> Result<Vec<Track>, ProviderError> {
         self.block_on(async {
             let client = self.get_client().await?;
@@ -413,6 +416,7 @@ impl MusicProvider for MpdProvider {
         })
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
     fn search(&self, query: &str) -> Result<Vec<Track>, ProviderError> {
         let query_owned = query.to_string();
         self.block_on(async {
@@ -436,6 +440,7 @@ impl MusicProvider for MpdProvider {
         Ok(TrackSource::MpdFile(track.source_uri.clone()))
     }
 
+    #[tracing::instrument(skip(self, album), level = "debug")]
     fn get_cover_art(&self, album: &Album) -> Result<Option<Vec<u8>>, ProviderError> {
         self.block_on(async {
             let client = self.get_client().await?;
@@ -449,7 +454,7 @@ impl MusicProvider for MpdProvider {
                 Ok(Some((data, _mime))) => Ok(Some(data.to_vec())),
                 Ok(None) => Ok(None),
                 Err(e) => {
-                    log::warn!("Failed to get MPD album art for {uri}: {e}");
+                    tracing::warn!("Failed to get MPD album art for {uri}: {e}");
                     Ok(None)
                 }
             }
@@ -461,6 +466,7 @@ impl MusicProvider for MpdProvider {
         Ok(None)
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
     fn sync_library(&self) -> Result<usize, ProviderError> {
         self.block_on(async {
             let client = self.get_client().await?;

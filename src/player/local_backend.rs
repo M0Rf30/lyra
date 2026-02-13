@@ -139,7 +139,7 @@ impl LocalBackend {
             })();
 
             if let Err(e) = result {
-                log::error!("HTTP stream playback failed: {e}");
+                tracing::error!("HTTP stream playback failed: {e}");
                 loading.store(false, Ordering::Release);
                 if let Ok(sink) = sink_arc.lock() {
                     sink.stop();

@@ -85,7 +85,7 @@ impl LibraryDb {
             return Ok(());
         }
 
-        log::info!("Running database migration: adding provider columns");
+        tracing::info!("Running database migration: adding provider columns");
 
         self.conn
             .execute_batch(
@@ -109,7 +109,7 @@ impl LibraryDb {
             )
             .map_err(|e| format!("Migration error (indexes): {e}"))?;
 
-        log::info!("Database migration complete");
+        tracing::info!("Database migration complete");
         Ok(())
     }
 
@@ -130,6 +130,7 @@ impl LibraryDb {
     }
 
     /// Insert or update a track.
+    #[tracing::instrument(skip(self, track), level = "debug")]
     pub fn upsert_track(&self, track: &Track, mtime: i64) -> Result<(), String> {
         self.conn
             .execute(
@@ -171,6 +172,7 @@ impl LibraryDb {
     ///
     /// Uses batched `DELETE ... WHERE id IN (...)` inside a transaction for
     /// efficiency instead of one DELETE per row.
+    #[tracing::instrument(skip(self), level = "debug")]
     pub fn remove_missing_tracks(&self) -> Result<usize, String> {
         let mut stmt = self
             .conn
@@ -235,6 +237,7 @@ impl LibraryDb {
     }
 
     /// Get all tracks, optionally filtered by provider, ordered by album then track number.
+    #[tracing::instrument(skip(self), level = "debug")]
     pub fn all_tracks(&self, provider: Option<&str>) -> Result<Vec<Track>, String> {
         let (sql, param): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match provider {
             Some(p) => (
@@ -278,6 +281,7 @@ impl LibraryDb {
     /// Get all albums (grouped from tracks), optionally filtered by provider.
     ///
     /// Uses a HashMap index for O(1) grouping instead of linear search.
+    #[tracing::instrument(skip(self), level = "debug")]
     pub fn all_albums(&self, provider: Option<&str>) -> Result<Vec<Album>, String> {
         let tracks = self.all_tracks(provider)?;
         let mut albums: Vec<Album> = Vec::new();
@@ -308,6 +312,7 @@ impl LibraryDb {
     /// Get all artists (grouped from albums), optionally filtered by provider.
     ///
     /// Uses a HashMap index for O(1) grouping instead of linear search.
+    #[tracing::instrument(skip(self), level = "debug")]
     pub fn all_artists(&self, provider: Option<&str>) -> Result<Vec<Artist>, String> {
         let albums = self.all_albums(provider)?;
         let mut artists: Vec<Artist> = Vec::new();

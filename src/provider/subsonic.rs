@@ -251,9 +251,9 @@ impl SubsonicProvider {
         let client = self.client.clone();
         self.runtime.spawn(async move {
             if let Err(e) = client.scrobble(&id, None, Some(true)).await {
-                log::warn!("Subsonic scrobble failed for '{id}': {e}");
+                tracing::warn!("Subsonic scrobble failed for '{id}': {e}");
             } else {
-                log::debug!("Scrobbled song '{id}'");
+                tracing::debug!("Scrobbled song '{id}'");
             }
         });
     }
@@ -264,7 +264,7 @@ impl SubsonicProvider {
         let client = self.client.clone();
         self.runtime.spawn(async move {
             if let Err(e) = client.scrobble(&id, None, Some(false)).await {
-                log::debug!("Subsonic now-playing failed for '{id}': {e}");
+                tracing::debug!("Subsonic now-playing failed for '{id}': {e}");
             }
         });
     }
@@ -283,6 +283,7 @@ impl MusicProvider for SubsonicProvider {
         ProviderType::Subsonic
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
     fn browse_albums(&self) -> Result<Vec<Album>, ProviderError> {
         self.block_on(async {
             let mut all_albums = Vec::new();
@@ -307,6 +308,7 @@ impl MusicProvider for SubsonicProvider {
         })
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
     fn browse_artists(&self) -> Result<Vec<Artist>, ProviderError> {
         self.block_on(async {
             let artists_id3 = self
@@ -369,6 +371,7 @@ impl MusicProvider for SubsonicProvider {
         })
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
     fn browse_tracks(&self) -> Result<Vec<Track>, ProviderError> {
         self.block_on(async {
             let mut all_tracks = Vec::new();
@@ -406,6 +409,7 @@ impl MusicProvider for SubsonicProvider {
         })
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
     fn search(&self, query: &str) -> Result<Vec<Track>, ProviderError> {
         let query_owned = query.to_string();
         self.block_on(async {
@@ -442,6 +446,7 @@ impl MusicProvider for SubsonicProvider {
         Ok(TrackSource::HttpStream(url.to_string()))
     }
 
+    #[tracing::instrument(skip(self, album), level = "debug")]
     fn get_cover_art(&self, album: &Album) -> Result<Option<Vec<u8>>, ProviderError> {
         // The cover_source should already contain a Url from browse_albums().
         // Fetch the image bytes for display.
@@ -466,7 +471,7 @@ impl MusicProvider for SubsonicProvider {
                         match self.client.get_cover_art(&first_track.source_uri, Some(300)).await {
                             Ok(bytes) => Ok(Some(bytes.to_vec())),
                             Err(e) => {
-                                log::warn!("Subsonic cover art for '{}': {e}", album.name);
+                                tracing::warn!("Subsonic cover art for '{}': {e}", album.name);
                                 Ok(None)
                             }
                         }
@@ -496,7 +501,7 @@ impl MusicProvider for SubsonicProvider {
                     }
                 }
                 Err(e) => {
-                    log::debug!("getLyricsBySongId not available: {e}");
+                    tracing::debug!("getLyricsBySongId not available: {e}");
                 }
             }
 
@@ -514,7 +519,7 @@ impl MusicProvider for SubsonicProvider {
                     }
                 }
                 Err(e) => {
-                    log::debug!("getLyrics not available: {e}");
+                    tracing::debug!("getLyrics not available: {e}");
                 }
             }
 
@@ -522,14 +527,15 @@ impl MusicProvider for SubsonicProvider {
         })
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
     fn sync_library(&self) -> Result<usize, ProviderError> {
         // Subsonic servers manage their own library scanning.
         // We can trigger a scan via startScan, but the actual library
         // data is fetched on demand via browse_*() methods.
         self.block_on(async {
             match self.client.start_scan().await {
-                Ok(_) => log::info!("Triggered Subsonic library scan"),
-                Err(e) => log::warn!("Subsonic startScan: {e}"),
+                Ok(_) => tracing::info!("Triggered Subsonic library scan"),
+                Err(e) => tracing::warn!("Subsonic startScan: {e}"),
             }
             Ok(0)
         })

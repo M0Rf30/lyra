@@ -46,10 +46,10 @@ impl HttpRangeReader {
         let content_length = response.content_length().unwrap_or(0);
 
         if content_length == 0 {
-            log::warn!("HTTP stream has unknown or zero Content-Length, seeking may not work");
+            tracing::warn!("HTTP stream has unknown or zero Content-Length, seeking may not work");
         }
 
-        log::info!(
+        tracing::info!(
             "HttpRangeReader: opened {} ({} bytes)",
             url.split('?').next().unwrap_or(&url),
             content_length,
@@ -70,6 +70,7 @@ impl HttpRangeReader {
     }
 
     /// Open a new HTTP connection starting at `byte_offset`.
+    #[tracing::instrument(skip(self), level = "debug")]
     fn open_at(&mut self, byte_offset: u64) -> io::Result<()> {
         // Drop the old response (closes the connection).
         self.response = None;

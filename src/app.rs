@@ -292,7 +292,7 @@ impl cosmic::Application for AppModel {
             let local = LocalProvider::new(db, config.music_dirs.clone());
             registry.register(Arc::new(local));
         } else {
-            log::error!("Failed to open library database");
+            tracing::error!("Failed to open library database");
         }
 
         // Initialize MPD providers from config.
@@ -319,7 +319,7 @@ impl cosmic::Application for AppModel {
                     registry.register(Arc::clone(&provider) as Arc<dyn MusicProvider>);
                 }
                 Err(e) => {
-                    log::error!("Failed to create Subsonic provider '{}': {e}", entry.name);
+                    tracing::error!("Failed to create Subsonic provider '{}': {e}", entry.name);
                 }
             }
         }
@@ -346,7 +346,7 @@ impl cosmic::Application for AppModel {
         let player = match Player::new(None) {
             Ok(p) => Some(p),
             Err(e) => {
-                log::error!("Failed to initialize audio player: {e}");
+                tracing::error!("Failed to initialize audio player: {e}");
                 None
             }
         };
@@ -747,7 +747,7 @@ impl cosmic::Application for AppModel {
                                             .await;
                                     }
                                     Err(e) => {
-                                        log::warn!("MPD status poll failed: {e}");
+                                        tracing::warn!("MPD status poll failed: {e}");
                                     }
                                 }
                             }
@@ -800,7 +800,7 @@ impl cosmic::Application for AppModel {
 
                     // Step 2: Establish the command connection
                     if let Err(e) = provider.connect_command().await {
-                        log::error!(
+                        tracing::error!(
                             "MPD provider '{pid}' command connection failed: {e}"
                         );
                         _ = emitter
@@ -819,7 +819,7 @@ impl cosmic::Application for AppModel {
                     }
 
                     // Idle stream ended — connection lost. Disconnect command too.
-                    log::warn!("MPD provider '{pid}' connection lost, reconnecting...");
+                    tracing::warn!("MPD provider '{pid}' connection lost, reconnecting...");
                     provider.disconnect().await;
 
                     // Backoff before reconnect
@@ -858,7 +858,7 @@ impl cosmic::Application for AppModel {
                             return cosmic::task::future(async move {
                                 let count = tokio::task::spawn_blocking(move || {
                                     provider.sync_library().unwrap_or_else(|e| {
-                                        log::error!("sync_library failed: {e}");
+                                        tracing::error!("sync_library failed: {e}");
                                         0
                                     })
                                 })
@@ -875,7 +875,7 @@ impl cosmic::Application for AppModel {
                         crate::provider::ProviderType::Mpd => {
                             // MPD providers: don't scan at startup; the idle
                             // subscription fires MpdConnected which triggers reload.
-                            log::info!(
+                            tracing::info!(
                                 "Skipping scan for MPD provider '{}' — waiting for connection",
                                 self.registry.active_id()
                             );
@@ -886,7 +886,7 @@ impl cosmic::Application for AppModel {
 
             Message::LibraryScanComplete(count) => {
                 self.library_scanning = false;
-                log::info!("Library scan complete: {count} tracks updated");
+                tracing::info!("Library scan complete: {count} tracks updated");
                 // Reload library data
                 return self.reload_library();
             }
@@ -930,7 +930,7 @@ impl cosmic::Application for AppModel {
                 self.all_tracks.sort_by(|a, b| a.title.cmp(&b.title));
                 self.all_albums.sort_by(|a, b| a.name.cmp(&b.name));
                 self.all_artists.sort_by(|a, b| a.name.cmp(&b.name));
-                log::info!(
+                tracing::info!(
                     "Library load complete: {} albums, {} tracks, {} artists",
                     self.all_albums.len(),
                     self.all_tracks.len(),
@@ -952,7 +952,7 @@ impl cosmic::Application for AppModel {
                     } else {
                         let was_playing = player.state() == PlaybackState::Playing;
                         if let Err(e) = player.toggle_playback() {
-                            log::error!("Playback toggle failed: {e}");
+                            tracing::error!("Playback toggle failed: {e}");
                         } else if let Some(client) = self.mpd_client() {
                             // Dispatch async SetPause to MPD.
                             return self.dispatch_mpd(async move {
@@ -975,7 +975,7 @@ impl cosmic::Application for AppModel {
                             self.lyrics_text = None;
                             return self.dispatch_mpd_after_play();
                         }
-                        Err(e) => log::error!("Next track failed: {e}"),
+                        Err(e) => tracing::error!("Next track failed: {e}"),
                         _ => {}
                     }
                 }
@@ -990,7 +990,7 @@ impl cosmic::Application for AppModel {
                             self.lyrics_text = None;
                             return self.dispatch_mpd_after_play();
                         }
-                        Err(e) => log::error!("Previous track failed: {e}"),
+                        Err(e) => tracing::error!("Previous track failed: {e}"),
                         _ => {}
                     }
                 }
@@ -1027,7 +1027,7 @@ impl cosmic::Application for AppModel {
                                 });
                             }
                         }
-                        Err(e) => log::warn!("Seek failed: {e}"),
+                        Err(e) => tracing::warn!("Seek failed: {e}"),
                     }
                 }
             }
@@ -1036,7 +1036,7 @@ impl cosmic::Application for AppModel {
                 if let Some(ref mut player) = self.player
                     && let Err(e) = player.set_volume(vol)
                 {
-                    log::error!("Set volume failed: {e}");
+                    tracing::error!("Set volume failed: {e}");
                 }
                 self.config.volume = vol;
                 // Dispatch async SetVolume to MPD.
@@ -1102,7 +1102,7 @@ impl cosmic::Application for AppModel {
             }
 
             Message::MpdCommandError(err) => {
-                log::error!("Async MPD command failed: {err}");
+                tracing::error!("Async MPD command failed: {err}");
                 // The next status poll will self-correct the UI state.
             }
 
@@ -1241,7 +1241,7 @@ impl cosmic::Application for AppModel {
             // -- Settings --
             Message::AddMusicDir => {
                 // TODO: Open a directory picker dialog
-                log::info!("Add music directory requested");
+                tracing::info!("Add music directory requested");
             }
 
             Message::UpdateConfig(config) => {
@@ -1254,7 +1254,7 @@ impl cosmic::Application for AppModel {
                     && self.registry.set_active(id)
                 {
                     self.active_provider_index = Some(index);
-                    log::info!("Switched to provider: {id}");
+                    tracing::info!("Switched to provider: {id}");
 
                     // Recreate player with the correct backend for the new provider.
                     self.recreate_player();
@@ -1310,7 +1310,7 @@ impl cosmic::Application for AppModel {
                     } else {
                         self.config.mpd_servers.push(entry);
                     }
-                    log::info!("MPD server config saved: {}", state.name);
+                    tracing::info!("MPD server config saved: {}", state.name);
                     // Persist config via cosmic-config
                     self.save_config();
                     // Re-initialize providers
@@ -1325,7 +1325,7 @@ impl cosmic::Application for AppModel {
                     if i < self.config.mpd_servers.len() {
                         self.config.mpd_servers.remove(i);
                     }
-                    log::info!("MPD server removed at index {i}");
+                    tracing::info!("MPD server removed at index {i}");
                     self.save_config();
                     return self.reinit_mpd_providers();
                 }
@@ -1373,7 +1373,7 @@ impl cosmic::Application for AppModel {
 
             // -- MPD provider events --
             Message::MpdConnected(provider_id) => {
-                log::info!("MPD provider '{provider_id}' is now connected");
+                tracing::info!("MPD provider '{provider_id}' is now connected");
 
                 // Update connection status for the matching provider card.
                 if let Some(idx) = self
@@ -1394,7 +1394,7 @@ impl cosmic::Application for AppModel {
             }
 
             Message::MpdConnectionFailed(provider_id, error) => {
-                log::error!("MPD provider '{provider_id}' failed to connect: {error}");
+                tracing::error!("MPD provider '{provider_id}' failed to connect: {error}");
 
                 // Update connection status for the matching provider card.
                 if let Some(idx) = self
@@ -1408,7 +1408,7 @@ impl cosmic::Application for AppModel {
             }
 
             Message::MpdIdleEvent(provider_id) => {
-                log::debug!("MPD idle event from provider '{provider_id}'");
+                tracing::debug!("MPD idle event from provider '{provider_id}'");
                 // If this is the active provider, reload the library to pick up changes
                 if self.registry.active_id() == provider_id {
                     return self.reload_library();
@@ -1461,7 +1461,7 @@ impl cosmic::Application for AppModel {
                     } else {
                         self.config.subsonic_servers.push(entry);
                     }
-                    log::info!("Subsonic server config saved: {}", state.name);
+                    tracing::info!("Subsonic server config saved: {}", state.name);
                     self.save_config();
                     return self.reinit_subsonic_providers();
                 }
@@ -1474,7 +1474,7 @@ impl cosmic::Application for AppModel {
                     if i < self.config.subsonic_servers.len() {
                         self.config.subsonic_servers.remove(i);
                     }
-                    log::info!("Subsonic server removed at index {i}");
+                    tracing::info!("Subsonic server removed at index {i}");
                     self.save_config();
                     return self.reinit_subsonic_providers();
                 }
@@ -1657,15 +1657,15 @@ impl AppModel {
             let provider_clone = Arc::clone(&provider);
             let (tracks, albums, artists) = tokio::task::spawn_blocking(move || {
                 let tracks = provider_clone.browse_tracks().unwrap_or_else(|e| {
-                    log::error!("browse_tracks failed: {e}");
+                    tracing::error!("browse_tracks failed: {e}");
                     Vec::new()
                 });
                 let albums = provider_clone.browse_albums().unwrap_or_else(|e| {
-                    log::error!("browse_albums failed: {e}");
+                    tracing::error!("browse_albums failed: {e}");
                     Vec::new()
                 });
                 let artists = provider_clone.browse_artists().unwrap_or_else(|e| {
-                    log::error!("browse_artists failed: {e}");
+                    tracing::error!("browse_artists failed: {e}");
                     Vec::new()
                 });
                 (tracks, albums, artists)
@@ -1734,7 +1734,7 @@ impl AppModel {
                     let album_names = match mpd.list_album_names().await {
                         Ok(names) => names,
                         Err(e) => {
-                            log::error!("MPD list_album_names failed: {e}");
+                            tracing::error!("MPD list_album_names failed: {e}");
                             _ = emitter
                                 .send(cosmic::Action::App(Message::LibraryLoadComplete))
                                 .await;
@@ -1742,7 +1742,7 @@ impl AppModel {
                         }
                     };
 
-                    log::info!(
+                    tracing::info!(
                         "MPD incremental load: {} albums in batches of {BATCH_SIZE}",
                         album_names.len()
                     );
@@ -1752,7 +1752,7 @@ impl AppModel {
                         let albums = match mpd.browse_albums_batch(chunk).await {
                             Ok(a) => a,
                             Err(e) => {
-                                log::error!("MPD browse_albums_batch failed: {e}");
+                                tracing::error!("MPD browse_albums_batch failed: {e}");
                                 break;
                             }
                         };
@@ -1795,7 +1795,7 @@ impl AppModel {
                             None => return,
                         };
 
-                    log::info!("Subsonic incremental load: batches of {BATCH_SIZE}");
+                    tracing::info!("Subsonic incremental load: batches of {BATCH_SIZE}");
 
                     let mut offset: i32 = 0;
                     let page_size = BATCH_SIZE as i32;
@@ -1805,7 +1805,7 @@ impl AppModel {
                             match subsonic.browse_albums_page(offset, page_size).await {
                                 Ok(result) => result,
                                 Err(e) => {
-                                    log::error!("Subsonic browse_albums_page failed: {e}");
+                                    tracing::error!("Subsonic browse_albums_page failed: {e}");
                                     break;
                                 }
                             };
@@ -1837,7 +1837,7 @@ impl AppModel {
                             }
                         }
 
-                        log::debug!(
+                        tracing::debug!(
                             "Subsonic batch: offset={offset}, albums={batch_count}"
                         );
 
@@ -1875,7 +1875,7 @@ impl AppModel {
             cosmic_config::Config::new(<AppModel as cosmic::Application>::APP_ID, Config::VERSION)
             && let Err(e) = self.config.write_entry(&context)
         {
-            log::error!("Failed to save config: {e:?}");
+            tracing::error!("Failed to save config: {e:?}");
         }
     }
 
@@ -1945,7 +1945,7 @@ impl AppModel {
                         .register(Arc::clone(&provider) as Arc<dyn MusicProvider>);
                 }
                 Err(e) => {
-                    log::error!("Failed to create Subsonic provider '{}': {e}", entry.name);
+                    tracing::error!("Failed to create Subsonic provider '{}': {e}", entry.name);
                 }
             }
         }
@@ -1995,7 +1995,7 @@ impl AppModel {
         match Player::new(mpd_backend) {
             Ok(p) => self.player = Some(p),
             Err(e) => {
-                log::error!("Failed to recreate player: {e}");
+                tracing::error!("Failed to recreate player: {e}");
                 self.player = None;
             }
         }
