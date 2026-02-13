@@ -193,6 +193,14 @@ pub enum Message {
         cover_images: HashMap<String, widget::icon::Handle>,
         artist_avatars: HashMap<String, widget::icon::Handle>,
     },
+    /// Incremental batch of albums from a remote provider (e.g. Subsonic).
+    /// Each batch appends albums, derives tracks/artists, and updates the UI.
+    LibraryBatch {
+        albums: Vec<Album>,
+        cover_images: HashMap<String, widget::icon::Handle>,
+    },
+    /// Signals that incremental loading is complete.
+    LibraryLoadComplete,
 
     // Player transport
     TogglePlayback,
@@ -884,8 +892,7 @@ impl cosmic::Application for AppModel {
                         }
                         crate::provider::ProviderType::Subsonic => {
                             // Subsonic providers connect on demand — no idle subscription.
-                            // Trigger a library reload directly.
-                            self.library_scanning = true;
+                            // Trigger a library reload directly (sets library_scanning).
                             return self.reload_library();
                         }
                         crate::provider::ProviderType::Mpd => {
@@ -920,6 +927,39 @@ impl cosmic::Application for AppModel {
                 self.all_artists = artists;
                 self.cover_images = cover_images;
                 self.artist_avatars = artist_avatars;
+            }
+
+            Message::LibraryBatch {
+                albums,
+                cover_images,
+            } => {
+                // Append new albums
+                for album in &albums {
+                    // Extract tracks from the album
+                    for track in &album.tracks {
+                        self.all_tracks.push(track.clone());
+                    }
+                    self.all_albums.push(album.clone());
+                }
+                // Merge cover images
+                self.cover_images.extend(cover_images);
+
+                // Rebuild artists from all albums accumulated so far
+                self.rebuild_artists_from_albums();
+            }
+
+            Message::LibraryLoadComplete => {
+                self.library_scanning = false;
+                // Final sort
+                self.all_tracks.sort_by(|a, b| a.title.cmp(&b.title));
+                self.all_albums.sort_by(|a, b| a.name.cmp(&b.name));
+                self.all_artists.sort_by(|a, b| a.name.cmp(&b.name));
+                log::info!(
+                    "Library load complete: {} albums, {} tracks, {} artists",
+                    self.all_albums.len(),
+                    self.all_tracks.len(),
+                    self.all_artists.len()
+                );
             }
 
             // -- Playback --
@@ -1406,62 +1446,59 @@ impl AppModel {
         };
         let provider_type = provider.provider_type();
 
-        cosmic::task::future(async move {
-            // Provider trait methods are sync (they block internally for
-            // remote providers), so run them on the blocking thread pool.
-            let provider_clone = Arc::clone(&provider);
-            let (tracks, albums, artists) =
-                tokio::task::spawn_blocking(move || {
-                    let tracks = provider_clone.browse_tracks().unwrap_or_else(|e| {
-                        log::error!("browse_tracks failed: {e}");
-                        Vec::new()
-                    });
-                    let albums = provider_clone.browse_albums().unwrap_or_else(|e| {
-                        log::error!("browse_albums failed: {e}");
-                        Vec::new()
-                    });
-                    let artists = provider_clone.browse_artists().unwrap_or_else(|e| {
-                        log::error!("browse_artists failed: {e}");
-                        Vec::new()
-                    });
-                    (tracks, albums, artists)
-                })
-                .await
-                .unwrap_or_default();
+        match provider_type {
+            crate::provider::ProviderType::Local => self.reload_library_local(provider),
+            crate::provider::ProviderType::Mpd | crate::provider::ProviderType::Subsonic => {
+                // Clear existing data before incremental loading begins.
+                self.all_tracks.clear();
+                self.all_albums.clear();
+                self.all_artists.clear();
+                self.cover_images.clear();
+                self.artist_avatars.clear();
+                self.library_scanning = true;
+                self.reload_library_incremental(provider, provider_type)
+            }
+        }
+    }
 
-            // Extract cover art for each album
+    /// Single-shot library reload for the local provider (reads from local DB).
+    fn reload_library_local(
+        &self,
+        provider: Arc<dyn MusicProvider + Send + Sync>,
+    ) -> Task<cosmic::Action<Message>> {
+        cosmic::task::future(async move {
+            let provider_clone = Arc::clone(&provider);
+            let (tracks, albums, artists) = tokio::task::spawn_blocking(move || {
+                let tracks = provider_clone.browse_tracks().unwrap_or_else(|e| {
+                    log::error!("browse_tracks failed: {e}");
+                    Vec::new()
+                });
+                let albums = provider_clone.browse_albums().unwrap_or_else(|e| {
+                    log::error!("browse_albums failed: {e}");
+                    Vec::new()
+                });
+                let artists = provider_clone.browse_artists().unwrap_or_else(|e| {
+                    log::error!("browse_artists failed: {e}");
+                    Vec::new()
+                });
+                (tracks, albums, artists)
+            })
+            .await
+            .unwrap_or_default();
+
+            // Extract cover art
             let mut cover_images = HashMap::new();
             for album in &albums {
                 let key = crate::library::CoverArt::album_key(&album.artist, &album.name);
-                match provider_type {
-                    crate::provider::ProviderType::Local => {
-                        // Local provider: read embedded art from the file
-                        if let Some(first_track) = album.tracks.first()
-                            && let Some(bytes) =
-                                crate::library::CoverArt::get_cover_art(&first_track.path)
-                        {
-                            let handle = widget::icon::from_raster_bytes(bytes);
-                            cover_images.insert(key, handle);
-                        }
-                    }
-                    _ => {
-                        // Remote providers: fetch cover art via the provider
-                        let prov = Arc::clone(&provider);
-                        let album_clone = album.clone();
-                        if let Ok(Some(bytes)) = tokio::task::spawn_blocking(move || {
-                            prov.get_cover_art(&album_clone)
-                        })
-                        .await
-                        .unwrap_or(Ok(None))
-                        {
-                            let handle = widget::icon::from_raster_bytes(bytes);
-                            cover_images.insert(key, handle);
-                        }
-                    }
+                if let Some(first_track) = album.tracks.first()
+                    && let Some(bytes) =
+                        crate::library::CoverArt::get_cover_art(&first_track.path)
+                {
+                    let handle = widget::icon::from_raster_bytes(bytes);
+                    cover_images.insert(key, handle);
                 }
             }
 
-            // Generate artist avatars
             let mut artist_avatars = HashMap::new();
             for artist in &artists {
                 let bytes = crate::library::CoverArt::generate_artist_avatar(&artist.name, 64);
@@ -1477,6 +1514,172 @@ impl AppModel {
                 artist_avatars,
             })
         })
+    }
+
+    /// Incremental library reload for remote providers (MPD, Subsonic).
+    ///
+    /// Fetches albums in batches and sends a `LibraryBatch` message after
+    /// each batch so the UI populates progressively. Cover art for each
+    /// batch is fetched inline. Finishes with `LibraryLoadComplete`.
+    fn reload_library_incremental(
+        &self,
+        provider: Arc<dyn MusicProvider + Send + Sync>,
+        provider_type: crate::provider::ProviderType,
+    ) -> Task<cosmic::Action<Message>> {
+        // Downcast to concrete provider types for paged access.
+        // We clone the Arc'd provider references from self.
+        let mpd_providers = self.mpd_providers.clone();
+        let subsonic_providers = self.subsonic_providers.clone();
+        let active_id = self.registry.active_id().to_string();
+
+        let stream = iced_futures::stream::channel(8, move |mut emitter| async move {
+            const BATCH_SIZE: usize = 50;
+
+            match provider_type {
+                crate::provider::ProviderType::Mpd => {
+                    // Find the matching MpdProvider by id.
+                    let mpd = match mpd_providers.iter().find(|p| p.id() == active_id) {
+                        Some(p) => Arc::clone(p),
+                        None => return,
+                    };
+
+                    // Step 1: Get all album names (single fast command).
+                    let album_names = match mpd.list_album_names().await {
+                        Ok(names) => names,
+                        Err(e) => {
+                            log::error!("MPD list_album_names failed: {e}");
+                            _ = emitter
+                                .send(cosmic::Action::App(Message::LibraryLoadComplete))
+                                .await;
+                            return;
+                        }
+                    };
+
+                    log::info!(
+                        "MPD incremental load: {} albums in batches of {BATCH_SIZE}",
+                        album_names.len()
+                    );
+
+                    // Step 2: Process in batches.
+                    for chunk in album_names.chunks(BATCH_SIZE) {
+                        let albums = match mpd.browse_albums_batch(chunk).await {
+                            Ok(a) => a,
+                            Err(e) => {
+                                log::error!("MPD browse_albums_batch failed: {e}");
+                                break;
+                            }
+                        };
+
+                        // Fetch cover art for this batch.
+                        let mut cover_images = HashMap::new();
+                        let prov = Arc::clone(&provider);
+                        for album in &albums {
+                            let key = crate::library::CoverArt::album_key(
+                                &album.artist,
+                                &album.name,
+                            );
+                            let prov2 = Arc::clone(&prov);
+                            let album_clone = album.clone();
+                            if let Ok(Some(bytes)) = tokio::task::spawn_blocking(move || {
+                                prov2.get_cover_art(&album_clone)
+                            })
+                            .await
+                            .unwrap_or(Ok(None))
+                            {
+                                let handle = widget::icon::from_raster_bytes(bytes);
+                                cover_images.insert(key, handle);
+                            }
+                        }
+
+                        _ = emitter
+                            .send(cosmic::Action::App(Message::LibraryBatch {
+                                albums,
+                                cover_images,
+                            }))
+                            .await;
+                    }
+                }
+
+                crate::provider::ProviderType::Subsonic => {
+                    // Find the matching SubsonicProvider by id.
+                    let subsonic =
+                        match subsonic_providers.iter().find(|p| p.id() == active_id) {
+                            Some(p) => Arc::clone(p),
+                            None => return,
+                        };
+
+                    log::info!("Subsonic incremental load: batches of {BATCH_SIZE}");
+
+                    let mut offset: i32 = 0;
+                    let page_size = BATCH_SIZE as i32;
+
+                    loop {
+                        let (albums, has_more) =
+                            match subsonic.browse_albums_page(offset, page_size).await {
+                                Ok(result) => result,
+                                Err(e) => {
+                                    log::error!("Subsonic browse_albums_page failed: {e}");
+                                    break;
+                                }
+                            };
+
+                        if albums.is_empty() {
+                            break;
+                        }
+
+                        let batch_count = albums.len();
+
+                        // Fetch cover art for this batch.
+                        let mut cover_images = HashMap::new();
+                        let prov = Arc::clone(&provider);
+                        for album in &albums {
+                            let key = crate::library::CoverArt::album_key(
+                                &album.artist,
+                                &album.name,
+                            );
+                            let prov2 = Arc::clone(&prov);
+                            let album_clone = album.clone();
+                            if let Ok(Some(bytes)) = tokio::task::spawn_blocking(move || {
+                                prov2.get_cover_art(&album_clone)
+                            })
+                            .await
+                            .unwrap_or(Ok(None))
+                            {
+                                let handle = widget::icon::from_raster_bytes(bytes);
+                                cover_images.insert(key, handle);
+                            }
+                        }
+
+                        log::debug!(
+                            "Subsonic batch: offset={offset}, albums={batch_count}"
+                        );
+
+                        _ = emitter
+                            .send(cosmic::Action::App(Message::LibraryBatch {
+                                albums,
+                                cover_images,
+                            }))
+                            .await;
+
+                        if !has_more {
+                            break;
+                        }
+                        offset += page_size;
+                    }
+                }
+
+                crate::provider::ProviderType::Local => {
+                    // Should not reach here — local uses reload_library_local.
+                    unreachable!("Local provider should not use incremental reload");
+                }
+            }
+
+            _ = emitter
+                .send(cosmic::Action::App(Message::LibraryLoadComplete))
+                .await;
+        });
+
+        cosmic::task::stream(stream)
     }
 
     /// Persist the current config via cosmic-config.
@@ -1600,6 +1803,34 @@ impl AppModel {
         } else {
             Task::none()
         }
+    }
+
+    /// Rebuild the `all_artists` list by grouping `all_albums` by artist name.
+    ///
+    /// Called after each incremental batch to keep the artist view in sync
+    /// without requiring a separate API call.
+    fn rebuild_artists_from_albums(&mut self) {
+        use std::collections::BTreeMap;
+
+        let mut artist_map: BTreeMap<String, Vec<Album>> = BTreeMap::new();
+        for album in &self.all_albums {
+            artist_map
+                .entry(album.artist.clone())
+                .or_default()
+                .push(album.clone());
+        }
+
+        self.all_artists = artist_map
+            .into_iter()
+            .map(|(name, mut albums)| {
+                albums.sort_by(|a, b| a.year.cmp(&b.year));
+                // Generate avatar
+                let bytes = crate::library::CoverArt::generate_artist_avatar(&name, 64);
+                let handle = widget::icon::from_raster_bytes(bytes);
+                self.artist_avatars.insert(name.clone(), handle);
+                Artist { name, albums }
+            })
+            .collect();
     }
 
     fn play_track_list(&mut self, tracks: &[Track], start_index: usize) {

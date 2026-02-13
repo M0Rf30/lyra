@@ -158,6 +158,77 @@ impl SubsonicProvider {
         }
     }
 
+    /// Fetch a single page of albums with full details (songs, cover art).
+    ///
+    /// Returns `(albums, has_more)`. Each page fetches up to `page_size` album
+    /// stubs from `getAlbumList2`, then fetches full details (with songs) for each.
+    /// This is the building block for incremental library loading.
+    pub async fn browse_albums_page(
+        &self,
+        offset: i32,
+        page_size: i32,
+    ) -> Result<(Vec<Album>, bool), ProviderError> {
+        let album_list = self
+            .client
+            .get_album_list2(
+                opensubsonic::AlbumListType::AlphabeticalByName,
+                Some(page_size),
+                Some(offset),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| ProviderError::Io(format!("Subsonic getAlbumList2: {e}")))?;
+
+        let count = album_list.len();
+        let mut albums = Vec::with_capacity(count);
+
+        for album_id3 in &album_list {
+            let album_detail = self
+                .client
+                .get_album(&album_id3.id)
+                .await
+                .map_err(|e| ProviderError::Io(format!("Subsonic getAlbum: {e}")))?;
+
+            let mut tracks: Vec<Track> = album_detail
+                .song
+                .iter()
+                .map(|s| self.child_to_track(s))
+                .collect();
+            tracks.sort_by(|a, b| {
+                a.disc_number
+                    .cmp(&b.disc_number)
+                    .then(a.track_number.cmp(&b.track_number))
+            });
+
+            let artist = album_detail
+                .artist
+                .clone()
+                .unwrap_or_else(|| "Unknown Artist".to_string());
+            let year = album_detail.year.unwrap_or(0) as u32;
+
+            let cover_source = album_detail.cover_art.as_ref().and_then(|cover_id| {
+                self.client
+                    .cover_art_url(cover_id, Some(300))
+                    .ok()
+                    .map(|url| CoverSource::Url(url.to_string()))
+            });
+
+            albums.push(Album {
+                name: album_detail.name.clone(),
+                artist,
+                year,
+                tracks,
+                cover_source,
+            });
+        }
+
+        let has_more = count >= page_size as usize;
+        Ok((albums, has_more))
+    }
+
     /// Scrobble a track (mark as played) on the Subsonic server.
     ///
     /// The `song_id` is the Subsonic song ID (not the stream URL).

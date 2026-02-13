@@ -171,6 +171,75 @@ impl MpdProvider {
         self.runtime.block_on(future)
     }
 
+    /// Get the full list of unique album names from MPD.
+    ///
+    /// This is a single fast command (`list album`). The returned names
+    /// can then be chunked and passed to [`browse_albums_batch`] for
+    /// incremental loading.
+    pub async fn list_album_names(&self) -> Result<Vec<String>, ProviderError> {
+        let client = self.get_client().await?;
+        let album_list = client
+            .command(List::new(Tag::Album))
+            .await
+            .map_err(|e| ProviderError::Io(format!("MPD list album: {e}")))?;
+
+        Ok(album_list
+            .into_iter()
+            .filter(|name| !name.is_empty())
+            .collect())
+    }
+
+    /// Fetch full album details (with songs) for a batch of album names.
+    ///
+    /// Returns a `Vec<Album>` built by issuing one `find album "<name>"`
+    /// per album name. This is the building block for incremental library
+    /// loading — call with a chunk of 20-50 album names at a time.
+    pub async fn browse_albums_batch(
+        &self,
+        album_names: &[String],
+    ) -> Result<Vec<Album>, ProviderError> {
+        let client = self.get_client().await?;
+        let mut albums = Vec::with_capacity(album_names.len());
+
+        for album_name in album_names {
+            let filter = Filter::tag(Tag::Album, album_name);
+            let songs = client
+                .command(Find::new(filter))
+                .await
+                .map_err(|e| ProviderError::Io(format!("MPD find: {e}")))?;
+
+            if songs.is_empty() {
+                continue;
+            }
+
+            let mut tracks: Vec<Track> = songs.iter().map(|s| self.song_to_track(s)).collect();
+            tracks.sort_by(|a, b| {
+                a.disc_number
+                    .cmp(&b.disc_number)
+                    .then(a.track_number.cmp(&b.track_number))
+            });
+
+            let artist = tracks
+                .first()
+                .map(|t| t.album_artist.clone())
+                .unwrap_or_default();
+            let year = tracks.first().map(|t| t.year).unwrap_or(0);
+            let cover_source = tracks
+                .first()
+                .map(|t| CoverSource::MpdAlbumArt(t.source_uri.clone()));
+
+            albums.push(Album {
+                name: album_name.clone(),
+                artist,
+                year,
+                tracks,
+                cover_source,
+            });
+        }
+
+        Ok(albums)
+    }
+
     /// Query MPD status (async).
     pub async fn status_async(&self) -> Result<responses::Status, ProviderError> {
         let client = self.get_client().await?;
