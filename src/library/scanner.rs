@@ -103,14 +103,16 @@ impl LibraryScanner {
                 (
                     tag.title().map(|s| s.to_string()).unwrap_or_default(),
                     tag.artist().map(|s| s.to_string()).unwrap_or_default(),
-                    tag.get_string(&ItemKey::AlbumArtist)
+                    tag.get_string(ItemKey::AlbumArtist)
                         .unwrap_or_default()
                         .to_string(),
                     tag.album().map(|s| s.to_string()).unwrap_or_default(),
                     tag.genre().map(|s| s.to_string()).unwrap_or_default(),
                     tag.track().unwrap_or(0),
                     tag.disk().unwrap_or(0),
-                    tag.year().unwrap_or(0),
+                    tag.get_string(ItemKey::Year)
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .unwrap_or(0),
                 )
             } else {
                 (

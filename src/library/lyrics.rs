@@ -19,7 +19,7 @@ impl LyricsProvider {
             .or_else(|| tagged_file.first_tag())?;
 
         // Try the standard Lyrics item key
-        tag.get_string(&ItemKey::Lyrics)
+        tag.get_string(ItemKey::Lyrics)
             .map(|s| s.to_string())
     }
 

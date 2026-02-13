@@ -28,7 +28,7 @@ futures-util = "0.3"
 rodio = { version = "0.21", features = ["symphonia-all"] }
 
 # Audio metadata (ID3, Vorbis, FLAC, etc.)
-lofty = "0.22"
+lofty = "0.23"
 
 # Database for music library
 rusqlite = { version = "0.33", features = ["bundled"] }
