@@ -4,6 +4,8 @@ use crate::config::Config;
 use crate::fl;
 use crate::library::{Album, Artist, LibraryDb, LibraryScanner, LyricsProvider, Track};
 use crate::player::{PlaybackState, Player};
+use crate::provider::local::LocalProvider;
+use crate::provider::ProviderRegistry;
 use crate::views::{albums, artists, equalizer, lyrics, now_playing, songs};
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
@@ -27,8 +29,10 @@ pub struct AppModel {
     config: Config,
     context_page: ContextPage,
 
+    // Providers
+    registry: ProviderRegistry,
+
     // Library data
-    db: Option<LibraryDb>,
     all_tracks: Vec<Track>,
     all_albums: Vec<Album>,
     all_artists: Vec<Artist>,
@@ -170,7 +174,7 @@ impl cosmic::Application for AppModel {
             })
             .unwrap_or_default();
 
-        // Open library database
+        // Open library database and initialize provider registry
         let db_path = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("cosmic-music-player")
@@ -180,7 +184,13 @@ impl cosmic::Application for AppModel {
             std::fs::create_dir_all(parent).ok();
         }
 
-        let db = LibraryDb::open(&db_path).ok();
+        let mut registry = ProviderRegistry::new();
+        if let Ok(db) = LibraryDb::open(&db_path) {
+            let local = LocalProvider::new(db, config.music_dirs.clone());
+            registry.register(Box::new(local));
+        } else {
+            log::error!("Failed to open library database");
+        }
 
         // Initialize player
         let player = match Player::new() {
@@ -198,7 +208,7 @@ impl cosmic::Application for AppModel {
             about,
             config,
             context_page: ContextPage::default(),
-            db,
+            registry,
             all_tracks: Vec::new(),
             all_albums: Vec::new(),
             all_artists: Vec::new(),
@@ -558,9 +568,7 @@ impl cosmic::Application for AppModel {
                 if let Some(ref mut player) = self.player {
                     if player.state() == PlaybackState::Stopped && !self.all_tracks.is_empty() {
                         // If stopped, start playing first track
-                        let paths: Vec<PathBuf> =
-                            self.all_tracks.iter().map(|t| t.path.clone()).collect();
-                        player.set_queue(paths);
+                        player.set_queue(self.all_tracks.clone());
                         if player.play_index(0).is_ok() {
                             self.current_track = self.all_tracks.first().cloned();
                             self.playback_position = Duration::ZERO;
@@ -572,23 +580,31 @@ impl cosmic::Application for AppModel {
             }
 
             Message::NextTrack => {
-                if let Some(ref mut player) = self.player
-                    && player.next().is_ok() {
-                        let idx = player.queue_index();
-                        self.current_track = self.all_tracks.get(idx).cloned();
-                        self.playback_position = Duration::ZERO;
-                        self.lyrics_text = None;
+                if let Some(ref mut player) = self.player {
+                    match player.next() {
+                        Ok(Some(track)) => {
+                            self.current_track = Some(track.clone());
+                            self.playback_position = Duration::ZERO;
+                            self.lyrics_text = None;
+                        }
+                        Err(e) => log::error!("Next track failed: {e}"),
+                        _ => {}
                     }
+                }
             }
 
             Message::PreviousTrack => {
-                if let Some(ref mut player) = self.player
-                    && player.previous().is_ok() {
-                        let idx = player.queue_index();
-                        self.current_track = self.all_tracks.get(idx).cloned();
-                        self.playback_position = Duration::ZERO;
-                        self.lyrics_text = None;
+                if let Some(ref mut player) = self.player {
+                    match player.previous() {
+                        Ok(Some(track)) => {
+                            self.current_track = Some(track.clone());
+                            self.playback_position = Duration::ZERO;
+                            self.lyrics_text = None;
+                        }
+                        Err(e) => log::error!("Previous track failed: {e}"),
+                        _ => {}
                     }
+                }
             }
 
             Message::Seek(fraction) => {
@@ -625,9 +641,8 @@ impl cosmic::Application for AppModel {
                 if let Some(ref mut player) = self.player
                     && player.is_finished().unwrap_or(false) {
                         // Auto-advance
-                        if player.next().is_ok() {
-                            let idx = player.queue_index();
-                            self.current_track = self.all_tracks.get(idx).cloned();
+                        if let Ok(Some(track)) = player.next() {
+                            self.current_track = Some(track.clone());
                             self.playback_position = Duration::ZERO;
                             self.lyrics_text = None;
                         }
@@ -789,9 +804,9 @@ impl AppModel {
 
         cosmic::task::future(async move {
             let (tracks, albums, artists) = if let Ok(db) = LibraryDb::open(&db_path) {
-                let tracks = db.all_tracks().unwrap_or_default();
-                let albums = db.all_albums().unwrap_or_default();
-                let artists = db.all_artists().unwrap_or_default();
+                let tracks = db.all_tracks(None).unwrap_or_default();
+                let albums = db.all_albums(None).unwrap_or_default();
+                let artists = db.all_artists(None).unwrap_or_default();
                 (tracks, albums, artists)
             } else {
                 (Vec::new(), Vec::new(), Vec::new())
@@ -829,10 +844,8 @@ impl AppModel {
     }
 
     fn play_track_list(&mut self, tracks: &[Track], start_index: usize) {
-        let paths: Vec<PathBuf> = tracks.iter().map(|t| t.path.clone()).collect();
-
         if let Some(ref mut player) = self.player {
-            player.set_queue(paths);
+            player.set_queue(tracks.to_vec());
             if player.play_index(start_index).is_ok() {
                 self.current_track = tracks.get(start_index).cloned();
                 self.playback_position = Duration::ZERO;

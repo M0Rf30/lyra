@@ -144,6 +144,7 @@ impl LibraryScanner {
             album_artist
         };
 
+        let source_uri = path.to_string_lossy().to_string();
         Ok(Track {
             id: 0,
             path: path.to_path_buf(),
@@ -158,6 +159,8 @@ impl LibraryScanner {
             duration,
             bitrate: properties.audio_bitrate().unwrap_or(0),
             sample_rate: properties.sample_rate().unwrap_or(0),
+            provider_id: "local".to_string(),
+            source_uri,
         })
     }
 }

@@ -15,6 +15,28 @@ pub use scanner::LibraryScanner;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Resolved audio source for the playback backend.
+#[derive(Debug, Clone)]
+pub enum TrackSource {
+    /// A local file on the filesystem.
+    LocalFile(PathBuf),
+    /// An HTTP streaming URL (e.g., Subsonic `stream` endpoint).
+    HttpStream(String),
+    /// An MPD-relative file path — sent to the MPD server, not decoded locally.
+    MpdFile(String),
+}
+
+/// Resolved cover art source.
+#[derive(Debug, Clone)]
+pub enum CoverSource {
+    /// A local file path (embedded extraction cache or directory image).
+    LocalFile(PathBuf),
+    /// An HTTP URL (e.g., Subsonic `getCoverArt` endpoint).
+    Url(String),
+    /// An MPD file path, resolved via `albumart`/`readpicture` protocol commands.
+    MpdAlbumArt(String),
+}
+
 /// A single track in the music library.
 #[derive(Debug, Clone)]
 pub struct Track {
@@ -31,6 +53,10 @@ pub struct Track {
     pub duration: Duration,
     pub bitrate: u32,
     pub sample_rate: u32,
+    /// Which provider owns this track (e.g., "local", "mpd-home", "navidrome").
+    pub provider_id: String,
+    /// Provider-specific identifier (file path for local, MPD relative path, Subsonic song ID).
+    pub source_uri: String,
 }
 
 impl Track {
@@ -48,7 +74,7 @@ pub struct Album {
     pub artist: String,
     pub year: u32,
     pub tracks: Vec<Track>,
-    pub cover_path: Option<PathBuf>,
+    pub cover_source: Option<CoverSource>,
 }
 
 impl Album {

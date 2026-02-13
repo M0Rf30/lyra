@@ -1,0 +1,167 @@
+// SPDX-License-Identifier: GPL-3.0
+
+//! Music provider abstraction layer.
+//!
+//! Defines the [`MusicProvider`] trait that all music sources implement,
+//! and the [`ProviderRegistry`] that manages active providers.
+
+pub mod local;
+
+use crate::library::{Album, Artist, CoverSource, Track, TrackSource};
+use std::collections::HashMap;
+use std::fmt;
+
+/// The type of a music provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderType {
+    /// Local filesystem (scanned directories, rodio playback).
+    Local,
+    /// MPD server (remote library, server-side playback).
+    Mpd,
+    /// OpenSubsonic-compatible server (HTTP API, client-side streaming).
+    Subsonic,
+}
+
+impl fmt::Display for ProviderType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local => write!(f, "Local"),
+            Self::Mpd => write!(f, "MPD"),
+            Self::Subsonic => write!(f, "Subsonic"),
+        }
+    }
+}
+
+/// Errors from provider operations.
+#[derive(Debug)]
+pub enum ProviderError {
+    /// The provider is not connected or not available.
+    NotConnected(String),
+    /// A network or I/O error occurred.
+    Io(String),
+    /// The operation is not supported by this provider.
+    NotSupported(String),
+    /// A database error occurred.
+    Database(String),
+    /// Any other error.
+    Other(String),
+}
+
+impl fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotConnected(msg) => write!(f, "not connected: {msg}"),
+            Self::Io(msg) => write!(f, "I/O error: {msg}"),
+            Self::NotSupported(msg) => write!(f, "not supported: {msg}"),
+            Self::Database(msg) => write!(f, "database error: {msg}"),
+            Self::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ProviderError {}
+
+impl From<String> for ProviderError {
+    fn from(s: String) -> Self {
+        Self::Other(s)
+    }
+}
+
+/// Common interface for all music providers.
+///
+/// Each provider manages a library of tracks, albums, and artists, and can
+/// resolve audio sources for playback. Implementations must be `Send + Sync`
+/// to work with async runtimes and the COSMIC task system.
+pub trait MusicProvider: Send + Sync {
+    /// Unique identifier for this provider instance (e.g., "local", "mpd-home").
+    fn id(&self) -> &str;
+
+    /// Human-readable name (e.g., "Local Music", "Home MPD Server").
+    fn name(&self) -> &str;
+
+    /// The type of this provider.
+    fn provider_type(&self) -> ProviderType;
+
+    /// Browse all albums from this provider's library.
+    fn browse_albums(&self) -> Result<Vec<Album>, ProviderError>;
+
+    /// Browse all artists from this provider's library.
+    fn browse_artists(&self) -> Result<Vec<Artist>, ProviderError>;
+
+    /// Browse all tracks from this provider's library.
+    fn browse_tracks(&self) -> Result<Vec<Track>, ProviderError>;
+
+    /// Search tracks matching the given query string.
+    fn search(&self, query: &str) -> Result<Vec<Track>, ProviderError>;
+
+    /// Resolve a track to a playback source.
+    fn resolve_audio(&self, track: &Track) -> Result<TrackSource, ProviderError>;
+
+    /// Get cover art bytes for an album, if available.
+    fn get_cover_art(&self, album: &Album) -> Result<Option<Vec<u8>>, ProviderError>;
+
+    /// Get lyrics text for a track, if available.
+    fn get_lyrics(&self, track: &Track) -> Result<Option<String>, ProviderError>;
+
+    /// Synchronize / refresh the provider's library.
+    /// Returns the number of tracks added or updated.
+    fn sync_library(&self) -> Result<usize, ProviderError>;
+}
+
+/// Manages all registered music providers.
+pub struct ProviderRegistry {
+    providers: HashMap<String, Box<dyn MusicProvider>>,
+    active_provider_id: String,
+}
+
+impl ProviderRegistry {
+    /// Create a new empty registry.
+    pub fn new() -> Self {
+        Self {
+            providers: HashMap::new(),
+            active_provider_id: String::new(),
+        }
+    }
+
+    /// Register a provider. If this is the first provider, it becomes active.
+    pub fn register(&mut self, provider: Box<dyn MusicProvider>) {
+        let id = provider.id().to_string();
+        if self.providers.is_empty() {
+            self.active_provider_id = id.clone();
+        }
+        self.providers.insert(id, provider);
+    }
+
+    /// Get a provider by its ID.
+    pub fn get(&self, id: &str) -> Option<&dyn MusicProvider> {
+        self.providers.get(id).map(|p| p.as_ref())
+    }
+
+    /// Get the currently active provider (used for library browsing).
+    pub fn active(&self) -> Option<&dyn MusicProvider> {
+        self.get(&self.active_provider_id)
+    }
+
+    /// Set the active provider by ID. Returns false if the ID is not registered.
+    pub fn set_active(&mut self, id: &str) -> bool {
+        if self.providers.contains_key(id) {
+            self.active_provider_id = id.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the active provider ID.
+    pub fn active_id(&self) -> &str {
+        &self.active_provider_id
+    }
+
+    /// List all registered provider IDs and names.
+    pub fn list(&self) -> Vec<(&str, &str, ProviderType)> {
+        self.providers
+            .values()
+            .map(|p| (p.id(), p.name(), p.provider_type()))
+            .collect()
+    }
+}

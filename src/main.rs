@@ -7,6 +7,7 @@ mod config;
 mod i18n;
 mod library;
 mod player;
+mod provider;
 mod views;
 
 fn main() -> cosmic::iced::Result {
