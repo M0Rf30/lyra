@@ -143,6 +143,7 @@ pub fn playback_bar<'a>(
         .push(widget::text::caption(format_time(display_position)))
         .push(
             widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
+                .step(0.001)
                 .on_release(NowPlayingMessage::SeekCommit)
                 .width(Length::Fill),
         )
@@ -154,7 +155,11 @@ pub fn playback_bar<'a>(
     // --- Right: volume + lyrics ---
     let right_section = widget::row()
         .push(widget::icon::from_name("audio-volume-high-symbolic").size(16))
-        .push(widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume).width(100))
+        .push(
+            widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
+                .step(0.01)
+                .width(100),
+        )
         .push(
             widget::button::icon(widget::icon::from_name("view-list-lyrics-symbolic"))
                 .on_press(NowPlayingMessage::ShowLyrics),
