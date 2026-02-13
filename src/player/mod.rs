@@ -248,4 +248,19 @@ impl Player {
     pub fn queue_index(&self) -> usize {
         self.queue_index
     }
+
+    /// Which backend type is currently active.
+    pub fn active_backend_type(&self) -> ActiveBackend {
+        self.active_backend
+    }
+
+    /// Get a reference to the MPD backend (if present).
+    pub fn mpd_backend_ref(&self) -> Option<&MpdBackend> {
+        self.mpd_backend.as_ref()
+    }
+
+    /// Get a mutable reference to the MPD backend (if present).
+    pub fn mpd_backend_mut(&mut self) -> Option<&mut MpdBackend> {
+        self.mpd_backend.as_mut()
+    }
 }

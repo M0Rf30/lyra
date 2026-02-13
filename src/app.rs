@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::fl;
 use crate::library::{Album, Artist, LibraryDb, LibraryScanner, LyricsProvider, Track};
 use crate::player::mpd_backend::MpdBackend;
-use crate::player::{PlaybackState, Player};
+use crate::player::{ActiveBackend, PlaybackState, Player};
 use crate::provider::local::LocalProvider;
 use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
@@ -176,6 +176,15 @@ pub enum Message {
     MpdConnected(String),
     MpdConnectionFailed(String, String),
     MpdIdleEvent(String),
+    /// Polled status from the active MPD backend (position, duration, state, volume).
+    MpdStatusUpdate {
+        position: Duration,
+        duration: Duration,
+        state: PlaybackState,
+        volume: f32,
+    },
+    /// An async MPD command failed — log and let the next poll self-correct.
+    MpdCommandError(String),
 
     // Subsonic provider configuration
     SubsonicAddServer,
@@ -690,16 +699,75 @@ impl cosmic::Application for AppModel {
             .as_ref()
             .is_some_and(|p| p.state() == PlaybackState::Playing);
 
+        let is_mpd_active = self
+            .player
+            .as_ref()
+            .is_some_and(|p| p.active_backend_type() == ActiveBackend::Mpd);
+
         if is_playing {
-            subs.push(Subscription::run(|| {
-                iced_futures::stream::channel(1, |mut emitter| async move {
-                    let mut interval = tokio::time::interval(Duration::from_millis(500));
-                    loop {
-                        interval.tick().await;
-                        _ = emitter.send(Message::PlaybackTick).await;
-                    }
-                })
-            }));
+            if is_mpd_active {
+                // MPD: poll status from the server every 300ms.
+                // This replaces the generic tick for MPD playback — we get
+                // position/duration/state/volume from the real MPD status.
+                if let Some(ref player) = self.player
+                    && let Some(mpd) = player.mpd_backend_ref()
+                {
+                    let client = mpd.client();
+                    subs.push(Subscription::run_with_id(
+                        "mpd-status-poll",
+                        iced_futures::stream::channel(1, |mut emitter| async move {
+                            let mut interval =
+                                tokio::time::interval(Duration::from_millis(300));
+                            loop {
+                                interval.tick().await;
+                                match client.command(mpd_client::commands::Status).await {
+                                    Ok(status) => {
+                                        let state = match status.state {
+                                            mpd_client::responses::PlayState::Playing => {
+                                                PlaybackState::Playing
+                                            }
+                                            mpd_client::responses::PlayState::Paused => {
+                                                PlaybackState::Paused
+                                            }
+                                            mpd_client::responses::PlayState::Stopped => {
+                                                PlaybackState::Stopped
+                                            }
+                                        };
+                                        _ = emitter
+                                            .send(Message::MpdStatusUpdate {
+                                                position: status
+                                                    .elapsed
+                                                    .unwrap_or(Duration::ZERO),
+                                                duration: status
+                                                    .duration
+                                                    .unwrap_or(Duration::ZERO),
+                                                state,
+                                                volume: status.volume as f32 / 100.0,
+                                            })
+                                            .await;
+                                    }
+                                    Err(e) => {
+                                        log::warn!("MPD status poll failed: {e}");
+                                    }
+                                }
+                            }
+                        }),
+                    ));
+                }
+            } else {
+                // Local/Subsonic: simple tick for UI updates.
+                subs.push(Subscription::run_with_id(
+                    "playback-tick",
+                    iced_futures::stream::channel(1, |mut emitter| async move {
+                        let mut interval =
+                            tokio::time::interval(Duration::from_millis(500));
+                        loop {
+                            interval.tick().await;
+                            _ = emitter.send(Message::PlaybackTick).await;
+                        }
+                    }),
+                ));
+            }
         }
 
         // MPD idle event subscriptions — one per configured MPD provider.
@@ -879,9 +947,21 @@ impl cosmic::Application for AppModel {
                         if player.play_index(0).is_ok() {
                             self.current_track = self.all_tracks.first().cloned();
                             self.playback_position = Duration::ZERO;
+                            return self.dispatch_mpd_after_play();
                         }
-                    } else if let Err(e) = player.toggle_playback() {
-                        log::error!("Playback toggle failed: {e}");
+                    } else {
+                        let was_playing = player.state() == PlaybackState::Playing;
+                        if let Err(e) = player.toggle_playback() {
+                            log::error!("Playback toggle failed: {e}");
+                        } else if let Some(client) = self.mpd_client() {
+                            // Dispatch async SetPause to MPD.
+                            return self.dispatch_mpd(async move {
+                                client
+                                    .command(mpd_client::commands::SetPause(was_playing))
+                                    .await
+                                    .map_err(|e| format!("MPD set_pause: {e}"))
+                            });
+                        }
                     }
                 }
             }
@@ -893,6 +973,7 @@ impl cosmic::Application for AppModel {
                             self.current_track = Some(track.clone());
                             self.playback_position = Duration::ZERO;
                             self.lyrics_text = None;
+                            return self.dispatch_mpd_after_play();
                         }
                         Err(e) => log::error!("Next track failed: {e}"),
                         _ => {}
@@ -907,6 +988,7 @@ impl cosmic::Application for AppModel {
                             self.current_track = Some(track.clone());
                             self.playback_position = Duration::ZERO;
                             self.lyrics_text = None;
+                            return self.dispatch_mpd_after_play();
                         }
                         Err(e) => log::error!("Previous track failed: {e}"),
                         _ => {}
@@ -933,6 +1015,17 @@ impl cosmic::Application for AppModel {
                     match player.seek(target) {
                         Ok(()) => {
                             self.playback_position = target;
+                            // Dispatch async Seek to MPD.
+                            if let Some(client) = self.mpd_client() {
+                                return self.dispatch_mpd(async move {
+                                    client
+                                        .command(mpd_client::commands::Seek(
+                                            mpd_client::commands::SeekMode::Absolute(target),
+                                        ))
+                                        .await
+                                        .map_err(|e| format!("MPD seek: {e}"))
+                                });
+                            }
                         }
                         Err(e) => log::warn!("Seek failed: {e}"),
                     }
@@ -941,10 +1034,21 @@ impl cosmic::Application for AppModel {
 
             Message::SetVolume(vol) => {
                 if let Some(ref mut player) = self.player
-                    && let Err(e) = player.set_volume(vol) {
-                        log::error!("Set volume failed: {e}");
-                    }
+                    && let Err(e) = player.set_volume(vol)
+                {
+                    log::error!("Set volume failed: {e}");
+                }
                 self.config.volume = vol;
+                // Dispatch async SetVolume to MPD.
+                if let Some(client) = self.mpd_client() {
+                    let vol_u8 = (vol.clamp(0.0, 1.0) * 100.0) as u8;
+                    return self.dispatch_mpd(async move {
+                        client
+                            .command(mpd_client::commands::SetVolume(vol_u8))
+                            .await
+                            .map_err(|e| format!("MPD set_volume: {e}"))
+                    });
+                }
             }
 
             Message::ToggleShuffle => {
@@ -955,16 +1059,59 @@ impl cosmic::Application for AppModel {
                 self.config.repeat_mode = self.config.repeat_mode.next();
             }
 
-            Message::PlaybackTick => {
-                // Read accurate position from the active backend.
+            Message::MpdStatusUpdate {
+                position,
+                duration,
+                state,
+                volume,
+            } => {
+                // Feed polled status into the MPD backend cache.
                 if let Some(ref mut player) = self.player {
-                    // Don't overwrite playback_position while the user is
-                    // dragging the seek slider — the preview fraction is
-                    // shown instead, and we seek only on release.
+                    if let Some(mpd) = player.mpd_backend_mut() {
+                        mpd.update_status(position, duration, state, volume);
+                    }
+
+                    // Update UI position (unless user is dragging seek slider).
+                    if self.seeking_preview.is_none() {
+                        self.playback_position = position;
+                        if let Some(ref track) = self.current_track
+                            && self.playback_position > track.duration
+                        {
+                            self.playback_position = track.duration;
+                        }
+                    }
+
+                    // Check if track ended (MPD reports Stopped after playback).
+                    if player.is_finished().unwrap_or(false)
+                        && let Ok(Some(track)) = player.next()
+                    {
+                        self.current_track = Some(track.clone());
+                        self.playback_position = Duration::ZERO;
+                        self.lyrics_text = None;
+                        self.scrobble_now_playing_sent = false;
+                        self.scrobble_sent = false;
+                        // Dispatch the actual async MPD play command.
+                        return self.dispatch_mpd_after_play();
+                    }
+                }
+
+                // Scrobble handling for MPD tracks.
+                if let Some(track) = self.current_track.clone() {
+                    self.handle_scrobble(track);
+                }
+            }
+
+            Message::MpdCommandError(err) => {
+                log::error!("Async MPD command failed: {err}");
+                // The next status poll will self-correct the UI state.
+            }
+
+            Message::PlaybackTick => {
+                // Local/Subsonic playback — read position from the active backend.
+                if let Some(ref mut player) = self.player {
                     if self.seeking_preview.is_none() {
                         self.playback_position = player.position();
 
-                        // Clamp to track duration to avoid overshooting.
                         if let Some(ref track) = self.current_track
                             && self.playback_position > track.duration
                         {
@@ -973,21 +1120,17 @@ impl cosmic::Application for AppModel {
                     }
 
                     // Check if track ended
-                    if player.is_finished().unwrap_or(false) {
-                        // Auto-advance
-                        if let Ok(Some(track)) = player.next() {
-                            self.current_track = Some(track.clone());
-                            self.playback_position = Duration::ZERO;
-                            self.lyrics_text = None;
-                            self.scrobble_now_playing_sent = false;
-                            self.scrobble_sent = false;
-                        }
+                    if player.is_finished().unwrap_or(false)
+                        && let Ok(Some(track)) = player.next()
+                    {
+                        self.current_track = Some(track.clone());
+                        self.playback_position = Duration::ZERO;
+                        self.lyrics_text = None;
+                        self.scrobble_now_playing_sent = false;
+                        self.scrobble_sent = false;
                     }
                 }
 
-                // Subsonic scrobbling: send "now playing" on first tick,
-                // scrobble at 50% or 4 minutes (whichever is first).
-                // Clone track to avoid borrow conflict with &mut self.
                 if let Some(track) = self.current_track.clone() {
                     self.handle_scrobble(track);
                 }
@@ -995,33 +1138,35 @@ impl cosmic::Application for AppModel {
 
             // -- Track selection --
             Message::PlayTrackIndex(index) => {
-                self.play_track_list(self.all_tracks.clone(), index);
+                return self.play_track_list(self.all_tracks.clone(), index);
             }
 
             Message::PlayAlbum(album_idx) => {
                 if let Some(album) = self.all_albums.get(album_idx) {
-                    self.play_track_list(album.tracks.clone(), 0);
+                    return self.play_track_list(album.tracks.clone(), 0);
                 }
             }
 
             Message::PlayAlbumTrack(album_idx, track_idx) => {
                 if let Some(album) = self.all_albums.get(album_idx) {
-                    self.play_track_list(album.tracks.clone(), track_idx);
+                    return self.play_track_list(album.tracks.clone(), track_idx);
                 }
             }
 
             Message::PlayArtistAlbum(artist_idx, album_idx) => {
                 if let Some(artist) = self.all_artists.get(artist_idx)
-                    && let Some(album) = artist.albums.get(album_idx) {
-                        self.play_track_list(album.tracks.clone(), 0);
-                    }
+                    && let Some(album) = artist.albums.get(album_idx)
+                {
+                    return self.play_track_list(album.tracks.clone(), 0);
+                }
             }
 
             Message::PlayArtistTrack(artist_idx, album_idx, track_idx) => {
                 if let Some(artist) = self.all_artists.get(artist_idx)
-                    && let Some(album) = artist.albums.get(album_idx) {
-                        self.play_track_list(album.tracks.clone(), track_idx);
-                    }
+                    && let Some(album) = artist.albums.get(album_idx)
+                {
+                    return self.play_track_list(album.tracks.clone(), track_idx);
+                }
             }
 
             // -- View navigation --
@@ -1408,6 +1553,64 @@ impl AppModel {
             .position(|(id, _)| id == self.registry.active_id());
     }
 
+    /// Get the MPD `Client` if the active backend is MPD.
+    fn mpd_client(&self) -> Option<mpd_client::Client> {
+        let player = self.player.as_ref()?;
+        if player.active_backend_type() != ActiveBackend::Mpd {
+            return None;
+        }
+        Some(player.mpd_backend_ref()?.client())
+    }
+
+    /// Dispatch an async MPD command, mapping errors to `MpdCommandError`.
+    fn dispatch_mpd<F>(&self, future: F) -> Task<cosmic::Action<Message>>
+    where
+        F: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        cosmic::task::future(async move {
+            if let Err(e) = future.await {
+                cosmic::Action::App(Message::MpdCommandError(e))
+            } else {
+                // No-op message — command succeeded, status poll will confirm.
+                cosmic::Action::App(Message::PlaybackTick)
+            }
+        })
+    }
+
+    /// Dispatch an async MPD play command for a URI (ClearQueue + Add + Play).
+    fn dispatch_mpd_play(&self, uri: String) -> Task<cosmic::Action<Message>> {
+        if let Some(client) = self.mpd_client() {
+            self.dispatch_mpd(async move {
+                client
+                    .command(mpd_client::commands::ClearQueue)
+                    .await
+                    .map_err(|e| format!("MPD clear: {e}"))?;
+                client
+                    .command(mpd_client::commands::Add::uri(&uri))
+                    .await
+                    .map_err(|e| format!("MPD add: {e}"))?;
+                client
+                    .command(mpd_client::commands::Play::current())
+                    .await
+                    .map_err(|e| format!("MPD play: {e}"))?;
+                Ok(())
+            })
+        } else {
+            Task::none()
+        }
+    }
+
+    /// After `Player` sets optimistic state, take the pending URI and dispatch.
+    fn dispatch_mpd_after_play(&mut self) -> Task<cosmic::Action<Message>> {
+        if let Some(ref mut player) = self.player
+            && let Some(mpd) = player.mpd_backend_mut()
+            && let Some(uri) = mpd.take_play_uri()
+        {
+            return self.dispatch_mpd_play(uri);
+        }
+        Task::none()
+    }
+
     fn update_title(&mut self) -> Task<cosmic::Action<Message>> {
         let mut title = fl!("app-title");
 
@@ -1782,8 +1985,7 @@ impl AppModel {
             .find(|p| p.id() == active_id)
             .and_then(|mpd| {
                 let client = mpd.client_clone()?;
-                let handle = mpd.runtime_handle();
-                Some(MpdBackend::new(client, handle))
+                Some(MpdBackend::new(client))
             })
     }
 
@@ -1878,7 +2080,11 @@ impl AppModel {
     ///
     /// Takes ownership of the track list to avoid an extra clone — the
     /// caller is responsible for providing an owned `Vec<Track>`.
-    fn play_track_list(&mut self, tracks: Vec<Track>, start_index: usize) {
+    fn play_track_list(
+        &mut self,
+        tracks: Vec<Track>,
+        start_index: usize,
+    ) -> Task<cosmic::Action<Message>> {
         if let Some(ref mut player) = self.player {
             let current = tracks.get(start_index).cloned();
             player.set_queue(tracks);
@@ -1888,8 +2094,10 @@ impl AppModel {
                 self.lyrics_text = None;
                 self.scrobble_now_playing_sent = false;
                 self.scrobble_sent = false;
+                return self.dispatch_mpd_after_play();
             }
         }
+        Task::none()
     }
 
     fn sort_tracks(&mut self, field: songs::SortField) {
