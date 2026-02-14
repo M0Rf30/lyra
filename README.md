@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="resources/icons/hicolor/scalable/apps/io.github.m0Rf30.Lyra.svg" width="120" height="120" alt="Lyra">
+<img src="resources/icons/hicolor/scalable/apps/io.github.m0rf30.Lyra.svg" width="120" height="120" alt="Lyra">
 
 # Lyra
 
@@ -9,6 +9,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Rust](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org/)
 [![COSMIC](https://img.shields.io/badge/COSMIC-Desktop-purple.svg)](https://github.com/pop-os/cosmic)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Me-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/W7W61U8IUL)
 
 </div>
 
@@ -75,6 +76,12 @@ Lyra is built with a modern Rust stack:
 - **Async Runtime**: [tokio](https://tokio.rs/) for responsive, non-blocking I/O
 - **Database**: SQLite via [rusqlite](https://github.com/rusqlite/rusqlite) for efficient library queries
 - **Protocols**: Native MPD and OpenSubsonic clients for server connectivity
+
+## Support
+
+If you enjoy Lyra and want to support its development, consider buying me a coffee:
+
+<a href='https://ko-fi.com/W7W61U8IUL' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
 
 ## License
 

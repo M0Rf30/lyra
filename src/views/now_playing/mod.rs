@@ -12,6 +12,8 @@ pub mod compact_bar;
 pub mod expanded_view;
 #[cfg(feature = "visualizer")]
 pub mod visualizer;
+#[cfg(feature = "visualizer")]
+pub mod viz_shader;
 
 use std::time::Duration;
 

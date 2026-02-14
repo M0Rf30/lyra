@@ -34,7 +34,7 @@ mpd_client = "1.4"
 opensubsonic = { git = "https://github.com/M0Rf30/opensubsonic-rs.git" }
 
 # Audio metadata (ID3, Vorbis, FLAC, etc.)
-lofty = "0.23"
+lofty = { git = "https://github.com/M0Rf30/lofty-rs.git", branch = "feat/dsd-support" }
 
 # Database for music library
 rusqlite = { version = "0.38", features = ["bundled"] }
@@ -93,6 +93,27 @@ strip = "symbols"
 inherits = "release"
 debug = true
 strip = false
+
+# Patch symphonia to M0Rf30 fork for DSD/DSF/DFF support.
+# rodio's `symphonia-all` enables `all-codecs` + `all-formats`, which in the
+# fork includes the `dsd` feature (symphonia-codec-dsd + symphonia-format-dsd).
+[patch.crates-io]
+symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-core = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-metadata = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-bundle-flac = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-bundle-mp3 = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-codec-aac = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-codec-adpcm = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-codec-alac = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-codec-pcm = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-codec-vorbis = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-format-caf = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-format-isomp4 = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-format-mkv = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-format-ogg = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-format-riff = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+symphonia-utils-xiph = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
 
 # Uncomment to test a locally-cloned libcosmic
 # [patch.'https://github.com/pop-os/libcosmic']

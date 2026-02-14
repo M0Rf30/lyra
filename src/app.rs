@@ -105,12 +105,11 @@ pub struct AppModel {
     // ProjectM visualizer (behind feature flag)
     #[cfg(feature = "visualizer")]
     visualizer_active: bool,
+    /// Shared frame buffer for the shader-based visualizer widget.
+    /// The render subscription writes RGBA pixels here; the Shader widget
+    /// reads them in its `prepare()` method via `queue.write_texture()`.
     #[cfg(feature = "visualizer")]
-    visualizer_frame: Option<cosmic::iced::widget::image::Handle>,
-    /// Previous visualizer frame — kept alive so iced's raster cache retains
-    /// the old texture until the new one is uploaded, preventing white flashes.
-    #[cfg(feature = "visualizer")]
-    visualizer_frame_prev: Option<cosmic::iced::widget::image::Handle>,
+    viz_frame_buf: Arc<Mutex<crate::views::now_playing::viz_shader::VizFrameBuffer>>,
     #[cfg(feature = "visualizer")]
     pcm_buffer: Option<Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>>,
     /// Shared flag to signal preset change to the render thread.
@@ -246,8 +245,10 @@ pub enum Message {
     ToggleVisualizer,
     #[cfg(feature = "visualizer")]
     NextVisualizerPreset,
+    /// A new visualizer frame was written to the shared VizFrameBuffer.
+    /// This message carries no data — it just triggers a view redraw.
     #[cfg(feature = "visualizer")]
-    VisualizerFrame(cosmic::iced::widget::image::Handle),
+    VisualizerFrameReady,
 
     // Application lifecycle
     Quit,
@@ -459,9 +460,12 @@ impl cosmic::Application for AppModel {
             #[cfg(feature = "visualizer")]
             visualizer_active: false,
             #[cfg(feature = "visualizer")]
-            visualizer_frame: None,
-            #[cfg(feature = "visualizer")]
-            visualizer_frame_prev: None,
+            viz_frame_buf: {
+                let (w, h) = crate::views::now_playing::visualizer::ProjectMRenderer::resolution();
+                Arc::new(Mutex::new(
+                    crate::views::now_playing::viz_shader::VizFrameBuffer::new(w, h),
+                ))
+            },
             #[cfg(feature = "visualizer")]
             pcm_buffer,
             #[cfg(feature = "visualizer")]
@@ -774,9 +778,7 @@ impl cosmic::Application for AppModel {
                 #[cfg(feature = "visualizer")]
                 self.visualizer_active,
                 #[cfg(feature = "visualizer")]
-                self.visualizer_frame.as_ref(),
-                #[cfg(feature = "visualizer")]
-                self.visualizer_frame_prev.as_ref(),
+                Arc::clone(&self.viz_frame_buf),
             )
             .map(map_now_playing_msg);
 
@@ -968,6 +970,16 @@ impl cosmic::Application for AppModel {
         }
 
         // Visualizer render subscription (~30fps, only when active and expanded)
+        //
+        // IMPORTANT: The projectM renderer requires a current EGL/GL context
+        // which is thread-local. Tokio's multi-threaded runtime migrates
+        // futures between OS threads across `.await` points, which would
+        // lose the GL context and produce black/garbage frames (flickering)
+        // and prevent PCM audio data from reaching projectM (no beat
+        // reactivity). To avoid this, the actual render loop runs on a
+        // dedicated `std::thread::spawn` OS thread. The iced subscription
+        // channel only relays "frame ready" notifications from that thread
+        // back to the UI.
         #[cfg(feature = "visualizer")]
         if self.visualizer_active
             && self.expand_progress > 0.0
@@ -975,52 +987,79 @@ impl cosmic::Application for AppModel {
         {
             let pcm = Arc::clone(pcm_buf);
             let preset_signal = Arc::clone(&self.next_preset_signal);
+            let frame_buf = Arc::clone(&self.viz_frame_buf);
             subs.push(Subscription::run_with_id(
                 "projectm-render",
                 iced_futures::stream::channel(2, move |mut emitter| async move {
-                    // Create the renderer on this dedicated thread
-                    let preset_dir =
-                        dirs::data_dir().map(|d| d.join("projectm").join("presets"));
-                    let mut renderer =
-                        match crate::views::now_playing::visualizer::ProjectMRenderer::new(
-                            preset_dir,
-                        ) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                tracing::error!("Failed to create projectM renderer: {e}");
-                                return;
+                    // Use a one-shot channel to know when the render thread
+                    // has produced a new frame so we can notify the UI.
+                    let (frame_tx, mut frame_rx) =
+                        tokio::sync::mpsc::channel::<()>(2);
+
+                    // Spawn a dedicated OS thread for the GL render loop.
+                    // The EGL context created inside `ProjectMRenderer::new`
+                    // stays current for the lifetime of this thread.
+                    std::thread::Builder::new()
+                        .name("projectm-render".into())
+                        .spawn(move || {
+                            let preset_dir =
+                                dirs::data_dir().map(|d| d.join("projectm").join("presets"));
+                            let mut renderer =
+                                match crate::views::now_playing::visualizer::ProjectMRenderer::new(
+                                    preset_dir,
+                                ) {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Failed to create projectM renderer: {e}"
+                                        );
+                                        return;
+                                    }
+                                };
+
+                            loop {
+                                // ~30 fps
+                                std::thread::sleep(Duration::from_millis(33));
+
+                                // Check if a preset change was requested
+                                if preset_signal
+                                    .swap(false, std::sync::atomic::Ordering::AcqRel)
+                                {
+                                    renderer.next_preset();
+                                }
+
+                                // Read PCM from shared buffer
+                                let pcm_data = pcm
+                                    .lock()
+                                    .ok()
+                                    .map(|buf| buf.read_recent(2048))
+                                    .unwrap_or_default();
+
+                                // Render a frame (GL calls, ~3-5ms)
+                                let rgba = renderer.render_frame(&pcm_data);
+
+                                // Write pixels into the shared frame buffer
+                                if let Ok(mut buf) = frame_buf.lock() {
+                                    buf.update(rgba);
+                                }
+
+                                // Notify the async side that a frame is ready.
+                                // If the channel is full or closed, the render
+                                // thread is ahead of the UI — just skip.
+                                if frame_tx.try_send(()).is_err() {
+                                    // Channel closed → subscription was dropped
+                                    // (visualizer deactivated or view collapsed).
+                                    if frame_tx.is_closed() {
+                                        break;
+                                    }
+                                }
                             }
-                        };
+                        })
+                        .expect("failed to spawn projectm-render thread");
 
-                    let mut interval =
-                        tokio::time::interval(Duration::from_millis(33)); // ~30fps
-                    loop {
-                        interval.tick().await;
-
-                        // Check if a preset change was requested
-                        if preset_signal.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                            tokio::task::block_in_place(|| renderer.next_preset());
-                        }
-
-                        // Read PCM from shared buffer
-                        let pcm_data = pcm
-                            .lock()
-                            .ok()
-                            .map(|buf| buf.read_recent(2048))
-                            .unwrap_or_default();
-
-                        // Render a frame (blocking, ~3-5ms)
-                        let rgba = tokio::task::block_in_place(|| {
-                            renderer.render_frame(&pcm_data)
-                        });
-
-                        // Send raw RGBA pixels directly as an iced image handle
-                        // — no PNG encode/decode, no icon wrapper overhead
-                        let (w, h) = crate::views::now_playing::visualizer::ProjectMRenderer::resolution();
-                        let handle = cosmic::iced::widget::image::Handle::from_rgba(w, h, rgba);
-                        _ = emitter
-                            .send(Message::VisualizerFrame(handle))
-                            .await;
+                    // Relay frame-ready signals from the render thread to iced.
+                    while frame_rx.recv().await.is_some() {
+                        _ = emitter.send(Message::VisualizerFrameReady).await;
                     }
                 }),
             ));
@@ -1803,9 +1842,6 @@ impl cosmic::Application for AppModel {
             #[cfg(feature = "visualizer")]
             Message::ToggleVisualizer => {
                 self.visualizer_active = !self.visualizer_active;
-                if !self.visualizer_active {
-                    self.visualizer_frame = None;
-                }
             }
 
             #[cfg(feature = "visualizer")]
@@ -1815,11 +1851,10 @@ impl cosmic::Application for AppModel {
             }
 
             #[cfg(feature = "visualizer")]
-            Message::VisualizerFrame(handle) => {
-                // Double-buffer: keep previous frame alive so iced's raster
-                // cache retains its texture while the new one uploads.
-                self.visualizer_frame_prev = self.visualizer_frame.take();
-                self.visualizer_frame = Some(handle);
+            Message::VisualizerFrameReady => {
+                // The shared VizFrameBuffer already has the new pixels.
+                // This message just triggers a view redraw so the Shader
+                // widget picks them up in its next prepare() call.
             }
 
             Message::Quit => {

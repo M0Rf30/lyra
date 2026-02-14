@@ -16,6 +16,9 @@ use cosmic::prelude::*;
 use cosmic::widget;
 use std::time::Duration;
 
+#[cfg(feature = "visualizer")]
+use std::sync::{Arc, Mutex};
+
 /// Render the expanded now-playing view.
 ///
 /// This view fills the available space and shows:
@@ -40,12 +43,7 @@ pub fn expanded_now_playing<'a>(
     seeking_preview: Option<f32>,
     expand_progress: f32,
     #[cfg(feature = "visualizer")] visualizer_active: bool,
-    #[cfg(feature = "visualizer")] visualizer_frame: Option<
-        &'a cosmic::iced::widget::image::Handle,
-    >,
-    #[cfg(feature = "visualizer")] visualizer_frame_prev: Option<
-        &'a cosmic::iced::widget::image::Handle,
-    >,
+    #[cfg(feature = "visualizer")] viz_frame_buf: Arc<Mutex<super::viz_shader::VizFrameBuffer>>,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     // While dragging, show the preview position; otherwise the backend position.
     let (progress, display_position) = if let Some(frac) = seeking_preview {
@@ -309,32 +307,27 @@ pub fn expanded_now_playing<'a>(
     // in COSMIC's scrollable wrapper). The content column inside uses
     // Shrink height so it naturally sizes to its children.
 
-    // Determine which background to use and whether the visualizer is driving it.
+    // Determine whether the visualizer is driving the background.
     #[cfg(feature = "visualizer")]
-    let viz_is_bg = visualizer_active && visualizer_frame.is_some();
+    let viz_is_bg = visualizer_active;
     #[cfg(not(feature = "visualizer"))]
     let viz_is_bg = false;
 
+    // Build the background layer.
+    //
+    // When the visualizer is active, use the Shader widget backed by a
+    // persistent wgpu texture (no image::Handle churn, no flashing).
+    // Otherwise fall back to the blurred cover art, or a themed solid.
     #[cfg(feature = "visualizer")]
-    let bg_image_handle: Option<cosmic::Element<'_, NowPlayingMessage>> = if visualizer_active {
-        if let Some(viz_handle) = visualizer_frame {
-            Some(
-                cosmic::widget::image(viz_handle.clone())
-                    .content_fit(cosmic::iced::ContentFit::Cover)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(800.0))
-                    .into(),
-            )
-        } else {
-            blurred_cover.map(|h| {
-                let el: cosmic::Element<'_, NowPlayingMessage> = widget::icon::icon(h.clone())
-                    .content_fit(cosmic::iced::ContentFit::Cover)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(800.0))
-                    .into();
-                el
-            })
-        }
+    let bg_element: Option<cosmic::Element<'_, NowPlayingMessage>> = if visualizer_active {
+        Some(
+            cosmic::iced::widget::Shader::new(super::viz_shader::VizProgram::new(Arc::clone(
+                &viz_frame_buf,
+            )))
+            .width(Length::Fill)
+            .height(Length::Fixed(800.0))
+            .into(),
+        )
     } else {
         blurred_cover.map(|h| {
             let el: cosmic::Element<'_, NowPlayingMessage> = widget::icon::icon(h.clone())
@@ -347,7 +340,7 @@ pub fn expanded_now_playing<'a>(
     };
 
     #[cfg(not(feature = "visualizer"))]
-    let bg_image_handle: Option<cosmic::Element<'_, NowPlayingMessage>> = blurred_cover.map(|h| {
+    let bg_element: Option<cosmic::Element<'_, NowPlayingMessage>> = blurred_cover.map(|h| {
         let el: cosmic::Element<'_, NowPlayingMessage> = widget::icon::icon(h.clone())
             .content_fit(cosmic::iced::ContentFit::Cover)
             .width(Length::Fill)
@@ -356,11 +349,9 @@ pub fn expanded_now_playing<'a>(
         el
     });
 
-    if let Some(bg_layer) = bg_image_handle {
-        // Solid black base layer — prevents white flashes when the image
-        // texture is momentarily unavailable (iced creates a new texture ID
-        // per frame for dynamic RGBA handles; the gap between old-evict and
-        // new-upload can flash the window background through).
+    if let Some(bg_layer) = bg_element {
+        // Solid black base layer — safety net so nothing shows through
+        // during the very first frame before the shader texture is uploaded.
         let black_base: cosmic::Element<'_, NowPlayingMessage> =
             widget::container(widget::Space::new(0, 0))
                 .width(Length::Fill)
@@ -389,26 +380,9 @@ pub fn expanded_now_playing<'a>(
                 }))
                 .into();
 
-        // Stack: black base → [prev frame] → current frame → overlay → content
-        // The previous frame layer keeps its texture in iced's cache, so when
-        // the current frame's texture isn't ready yet, the previous frame
-        // shows through instead of a black/white flash.
-        #[allow(unused_mut)]
-        let mut stack = Stack::new().push(black_base);
-
-        // Insert previous visualizer frame (if any) as a cache-warming layer
-        #[cfg(feature = "visualizer")]
-        if let Some(prev_handle) = visualizer_frame_prev {
-            let prev_layer: cosmic::Element<'_, NowPlayingMessage> =
-                cosmic::widget::image(prev_handle.clone())
-                    .content_fit(cosmic::iced::ContentFit::Cover)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(800.0))
-                    .into();
-            stack = stack.push(prev_layer);
-        }
-
-        let stack: cosmic::Element<'_, NowPlayingMessage> = stack
+        // Stack: black base → background (shader or blur) → overlay → content
+        let stack: cosmic::Element<'_, NowPlayingMessage> = Stack::new()
+            .push(black_base)
             .push(bg_layer)
             .push(overlay)
             .push(content)

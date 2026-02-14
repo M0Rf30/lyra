@@ -11,7 +11,7 @@ use walkdir::WalkDir;
 
 /// Supported audio file extensions.
 const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "ogg", "opus", "m4a", "aac", "wav", "wma", "ape", "wv",
+    "mp3", "flac", "ogg", "opus", "m4a", "aac", "wav", "wma", "ape", "wv", "dsf", "dff",
 ];
 
 /// Scans music directories and populates the library database.
