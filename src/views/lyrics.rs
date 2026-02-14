@@ -33,7 +33,7 @@ pub fn lyrics_view<'a>(
             .into()
     } else if let Some(text) = lyrics {
         widget::scrollable(widget::container(widget::text(text)).padding(8))
-            .height(Length::Fill)
+            .height(Length::Shrink)
             .into()
     } else {
         widget::container(
@@ -57,6 +57,6 @@ pub fn lyrics_view<'a>(
         .spacing(12)
         .padding(16)
         .width(Length::Fill)
-        .height(Length::Fill)
+        .height(Length::Shrink)
         .into()
 }

@@ -4,7 +4,17 @@
 //!
 //! Provides an offscreen-rendered music visualizer using the projectM library.
 //! Renders to an FBO via a headless EGL context, reads pixels back, and sends
-//! frames as icon handles for display in the expanded now-playing view.
+//! frames as iced `image::Handle` for display in the expanded now-playing view.
+//!
+//! ## Known limitation — texture churn
+//!
+//! Each frame creates a new `image::Handle::from_rgba()` with a unique ID
+//! (iced's API does not support updating pixel data for an existing handle).
+//! This causes iced's raster cache to upload a new GPU texture and evict the
+//! previous one every frame. In practice the upload+trim cycle completes within
+//! a single render pass so visible flickering is unlikely, but the GPU memory
+//! churn is sub-optimal. A stable-ID RGBA handle would require upstream changes
+//! to iced's `image::Handle` / `image::Id` API.
 
 use projectm::core::ProjectM;
 use std::path::PathBuf;
@@ -12,8 +22,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Render resolution for the visualizer.
-const RENDER_WIDTH: usize = 800;
-const RENDER_HEIGHT: usize = 600;
+/// Kept moderate to limit GPU→CPU readback cost and texture upload overhead.
+const RENDER_WIDTH: usize = 640;
+const RENDER_HEIGHT: usize = 360;
 
 /// The offscreen projectM renderer.
 ///
@@ -157,7 +168,8 @@ impl ProjectMRenderer {
     /// Render one frame and return RGBA pixel bytes.
     ///
     /// Feed PCM audio data to projectM, render a frame into the FBO,
-    /// and read pixels back.
+    /// and read pixels back. The returned bytes are ready for direct use
+    /// with `widget::icon::from_raster_pixels()` — no PNG encoding needed.
     pub fn render_frame(&self, pcm: &[f32]) -> Vec<u8> {
         // Feed audio samples if available, clamped to projectM's max buffer size
         if !pcm.is_empty() {
@@ -185,17 +197,29 @@ impl ProjectMRenderer {
             );
         }
 
-        // OpenGL reads bottom-to-top, flip vertically for correct orientation
+        // OpenGL reads bottom-to-top — flip vertically in-place
         let row_size = RENDER_WIDTH * 4;
-        let mut flipped = vec![0u8; pixels.len()];
-        for y in 0..RENDER_HEIGHT {
-            let src_start = y * row_size;
-            let dst_start = (RENDER_HEIGHT - 1 - y) * row_size;
-            flipped[dst_start..dst_start + row_size]
-                .copy_from_slice(&pixels[src_start..src_start + row_size]);
+        for y in 0..RENDER_HEIGHT / 2 {
+            let top = y * row_size;
+            let bot = (RENDER_HEIGHT - 1 - y) * row_size;
+            // Swap rows using split_at_mut to satisfy borrow checker
+            let (first, second) = pixels.split_at_mut(bot);
+            first[top..top + row_size].swap_with_slice(&mut second[..row_size]);
         }
 
-        flipped
+        // Force alpha to fully opaque. projectM often renders with alpha < 255
+        // which causes washed-out/transparent-looking colors when the image is
+        // composited onto the UI background.
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+
+        pixels
+    }
+
+    /// Return the render resolution (width, height).
+    pub const fn resolution() -> (u32, u32) {
+        (RENDER_WIDTH as u32, RENDER_HEIGHT as u32)
     }
 
     /// Select the next preset with a smooth transition.

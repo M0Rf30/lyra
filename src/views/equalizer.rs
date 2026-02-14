@@ -65,7 +65,7 @@ pub fn equalizer_view<'a>(
     // dB scale labels
     let db_labels = widget::column()
         .push(widget::text::caption("+12 dB"))
-        .push(widget::text::caption("0 dB").height(Length::Fill))
+        .push(widget::text::caption("0 dB").height(Length::Shrink))
         .push(widget::text::caption("-12 dB"))
         .spacing(4)
         .height(140);

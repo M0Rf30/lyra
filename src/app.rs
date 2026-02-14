@@ -106,7 +106,7 @@ pub struct AppModel {
     #[cfg(feature = "visualizer")]
     visualizer_active: bool,
     #[cfg(feature = "visualizer")]
-    visualizer_frame: Option<widget::icon::Handle>,
+    visualizer_frame: Option<cosmic::iced::widget::image::Handle>,
     #[cfg(feature = "visualizer")]
     pcm_buffer: Option<Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>>,
     /// Shared flag to signal preset change to the render thread.
@@ -243,7 +243,7 @@ pub enum Message {
     #[cfg(feature = "visualizer")]
     NextVisualizerPreset,
     #[cfg(feature = "visualizer")]
-    VisualizerFrame(widget::icon::Handle),
+    VisualizerFrame(cosmic::iced::widget::image::Handle),
 
     // Application lifecycle
     Quit,
@@ -705,7 +705,14 @@ impl cosmic::Application for AppModel {
             .map(|p| p.volume())
             .unwrap_or(self.config.volume);
         let current_cover = self.current_track.as_ref().and_then(|track| {
-            let key = crate::library::CoverArt::album_key(&track.artist, &track.album);
+            // Use album_artist to match how albums store cover art.
+            // Falls back to track.artist when album_artist is empty.
+            let artist = if track.album_artist.is_empty() {
+                &track.artist
+            } else {
+                &track.album_artist
+            };
+            let key = crate::library::CoverArt::album_key(artist, &track.album);
             self.cover_images.get(&key)
         });
 
@@ -999,17 +1006,13 @@ impl cosmic::Application for AppModel {
                             renderer.render_frame(&pcm_data)
                         });
 
-                        // Convert to PNG and send as icon handle
-                        if let Some(png_bytes) =
-                            crate::views::now_playing::visualizer::rgba_to_png(
-                                &rgba, 800, 600,
-                            )
-                        {
-                            let handle = widget::icon::from_raster_bytes(png_bytes);
-                            _ = emitter
-                                .send(Message::VisualizerFrame(handle))
-                                .await;
-                        }
+                        // Send raw RGBA pixels directly as an iced image handle
+                        // — no PNG encode/decode, no icon wrapper overhead
+                        let (w, h) = crate::views::now_playing::visualizer::ProjectMRenderer::resolution();
+                        let handle = cosmic::iced::widget::image::Handle::from_rgba(w, h, rgba);
+                        _ = emitter
+                            .send(Message::VisualizerFrame(handle))
+                            .await;
                     }
                 }),
             ));
@@ -1114,6 +1117,9 @@ impl cosmic::Application for AppModel {
                 self.cover_images = cover_images;
                 self.artist_avatars = artist_avatars;
                 self.cover_art_bytes = cover_art_bytes;
+                // Re-trigger blur now that cover art bytes are available
+                let blur_task = self.maybe_update_blurred_cover();
+                return blur_task;
             }
 
             Message::LibraryBatch {
@@ -1135,6 +1141,10 @@ impl cosmic::Application for AppModel {
 
                 // Incrementally merge only the new batch into artists
                 self.merge_artists_from_batch(&albums);
+
+                // Re-trigger blur in case the current track's cover just arrived
+                let blur_task = self.maybe_update_blurred_cover();
+                return blur_task;
             }
 
             Message::LibraryLoadComplete => {
@@ -2436,7 +2446,14 @@ impl AppModel {
             }
         };
 
-        let key = crate::library::CoverArt::album_key(&track.artist, &track.album);
+        // Use album_artist to match how albums store cover art.
+        // Falls back to track.artist when album_artist is empty.
+        let artist = if track.album_artist.is_empty() {
+            &track.artist
+        } else {
+            &track.album_artist
+        };
+        let key = crate::library::CoverArt::album_key(artist, &track.album);
 
         // Skip if already computed for this album
         if self.blurred_cover_key.as_ref() == Some(&key) {

@@ -10,6 +10,7 @@ use crate::config::RepeatMode;
 use crate::library::Track;
 use crate::player::PlaybackState;
 use cosmic::iced::alignment::{Horizontal, Vertical};
+use cosmic::iced::widget::Stack;
 use cosmic::iced::{Alignment, Color, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
@@ -39,7 +40,9 @@ pub fn expanded_now_playing<'a>(
     seeking_preview: Option<f32>,
     expand_progress: f32,
     #[cfg(feature = "visualizer")] visualizer_active: bool,
-    #[cfg(feature = "visualizer")] _visualizer_frame: Option<&'a widget::icon::Handle>,
+    #[cfg(feature = "visualizer")] visualizer_frame: Option<
+        &'a cosmic::iced::widget::image::Handle,
+    >,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     // While dragging, show the preview position; otherwise the backend position.
     let (progress, display_position) = if let Some(frac) = seeking_preview {
@@ -67,57 +70,80 @@ pub fn expanded_now_playing<'a>(
         .push(widget::Space::new(Length::Fill, Length::Shrink))
         .padding([8, 16]);
 
-    // --- Cover art (large, centered) ---
-    let cover_size = Length::Fixed(320.0); // Fixed size for expanded view
-    let cover_art_widget: cosmic::Element<'_, NowPlayingMessage> = if let Some(handle) = cover_art {
-        widget::container(
-            widget::icon::icon(handle.clone())
+    // --- Determine the "hero" widget: visualizer frame or cover art ---
+    #[cfg(feature = "visualizer")]
+    let show_viz_frame = visualizer_active && visualizer_frame.is_some();
+    #[cfg(not(feature = "visualizer"))]
+    let show_viz_frame = false;
+
+    let hero_widget: cosmic::Element<'_, NowPlayingMessage> = if show_viz_frame {
+        // Visualizer frame: use iced Image widget directly (not icon) for
+        // efficient raw RGBA display.  Fill the full available width and use
+        // a tall fixed height so the visualizer dominates the view.
+        #[cfg(feature = "visualizer")]
+        {
+            let viz_handle = visualizer_frame.unwrap();
+            cosmic::widget::image(viz_handle.clone())
                 .content_fit(cosmic::iced::ContentFit::Cover)
-                .width(cover_size)
-                .height(cover_size),
-        )
-        .class(cosmic::theme::Container::custom(|theme| {
-            let cosmic = theme.cosmic();
-            cosmic::iced::widget::container::Style {
-                border: cosmic::iced::Border {
-                    color: Color::TRANSPARENT,
-                    width: 0.0,
-                    radius: cosmic.radius_l().into(),
-                },
-                shadow: cosmic::iced::Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.3),
-                    offset: cosmic::iced::Vector::new(0.0, 4.0),
-                    blur_radius: 16.0,
-                },
-                ..Default::default()
-            }
-        }))
-        .width(cover_size)
-        .height(cover_size)
-        .into()
+                .width(Length::Fill)
+                .height(Length::Fixed(500.0))
+                .into()
+        }
+        #[cfg(not(feature = "visualizer"))]
+        unreachable!()
     } else {
-        let fallback_icon: cosmic::Element<'_, NowPlayingMessage> =
-            widget::icon::from_name("media-optical-cd-audio-symbolic")
-                .size(200)
-                .into();
-        widget::container(fallback_icon)
-            .width(cover_size)
-            .height(cover_size)
-            .align_x(Horizontal::Center)
-            .align_y(Vertical::Center)
+        // Normal cover art
+        let cover_size = Length::Fixed(320.0);
+        if let Some(handle) = cover_art {
+            widget::container(
+                widget::icon::icon(handle.clone())
+                    .content_fit(cosmic::iced::ContentFit::Cover)
+                    .width(cover_size)
+                    .height(cover_size),
+            )
             .class(cosmic::theme::Container::custom(|theme| {
                 let cosmic = theme.cosmic();
                 cosmic::iced::widget::container::Style {
-                    background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.2).into()),
                     border: cosmic::iced::Border {
                         color: Color::TRANSPARENT,
                         width: 0.0,
                         radius: cosmic.radius_l().into(),
                     },
+                    shadow: cosmic::iced::Shadow {
+                        color: Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                        offset: cosmic::iced::Vector::new(0.0, 4.0),
+                        blur_radius: 16.0,
+                    },
                     ..Default::default()
                 }
             }))
+            .width(cover_size)
+            .height(cover_size)
             .into()
+        } else {
+            let fallback_icon: cosmic::Element<'_, NowPlayingMessage> =
+                widget::icon::from_name("media-optical-cd-audio-symbolic")
+                    .size(200)
+                    .into();
+            widget::container(fallback_icon)
+                .width(cover_size)
+                .height(cover_size)
+                .align_x(Horizontal::Center)
+                .align_y(Vertical::Center)
+                .class(cosmic::theme::Container::custom(|theme| {
+                    let cosmic = theme.cosmic();
+                    cosmic::iced::widget::container::Style {
+                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.2).into()),
+                        border: cosmic::iced::Border {
+                            color: Color::TRANSPARENT,
+                            width: 0.0,
+                            radius: cosmic.radius_l().into(),
+                        },
+                        ..Default::default()
+                    }
+                }))
+                .into()
+        }
     };
 
     // --- Metadata section ---
@@ -249,7 +275,7 @@ pub fn expanded_now_playing<'a>(
     // Visualizer toggle button (cfg-gated)
     #[cfg(feature = "visualizer")]
     {
-        let viz_icon = "preferences-desktop-effects-symbolic";
+        let viz_icon = "applications-multimedia-symbolic";
         bottom_controls = bottom_controls.push(
             widget::button::icon(widget::icon::from_name(viz_icon).size(24))
                 .on_press(NowPlayingMessage::ToggleVisualizer),
@@ -268,13 +294,15 @@ pub fn expanded_now_playing<'a>(
     let bottom_controls = bottom_controls.spacing(12).align_y(Alignment::Center);
 
     // --- Main content column ---
-    // Use Shrink height — the COSMIC framework wraps view() output in a
-    // scrollable, which panics if content uses Length::Fill on the scroll axis.
+    // The hero_widget is either the visualizer frame or the cover art,
+    // decided above based on visualizer state.
+    let hero_spacing = if show_viz_frame { 8.0 } else { 24.0 };
+
     let content = widget::column()
         .push(top_bar)
-        .push(widget::Space::new(Length::Shrink, 24))
-        .push(cover_art_widget)
-        .push(widget::Space::new(Length::Shrink, 24))
+        .push(widget::Space::new(Length::Shrink, hero_spacing))
+        .push(hero_widget)
+        .push(widget::Space::new(Length::Shrink, hero_spacing))
         .push(metadata)
         .push(widget::Space::new(Length::Shrink, 24))
         .push(seek_bar)
@@ -286,31 +314,110 @@ pub fn expanded_now_playing<'a>(
         .align_x(Alignment::Center)
         .width(Length::Fill);
 
-    // Wrap content in a container with dark background styling.
-    // Avoid Length::Fill on the vertical axis — COSMIC wraps view() in a
-    // scrollable which panics on Fill height content.
     let _ = content_opacity;
-    let _ = blurred_cover;
 
-    let styled_content = widget::container(content)
-        .width(Length::Fill)
-        .align_x(Horizontal::Center)
-        .class(cosmic::theme::Container::custom(move |theme| {
-            let cosmic = theme.cosmic();
-            // Use the background image tint or solid dark fallback
-            cosmic::iced::widget::container::Style {
-                background: Some(
-                    Color::from_rgba(
-                        cosmic.background.base.red,
-                        cosmic.background.base.green,
-                        cosmic.background.base.blue,
-                        1.0,
-                    )
+    // --- Assemble with Stack for background layering ---
+    //
+    // Stack renders children bottom-to-top: first child = bottom layer.
+    // The first child also dictates intrinsic size.
+    //
+    // When a background image (blur or visualizer) is available, we use:
+    //   Layer 0 (bottom): background image — Fill width, Fill height
+    //   Layer 1 (middle): semi-transparent dark overlay
+    //   Layer 2 (top):    content column with all the controls
+    //
+    // We set the Stack height to Fixed(800) — a generous value that
+    // covers the content without using Length::Fill (which would panic
+    // in COSMIC's scrollable wrapper). The content column inside uses
+    // Shrink height so it naturally sizes to its children.
+
+    // Determine which background to use
+    #[cfg(feature = "visualizer")]
+    let bg_image_handle: Option<cosmic::Element<'_, NowPlayingMessage>> = if visualizer_active {
+        if let Some(viz_handle) = visualizer_frame {
+            Some(
+                cosmic::widget::image(viz_handle.clone())
+                    .content_fit(cosmic::iced::ContentFit::Cover)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(800.0))
                     .into(),
-                ),
-                ..Default::default()
-            }
-        }));
+            )
+        } else {
+            blurred_cover.map(|h| {
+                let el: cosmic::Element<'_, NowPlayingMessage> = widget::icon::icon(h.clone())
+                    .content_fit(cosmic::iced::ContentFit::Cover)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(800.0))
+                    .into();
+                el
+            })
+        }
+    } else {
+        blurred_cover.map(|h| {
+            let el: cosmic::Element<'_, NowPlayingMessage> = widget::icon::icon(h.clone())
+                .content_fit(cosmic::iced::ContentFit::Cover)
+                .width(Length::Fill)
+                .height(Length::Fixed(800.0))
+                .into();
+            el
+        })
+    };
 
-    styled_content.into()
+    #[cfg(not(feature = "visualizer"))]
+    let bg_image_handle: Option<cosmic::Element<'_, NowPlayingMessage>> = blurred_cover.map(|h| {
+        let el: cosmic::Element<'_, NowPlayingMessage> = widget::icon::icon(h.clone())
+            .content_fit(cosmic::iced::ContentFit::Cover)
+            .width(Length::Fill)
+            .height(Length::Fixed(800.0))
+            .into();
+        el
+    });
+
+    if let Some(bg_layer) = bg_image_handle {
+        // Dark overlay for text legibility
+        let overlay: cosmic::Element<'_, NowPlayingMessage> =
+            widget::container(widget::Space::new(0, 0))
+                .width(Length::Fill)
+                .height(Length::Fixed(800.0))
+                .class(cosmic::theme::Container::custom(|_theme| {
+                    cosmic::iced::widget::container::Style {
+                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+                        ..Default::default()
+                    }
+                }))
+                .into();
+
+        // Stack: bg (bottom) → overlay (middle) → content (top)
+        // First child (bg_layer) dictates the Stack's intrinsic size (800px tall).
+        let stack: cosmic::Element<'_, NowPlayingMessage> = Stack::new()
+            .push(bg_layer)
+            .push(overlay)
+            .push(content)
+            .width(Length::Fill)
+            .into();
+
+        stack
+    } else {
+        // No background image — use solid themed background
+        let styled_content = widget::container(content)
+            .width(Length::Fill)
+            .align_x(Horizontal::Center)
+            .class(cosmic::theme::Container::custom(|theme| {
+                let cosmic = theme.cosmic();
+                cosmic::iced::widget::container::Style {
+                    background: Some(
+                        Color::from_rgba(
+                            cosmic.background.base.red,
+                            cosmic.background.base.green,
+                            cosmic.background.base.blue,
+                            1.0,
+                        )
+                        .into(),
+                    ),
+                    ..Default::default()
+                }
+            }));
+
+        styled_content.into()
+    }
 }
