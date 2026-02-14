@@ -70,80 +70,59 @@ pub fn expanded_now_playing<'a>(
         .push(widget::Space::new(Length::Fill, Length::Shrink))
         .padding([8, 16]);
 
-    // --- Determine the "hero" widget: visualizer frame or cover art ---
-    #[cfg(feature = "visualizer")]
-    let show_viz_frame = visualizer_active && visualizer_frame.is_some();
-    #[cfg(not(feature = "visualizer"))]
-    let show_viz_frame = false;
-
-    let hero_widget: cosmic::Element<'_, NowPlayingMessage> = if show_viz_frame {
-        // Visualizer frame: use iced Image widget directly (not icon) for
-        // efficient raw RGBA display.  Fill the full available width and use
-        // a tall fixed height so the visualizer dominates the view.
-        #[cfg(feature = "visualizer")]
-        {
-            let viz_handle = visualizer_frame.unwrap();
-            cosmic::widget::image(viz_handle.clone())
+    // --- Cover art hero widget ---
+    // The visualizer, when active, is rendered as the Stack background layer
+    // only (not inline) so it doesn't push controls off-screen.
+    let cover_size = Length::Fixed(320.0);
+    let hero_widget: cosmic::Element<'_, NowPlayingMessage> = if let Some(handle) = cover_art {
+        widget::container(
+            widget::icon::icon(handle.clone())
                 .content_fit(cosmic::iced::ContentFit::Cover)
-                .width(Length::Fill)
-                .height(Length::Fixed(500.0))
-                .into()
-        }
-        #[cfg(not(feature = "visualizer"))]
-        unreachable!()
+                .width(cover_size)
+                .height(cover_size),
+        )
+        .class(cosmic::theme::Container::custom(|theme| {
+            let cosmic = theme.cosmic();
+            cosmic::iced::widget::container::Style {
+                border: cosmic::iced::Border {
+                    color: Color::TRANSPARENT,
+                    width: 0.0,
+                    radius: cosmic.radius_l().into(),
+                },
+                shadow: cosmic::iced::Shadow {
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                    offset: cosmic::iced::Vector::new(0.0, 4.0),
+                    blur_radius: 16.0,
+                },
+                ..Default::default()
+            }
+        }))
+        .width(cover_size)
+        .height(cover_size)
+        .into()
     } else {
-        // Normal cover art
-        let cover_size = Length::Fixed(320.0);
-        if let Some(handle) = cover_art {
-            widget::container(
-                widget::icon::icon(handle.clone())
-                    .content_fit(cosmic::iced::ContentFit::Cover)
-                    .width(cover_size)
-                    .height(cover_size),
-            )
+        let fallback_icon: cosmic::Element<'_, NowPlayingMessage> =
+            widget::icon::from_name("media-optical-cd-audio-symbolic")
+                .size(200)
+                .into();
+        widget::container(fallback_icon)
+            .width(cover_size)
+            .height(cover_size)
+            .align_x(Horizontal::Center)
+            .align_y(Vertical::Center)
             .class(cosmic::theme::Container::custom(|theme| {
                 let cosmic = theme.cosmic();
                 cosmic::iced::widget::container::Style {
+                    background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.2).into()),
                     border: cosmic::iced::Border {
                         color: Color::TRANSPARENT,
                         width: 0.0,
                         radius: cosmic.radius_l().into(),
                     },
-                    shadow: cosmic::iced::Shadow {
-                        color: Color::from_rgba(0.0, 0.0, 0.0, 0.3),
-                        offset: cosmic::iced::Vector::new(0.0, 4.0),
-                        blur_radius: 16.0,
-                    },
                     ..Default::default()
                 }
             }))
-            .width(cover_size)
-            .height(cover_size)
             .into()
-        } else {
-            let fallback_icon: cosmic::Element<'_, NowPlayingMessage> =
-                widget::icon::from_name("media-optical-cd-audio-symbolic")
-                    .size(200)
-                    .into();
-            widget::container(fallback_icon)
-                .width(cover_size)
-                .height(cover_size)
-                .align_x(Horizontal::Center)
-                .align_y(Vertical::Center)
-                .class(cosmic::theme::Container::custom(|theme| {
-                    let cosmic = theme.cosmic();
-                    cosmic::iced::widget::container::Style {
-                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.2).into()),
-                        border: cosmic::iced::Border {
-                            color: Color::TRANSPARENT,
-                            width: 0.0,
-                            radius: cosmic.radius_l().into(),
-                        },
-                        ..Default::default()
-                    }
-                }))
-                .into()
-        }
     };
 
     // --- Metadata section ---
@@ -294,15 +273,11 @@ pub fn expanded_now_playing<'a>(
     let bottom_controls = bottom_controls.spacing(12).align_y(Alignment::Center);
 
     // --- Main content column ---
-    // The hero_widget is either the visualizer frame or the cover art,
-    // decided above based on visualizer state.
-    let hero_spacing = if show_viz_frame { 8.0 } else { 24.0 };
-
     let content = widget::column()
         .push(top_bar)
-        .push(widget::Space::new(Length::Shrink, hero_spacing))
+        .push(widget::Space::new(Length::Shrink, 24.0))
         .push(hero_widget)
-        .push(widget::Space::new(Length::Shrink, hero_spacing))
+        .push(widget::Space::new(Length::Shrink, 24.0))
         .push(metadata)
         .push(widget::Space::new(Length::Shrink, 24))
         .push(seek_bar)
@@ -331,7 +306,12 @@ pub fn expanded_now_playing<'a>(
     // in COSMIC's scrollable wrapper). The content column inside uses
     // Shrink height so it naturally sizes to its children.
 
-    // Determine which background to use
+    // Determine which background to use and whether the visualizer is driving it.
+    #[cfg(feature = "visualizer")]
+    let viz_is_bg = visualizer_active && visualizer_frame.is_some();
+    #[cfg(not(feature = "visualizer"))]
+    let viz_is_bg = false;
+
     #[cfg(feature = "visualizer")]
     let bg_image_handle: Option<cosmic::Element<'_, NowPlayingMessage>> = if visualizer_active {
         if let Some(viz_handle) = visualizer_frame {
@@ -374,14 +354,17 @@ pub fn expanded_now_playing<'a>(
     });
 
     if let Some(bg_layer) = bg_image_handle {
-        // Dark overlay for text legibility
+        // Dark overlay for text legibility.
+        // When the visualizer is the background, use a lighter overlay so
+        // the animation is visible; for static blurred art use a heavier one.
+        let overlay_alpha = if viz_is_bg { 0.35 } else { 0.55 };
         let overlay: cosmic::Element<'_, NowPlayingMessage> =
             widget::container(widget::Space::new(0, 0))
                 .width(Length::Fill)
                 .height(Length::Fixed(800.0))
-                .class(cosmic::theme::Container::custom(|_theme| {
+                .class(cosmic::theme::Container::custom(move |_theme| {
                     cosmic::iced::widget::container::Style {
-                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, overlay_alpha).into()),
                         ..Default::default()
                     }
                 }))
