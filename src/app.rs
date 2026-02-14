@@ -18,7 +18,7 @@ use cosmic::{iced_futures, prelude::*};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
@@ -85,6 +85,33 @@ pub struct AppModel {
     subsonic_connection_status: Vec<Option<String>>,
     /// Shared references to Subsonic providers for scrobbling.
     subsonic_providers: Vec<Arc<SubsonicProvider>>,
+
+    // Expanded now-playing view
+    /// Raw cover art bytes keyed by album_key, for blur processing.
+    cover_art_bytes: HashMap<String, Vec<u8>>,
+    /// Cached blurred cover art for the current album.
+    blurred_cover: Option<widget::icon::Handle>,
+    /// Album key for the cached blurred cover.
+    blurred_cover_key: Option<String>,
+    /// 0.0 = fully collapsed (compact bar), 1.0 = fully expanded.
+    expand_progress: f32,
+    /// Animation target: 0.0 for collapsing, 1.0 for expanding. None when idle.
+    expand_target: Option<f32>,
+    /// Timestamp when the current animation started.
+    expand_anim_start: Option<std::time::Instant>,
+    /// Progress value when the current animation started (for reversals).
+    expand_anim_from: f32,
+
+    // ProjectM visualizer (behind feature flag)
+    #[cfg(feature = "visualizer")]
+    visualizer_active: bool,
+    #[cfg(feature = "visualizer")]
+    visualizer_frame: Option<widget::icon::Handle>,
+    #[cfg(feature = "visualizer")]
+    pcm_buffer: Option<Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>>,
+    /// Shared flag to signal preset change to the render thread.
+    #[cfg(feature = "visualizer")]
+    next_preset_signal: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// All application messages.
@@ -104,12 +131,16 @@ pub enum Message {
         artists: Vec<Artist>,
         cover_images: HashMap<String, widget::icon::Handle>,
         artist_avatars: HashMap<String, widget::icon::Handle>,
+        /// Raw cover art bytes for blur processing.
+        cover_art_bytes: HashMap<String, Vec<u8>>,
     },
     /// Incremental batch of albums from a remote provider (e.g. Subsonic).
     /// Each batch appends albums, derives tracks/artists, and updates the UI.
     LibraryBatch {
         albums: Vec<Album>,
         cover_images: HashMap<String, widget::icon::Handle>,
+        /// Raw cover art bytes for blur processing.
+        cover_art_bytes: HashMap<String, Vec<u8>>,
     },
     /// Signals that incremental loading is complete.
     LibraryLoadComplete,
@@ -198,6 +229,21 @@ pub enum Message {
     SubsonicRemoveServer(usize),
     SubsonicTestConnection(usize),
     SubsonicTestResult(usize, Result<(), String>),
+
+    // Expanded now-playing view
+    ExpandNowPlaying,
+    CollapseNowPlaying,
+    ExpandAnimTick,
+    /// Blurred cover art is ready (album_key, blurred handle).
+    BlurReady(String, widget::icon::Handle),
+
+    // Visualizer (behind feature flag)
+    #[cfg(feature = "visualizer")]
+    ToggleVisualizer,
+    #[cfg(feature = "visualizer")]
+    NextVisualizerPreset,
+    #[cfg(feature = "visualizer")]
+    VisualizerFrame(widget::icon::Handle),
 
     // Application lifecycle
     Quit,
@@ -344,12 +390,25 @@ impl cosmic::Application for AppModel {
             vec![None; subsonic_edit_states.len()];
 
         // Initialize player
-        let player = match Player::new(None) {
+        #[allow(unused_mut)]
+        let mut player = match Player::new(None) {
             Ok(p) => Some(p),
             Err(e) => {
                 tracing::error!("Failed to initialize audio player: {e}");
                 None
             }
+        };
+
+        // Create shared PCM buffer for visualizer audio tapping
+        #[cfg(feature = "visualizer")]
+        let pcm_buffer = {
+            let buf = Arc::new(Mutex::new(
+                crate::views::now_playing::visualizer::PcmBuffer::new(8192),
+            ));
+            if let Some(ref mut p) = player {
+                p.set_pcm_buffer(Arc::clone(&buf));
+            }
+            Some(buf)
         };
 
         let mut app = AppModel {
@@ -386,6 +445,21 @@ impl cosmic::Application for AppModel {
             subsonic_edit_states,
             subsonic_connection_status,
             subsonic_providers,
+            cover_art_bytes: HashMap::new(),
+            blurred_cover: None,
+            blurred_cover_key: None,
+            expand_progress: 0.0,
+            expand_target: None,
+            expand_anim_start: None,
+            expand_anim_from: 0.0,
+            #[cfg(feature = "visualizer")]
+            visualizer_active: false,
+            #[cfg(feature = "visualizer")]
+            visualizer_frame: None,
+            #[cfg(feature = "visualizer")]
+            pcm_buffer,
+            #[cfg(feature = "visualizer")]
+            next_preset_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         app.rebuild_provider_list();
@@ -635,18 +709,8 @@ impl cosmic::Application for AppModel {
             self.cover_images.get(&key)
         });
 
-        let bar = now_playing::playback_bar(
-            self.current_track.as_ref(),
-            state,
-            self.playback_position,
-            duration,
-            volume,
-            self.config.shuffle,
-            self.config.repeat_mode,
-            current_cover,
-            self.seeking_preview,
-        )
-        .map(|msg| match msg {
+        // Helper closure to map NowPlayingMessage to Message
+        let map_now_playing_msg = |msg| match msg {
             now_playing::NowPlayingMessage::TogglePlayback => Message::TogglePlayback,
             now_playing::NowPlayingMessage::Next => Message::NextTrack,
             now_playing::NowPlayingMessage::Previous => Message::PreviousTrack,
@@ -656,29 +720,125 @@ impl cosmic::Application for AppModel {
             now_playing::NowPlayingMessage::ToggleShuffle => Message::ToggleShuffle,
             now_playing::NowPlayingMessage::CycleRepeat => Message::CycleRepeat,
             now_playing::NowPlayingMessage::ShowLyrics => Message::ShowLyrics,
-        });
+            now_playing::NowPlayingMessage::ExpandToggle => Message::ExpandNowPlaying,
+            now_playing::NowPlayingMessage::Collapse => Message::CollapseNowPlaying,
+            #[cfg(feature = "visualizer")]
+            now_playing::NowPlayingMessage::ToggleVisualizer => Message::ToggleVisualizer,
+            #[cfg(feature = "visualizer")]
+            now_playing::NowPlayingMessage::NextPreset => Message::NextVisualizerPreset,
+        };
+
+        let bar = now_playing::compact_bar::playback_bar(
+            self.current_track.as_ref(),
+            state,
+            self.playback_position,
+            duration,
+            volume,
+            self.config.shuffle,
+            self.config.repeat_mode,
+            current_cover,
+            self.seeking_preview,
+            self.blurred_cover.as_ref(),
+        )
+        .map(map_now_playing_msg);
 
         // Main layout: content + optional scanning indicator + bottom playback bar
-        let mut layout = widget::column().push(
-            widget::container(content)
-                .width(Length::Fill)
-                .height(Length::Fill),
-        );
+        // When expand_progress > 0, show expanded view instead of normal content
+        let layout: Element<'_, Self::Message> = if self.expand_progress > 0.0 {
+            // Expanded state: show expanded now-playing view
+            let expanded = now_playing::expanded_view::expanded_now_playing(
+                self.current_track.as_ref(),
+                state,
+                self.playback_position,
+                duration,
+                volume,
+                self.config.shuffle,
+                self.config.repeat_mode,
+                current_cover,
+                self.blurred_cover.as_ref(),
+                self.seeking_preview,
+                self.expand_progress,
+                #[cfg(feature = "visualizer")]
+                self.visualizer_active,
+                #[cfg(feature = "visualizer")]
+                self.visualizer_frame.as_ref(),
+            )
+            .map(map_now_playing_msg);
 
-        if self.library_scanning {
-            layout = layout.push(
-                widget::container(
-                    widget::row()
-                        .push(widget::text::caption(fl!("scanning-library")))
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                )
-                .padding(4)
-                .width(Length::Fill),
+            // During animation, interpolate heights:
+            // - Content area shrinks from Fill to 0
+            // - Expanded view grows from bar height to Fill
+            if self.expand_progress >= 1.0 {
+                // Fully expanded: only show expanded view
+                widget::container(expanded)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+            } else {
+                // Animating: show both with interpolated heights
+                // Content gets FillPortion based on (1 - progress)
+                // Expanded gets FillPortion based on progress
+                let content_portion = ((1.0 - self.expand_progress) * 100.0) as u16;
+                let expanded_portion = (self.expand_progress * 100.0) as u16;
+
+                let mut layout_col = widget::column();
+
+                if content_portion > 0 {
+                    layout_col = layout_col.push(
+                        widget::container(content)
+                            .width(Length::Fill)
+                            .height(Length::FillPortion(content_portion.max(1))),
+                    );
+                }
+
+                if self.library_scanning && content_portion > 0 {
+                    layout_col = layout_col.push(
+                        widget::container(
+                            widget::row()
+                                .push(widget::text::caption(fl!("scanning-library")))
+                                .spacing(8)
+                                .align_y(Alignment::Center),
+                        )
+                        .padding(4)
+                        .width(Length::Fill),
+                    );
+                }
+
+                if expanded_portion > 0 {
+                    layout_col = layout_col.push(
+                        widget::container(expanded)
+                            .width(Length::Fill)
+                            .height(Length::FillPortion(expanded_portion.max(1))),
+                    );
+                }
+
+                layout_col.into()
+            }
+        } else {
+            // Collapsed state: normal layout
+            let mut layout_col = widget::column().push(
+                widget::container(content)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
             );
-        }
 
-        layout = layout.push(bar);
+            if self.library_scanning {
+                layout_col = layout_col.push(
+                    widget::container(
+                        widget::row()
+                            .push(widget::text::caption(fl!("scanning-library")))
+                            .spacing(8)
+                            .align_y(Alignment::Center),
+                    )
+                    .padding(4)
+                    .width(Length::Fill),
+                );
+            }
+
+            layout_col = layout_col.push(bar);
+
+            layout_col.into()
+        };
 
         widget::container(layout)
             .width(Length::Fill)
@@ -830,6 +990,99 @@ impl cosmic::Application for AppModel {
             subs.push(Subscription::run_with_id(("mpd-idle", idx), stream));
         }
 
+        // Expand/collapse animation tick (~60fps, only during transitions)
+        if self.expand_target.is_some() {
+            subs.push(
+                cosmic::iced::time::every(Duration::from_millis(16))
+                    .map(|_| Message::ExpandAnimTick),
+            );
+        }
+
+        // Visualizer render subscription (~30fps, only when active and expanded)
+        #[cfg(feature = "visualizer")]
+        if self.visualizer_active
+            && self.expand_progress > 0.0
+            && let Some(ref pcm_buf) = self.pcm_buffer
+        {
+            let pcm = Arc::clone(pcm_buf);
+            let preset_signal = Arc::clone(&self.next_preset_signal);
+            subs.push(Subscription::run_with_id(
+                "projectm-render",
+                iced_futures::stream::channel(2, move |mut emitter| async move {
+                    // Create the renderer on this dedicated thread
+                    let preset_dir =
+                        dirs::data_dir().map(|d| d.join("projectm").join("presets"));
+                    let renderer =
+                        match crate::views::now_playing::visualizer::ProjectMRenderer::new(
+                            preset_dir,
+                        ) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                tracing::error!("Failed to create projectM renderer: {e}");
+                                return;
+                            }
+                        };
+
+                    let mut interval =
+                        tokio::time::interval(Duration::from_millis(33)); // ~30fps
+                    loop {
+                        interval.tick().await;
+
+                        // Check if a preset change was requested
+                        if preset_signal.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                            tokio::task::block_in_place(|| renderer.next_preset());
+                        }
+
+                        // Read PCM from shared buffer
+                        let pcm_data = pcm
+                            .lock()
+                            .ok()
+                            .map(|buf| buf.read_recent(2048))
+                            .unwrap_or_default();
+
+                        // Render a frame (blocking, ~3-5ms)
+                        let rgba = tokio::task::block_in_place(|| {
+                            renderer.render_frame(&pcm_data)
+                        });
+
+                        // Convert to PNG and send as icon handle
+                        if let Some(png_bytes) =
+                            crate::views::now_playing::visualizer::rgba_to_png(
+                                &rgba, 800, 600,
+                            )
+                        {
+                            let handle = widget::icon::from_raster_bytes(png_bytes);
+                            _ = emitter
+                                .send(Message::VisualizerFrame(handle))
+                                .await;
+                        }
+                    }
+                }),
+            ));
+        }
+
+        // Escape key to collapse expanded view
+        if self.expand_progress > 0.0 || self.expand_target.is_some() {
+            subs.push(cosmic::iced::event::listen_with(
+                |event, _status, _id| {
+                    if let cosmic::iced::Event::Keyboard(
+                        cosmic::iced::keyboard::Event::KeyPressed {
+                            key:
+                                cosmic::iced::keyboard::Key::Named(
+                                    cosmic::iced::keyboard::key::Named::Escape,
+                                ),
+                            ..
+                        },
+                    ) = event
+                    {
+                        Some(Message::CollapseNowPlaying)
+                    } else {
+                        None
+                    }
+                },
+            ));
+        }
+
         Subscription::batch(subs)
     }
 
@@ -898,6 +1151,7 @@ impl cosmic::Application for AppModel {
                 artists,
                 cover_images,
                 artist_avatars,
+                cover_art_bytes,
             } => {
                 self.library_scanning = false;
                 self.all_tracks = tracks;
@@ -905,11 +1159,13 @@ impl cosmic::Application for AppModel {
                 self.all_artists = artists;
                 self.cover_images = cover_images;
                 self.artist_avatars = artist_avatars;
+                self.cover_art_bytes = cover_art_bytes;
             }
 
             Message::LibraryBatch {
                 albums,
                 cover_images,
+                cover_art_bytes,
             } => {
                 // Append new albums and extract tracks
                 for album in &albums {
@@ -920,6 +1176,8 @@ impl cosmic::Application for AppModel {
                 }
                 // Merge cover images
                 self.cover_images.extend(cover_images);
+                // Merge cover art bytes for blur
+                self.cover_art_bytes.extend(cover_art_bytes);
 
                 // Incrementally merge only the new batch into artists
                 self.merge_artists_from_batch(&albums);
@@ -974,7 +1232,9 @@ impl cosmic::Application for AppModel {
                             self.current_track = Some(track.clone());
                             self.playback_position = Duration::ZERO;
                             self.lyrics_text = None;
-                            return self.dispatch_mpd_after_play();
+                            let mpd_task = self.dispatch_mpd_after_play();
+                            let blur_task = self.maybe_update_blurred_cover();
+                            return Task::batch([mpd_task, blur_task]);
                         }
                         Err(e) => tracing::error!("Next track failed: {e}"),
                         _ => {}
@@ -989,7 +1249,9 @@ impl cosmic::Application for AppModel {
                             self.current_track = Some(track.clone());
                             self.playback_position = Duration::ZERO;
                             self.lyrics_text = None;
-                            return self.dispatch_mpd_after_play();
+                            let mpd_task = self.dispatch_mpd_after_play();
+                            let blur_task = self.maybe_update_blurred_cover();
+                            return Task::batch([mpd_task, blur_task]);
                         }
                         Err(e) => tracing::error!("Previous track failed: {e}"),
                         _ => {}
@@ -1520,6 +1782,71 @@ impl cosmic::Application for AppModel {
                 }
             }
 
+            Message::ExpandNowPlaying => {
+                self.expand_target = Some(1.0);
+                self.expand_anim_start = Some(std::time::Instant::now());
+                self.expand_anim_from = self.expand_progress;
+            }
+
+            Message::CollapseNowPlaying => {
+                self.expand_target = Some(0.0);
+                self.expand_anim_start = Some(std::time::Instant::now());
+                self.expand_anim_from = self.expand_progress;
+            }
+
+            Message::ExpandAnimTick => {
+                use crate::views::now_playing::animation;
+
+                if let (Some(target), Some(start)) =
+                    (self.expand_target, self.expand_anim_start)
+                {
+                    let elapsed = start.elapsed().as_secs_f32() * 1000.0;
+                    let t = (elapsed / animation::ANIMATION_DURATION_MS).min(1.0);
+
+                    // Apply easing based on direction
+                    let eased = if target > self.expand_anim_from {
+                        animation::ease_out(t)
+                    } else {
+                        animation::ease_in(t)
+                    };
+
+                    self.expand_progress =
+                        animation::lerp(self.expand_anim_from, target, eased);
+
+                    // Check if animation is complete
+                    if t >= 1.0 {
+                        self.expand_progress = target;
+                        self.expand_target = None;
+                        self.expand_anim_start = None;
+                    }
+                }
+            }
+
+            Message::BlurReady(key, handle) => {
+                self.blurred_cover = Some(handle);
+                self.blurred_cover_key = Some(key);
+            }
+
+            // -- Visualizer messages (cfg-gated) --
+            #[cfg(feature = "visualizer")]
+            Message::ToggleVisualizer => {
+                self.visualizer_active = !self.visualizer_active;
+                if !self.visualizer_active {
+                    self.visualizer_frame = None;
+                }
+            }
+
+            #[cfg(feature = "visualizer")]
+            Message::NextVisualizerPreset => {
+                self.next_preset_signal
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+
+            #[cfg(feature = "visualizer")]
+            Message::VisualizerFrame(handle) => {
+                self.visualizer_frame = Some(handle);
+            }
+
             Message::Quit => {
                 return cosmic::iced::exit();
             }
@@ -1533,6 +1860,14 @@ impl cosmic::Application for AppModel {
         // Reset sub-view selections when switching pages
         self.selected_album = None;
         self.selected_artist = None;
+
+        // Collapse expanded now-playing view when navigating
+        if self.expand_progress > 0.0 || self.expand_target.is_some() {
+            self.expand_target = Some(0.0);
+            self.expand_anim_start = Some(std::time::Instant::now());
+            self.expand_anim_from = self.expand_progress;
+        }
+
         self.update_title()
     }
 }
@@ -1676,14 +2011,16 @@ impl AppModel {
 
             // Extract cover art
             let mut cover_images = HashMap::new();
+            let mut cover_art_bytes = HashMap::new();
             for album in &albums {
                 let key = crate::library::CoverArt::album_key(&album.artist, &album.name);
                 if let Some(first_track) = album.tracks.first()
                     && let Some(bytes) =
                         crate::library::CoverArt::get_cover_art(&first_track.path)
                 {
-                    let handle = widget::icon::from_raster_bytes(bytes);
-                    cover_images.insert(key, handle);
+                    let handle = widget::icon::from_raster_bytes(bytes.clone());
+                    cover_images.insert(key.clone(), handle);
+                    cover_art_bytes.insert(key, bytes);
                 }
             }
 
@@ -1700,6 +2037,7 @@ impl AppModel {
                 artists,
                 cover_images,
                 artist_avatars,
+                cover_art_bytes,
             })
         })
     }
@@ -1760,6 +2098,7 @@ impl AppModel {
 
                         // Fetch cover art for this batch.
                         let mut cover_images = HashMap::new();
+                        let mut cover_art_bytes = HashMap::new();
                         let prov = Arc::clone(&provider);
                         for album in &albums {
                             let key = crate::library::CoverArt::album_key(
@@ -1774,8 +2113,9 @@ impl AppModel {
                             .await
                             .unwrap_or(Ok(None))
                             {
-                                let handle = widget::icon::from_raster_bytes(bytes);
-                                cover_images.insert(key, handle);
+                                let handle = widget::icon::from_raster_bytes(bytes.clone());
+                                cover_images.insert(key.clone(), handle);
+                                cover_art_bytes.insert(key, bytes);
                             }
                         }
 
@@ -1783,6 +2123,7 @@ impl AppModel {
                             .send(cosmic::Action::App(Message::LibraryBatch {
                                 albums,
                                 cover_images,
+                                cover_art_bytes,
                             }))
                             .await;
                     }
@@ -1819,6 +2160,7 @@ impl AppModel {
 
                         // Fetch cover art for this batch.
                         let mut cover_images = HashMap::new();
+                        let mut cover_art_bytes = HashMap::new();
                         let prov = Arc::clone(&provider);
                         for album in &albums {
                             let key = crate::library::CoverArt::album_key(
@@ -1833,8 +2175,9 @@ impl AppModel {
                             .await
                             .unwrap_or(Ok(None))
                             {
-                                let handle = widget::icon::from_raster_bytes(bytes);
-                                cover_images.insert(key, handle);
+                                let handle = widget::icon::from_raster_bytes(bytes.clone());
+                                cover_images.insert(key.clone(), handle);
+                                cover_art_bytes.insert(key, bytes);
                             }
                         }
 
@@ -1846,6 +2189,7 @@ impl AppModel {
                             .send(cosmic::Action::App(Message::LibraryBatch {
                                 albums,
                                 cover_images,
+                                cover_art_bytes,
                             }))
                             .await;
 
@@ -1994,7 +2338,15 @@ impl AppModel {
     fn recreate_player(&mut self) {
         let mpd_backend = self.make_mpd_backend();
         match Player::new(mpd_backend) {
-            Ok(p) => self.player = Some(p),
+            #[allow(unused_mut)]
+            Ok(mut p) => {
+                // Re-wire PCM buffer for visualizer
+                #[cfg(feature = "visualizer")]
+                if let Some(ref buf) = self.pcm_buffer {
+                    p.set_pcm_buffer(Arc::clone(buf));
+                }
+                self.player = Some(p);
+            }
             Err(e) => {
                 tracing::error!("Failed to recreate player: {e}");
                 self.player = None;
@@ -2095,7 +2447,9 @@ impl AppModel {
                 self.lyrics_text = None;
                 self.scrobble_now_playing_sent = false;
                 self.scrobble_sent = false;
-                return self.dispatch_mpd_after_play();
+                let mpd_task = self.dispatch_mpd_after_play();
+                let blur_task = self.maybe_update_blurred_cover();
+                return Task::batch([mpd_task, blur_task]);
             }
         }
         Task::none()
@@ -2110,6 +2464,60 @@ impl AppModel {
                 self.all_tracks.sort_by(|a, b| a.duration.cmp(&b.duration))
             }
         }
+    }
+
+    /// Trigger blur computation for the current track if the album changed.
+    ///
+    /// Checks if the current track's album key differs from the cached blurred
+    /// cover key. If so, looks up the raw bytes and spawns a background task
+    /// to compute the blur. Returns a Task that sends `Message::BlurReady`.
+    fn maybe_update_blurred_cover(&mut self) -> Task<cosmic::Action<Message>> {
+        let track = match self.current_track.as_ref() {
+            Some(t) => t,
+            None => {
+                // No track, clear blurred cover
+                self.blurred_cover = None;
+                self.blurred_cover_key = None;
+                return Task::none();
+            }
+        };
+
+        let key = crate::library::CoverArt::album_key(&track.artist, &track.album);
+
+        // Skip if already computed for this album
+        if self.blurred_cover_key.as_ref() == Some(&key) {
+            return Task::none();
+        }
+
+        // Look up raw bytes
+        let bytes = match self.cover_art_bytes.get(&key) {
+            Some(b) => b.clone(),
+            None => {
+                // No cover art bytes available, clear blurred cover
+                self.blurred_cover = None;
+                self.blurred_cover_key = None;
+                return Task::none();
+            }
+        };
+
+        let key_clone = key.clone();
+        cosmic::task::future(async move {
+            // Compute blur in blocking task to avoid blocking async runtime
+            let blurred = tokio::task::spawn_blocking(move || {
+                crate::views::now_playing::blur::compute_blurred_cover(&bytes)
+            })
+            .await
+            .ok()
+            .flatten();
+
+            if let Some(blurred_bytes) = blurred {
+                let handle = widget::icon::from_raster_bytes(blurred_bytes);
+                cosmic::Action::App(Message::BlurReady(key_clone, handle))
+            } else {
+                // Blur computation failed, send a no-op
+                cosmic::Action::None
+            }
+        })
     }
 }
 

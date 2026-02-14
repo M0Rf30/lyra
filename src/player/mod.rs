@@ -85,6 +85,15 @@ impl Player {
         })
     }
 
+    /// Set the shared PCM buffer on the local backend for visualizer audio tapping.
+    #[cfg(feature = "visualizer")]
+    pub fn set_pcm_buffer(
+        &mut self,
+        buffer: std::sync::Arc<std::sync::Mutex<crate::views::now_playing::visualizer::PcmBuffer>>,
+    ) {
+        self.local_backend.set_pcm_buffer(buffer);
+    }
+
     /// Get a reference to the currently active backend.
     fn active(&self) -> &dyn PlaybackBackend {
         match self.active_backend {

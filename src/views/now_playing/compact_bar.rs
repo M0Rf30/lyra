@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0
 
-//! Playback controls: a persistent bottom bar (Brigadeiro / Lollypop style).
+//! The compact bottom playback bar.
 //!
-//! The bottom bar contains: cover art, track info, transport controls, seek bar,
-//! volume slider, and utility buttons. The CSD header is kept clean for navigation.
+//! This matches the original playback bar appearance. Clicking the bar
+//! background expands into the full now-playing view.
 
+use super::{format_time, NowPlayingMessage};
 use crate::config::RepeatMode;
 use crate::library::Track;
 use crate::player::PlaybackState;
@@ -14,23 +15,7 @@ use cosmic::prelude::*;
 use cosmic::widget;
 use std::time::Duration;
 
-/// Messages from the now-playing controls.
-#[derive(Debug, Clone)]
-pub enum NowPlayingMessage {
-    TogglePlayback,
-    Next,
-    Previous,
-    /// Continuous update during slider drag (visual feedback only).
-    SeekPreview(f32),
-    /// Emitted on mouse release — performs the actual backend seek.
-    SeekCommit,
-    SetVolume(f32),
-    ToggleShuffle,
-    CycleRepeat,
-    ShowLyrics,
-}
-
-/// Render the bottom playback bar.
+/// Render the compact bottom playback bar.
 ///
 /// Layout (left to right):
 /// ```text
@@ -46,8 +31,8 @@ pub fn playback_bar<'a>(
     shuffle: bool,
     repeat_mode: RepeatMode,
     cover_art: Option<&'a widget::icon::Handle>,
-    // When `Some`, the user is dragging the seek slider — fraction 0.0–1.0.
     seeking_preview: Option<f32>,
+    _blurred_cover: Option<&'a widget::icon::Handle>,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     // While dragging, show the preview position; otherwise the backend position.
     let (progress, display_position) = if let Some(frac) = seeking_preview {
@@ -175,23 +160,21 @@ pub fn playback_bar<'a>(
         .align_x(Alignment::Center)
         .width(Length::Fill);
 
-    widget::container(
-        widget::row()
-            .push(track_info)
-            .push(center_section)
-            .push(right_section)
-            .spacing(16)
-            .align_y(Alignment::Center)
-            .padding(8),
-    )
-    .width(Length::Fill)
-    .class(cosmic::theme::Container::Card)
-    .into()
-}
+    let controls_row = widget::row()
+        .push(track_info)
+        .push(center_section)
+        .push(right_section)
+        .spacing(16)
+        .align_y(Alignment::Center)
+        .padding(8);
 
-fn format_time(d: Duration) -> String {
-    let total = d.as_secs();
-    let min = total / 60;
-    let sec = total % 60;
-    format!("{min}:{sec:02}")
+    // Standard Card container — identical to the original bar.
+    // Wrapped in mouse_area so clicking the background opens the expanded view.
+    let bar = widget::container(controls_row)
+        .width(Length::Fill)
+        .class(cosmic::theme::Container::Card);
+
+    widget::mouse_area(bar)
+        .on_press(NowPlayingMessage::ExpandToggle)
+        .into()
 }

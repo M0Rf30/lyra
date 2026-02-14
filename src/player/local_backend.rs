@@ -34,6 +34,9 @@ pub struct LocalBackend {
     loading: Arc<AtomicBool>,
     /// Shared blocking HTTP client for HTTP stream playback.
     http_client: reqwest::blocking::Client,
+    /// Shared PCM buffer for the visualizer (copies audio samples for projectM).
+    #[cfg(feature = "visualizer")]
+    pcm_buffer: Option<Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>>,
 }
 
 impl LocalBackend {
@@ -55,6 +58,8 @@ impl LocalBackend {
             play_started_at: Arc::new(Mutex::new(None)),
             loading: Arc::new(AtomicBool::new(false)),
             http_client: reqwest::blocking::Client::new(),
+            #[cfg(feature = "visualizer")]
+            pcm_buffer: None,
         })
     }
 
@@ -154,6 +159,15 @@ impl LocalBackend {
         Ok(())
     }
 
+    /// Set the shared PCM buffer for the visualizer.
+    #[cfg(feature = "visualizer")]
+    pub fn set_pcm_buffer(
+        &mut self,
+        buffer: Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>,
+    ) {
+        self.pcm_buffer = Some(buffer);
+    }
+
     /// Common playback start: stop current sink, create new one, append source.
     fn start_source<S>(&mut self, source: S) -> Result<(), PlayerError>
     where
@@ -167,7 +181,22 @@ impl LocalBackend {
 
         let new_sink = Sink::connect_new(self.stream.mixer());
         new_sink.set_volume(self.volume);
-        new_sink.append(source);
+
+        // When the visualizer feature is enabled and a PCM buffer is set,
+        // wrap the source in TappedSource to feed audio data to projectM.
+        #[cfg(feature = "visualizer")]
+        {
+            if let Some(ref pcm_buf) = self.pcm_buffer {
+                let tapped = TappedSource::new(source, Arc::clone(pcm_buf));
+                new_sink.append(tapped);
+            } else {
+                new_sink.append(source);
+            }
+        }
+        #[cfg(not(feature = "visualizer"))]
+        {
+            new_sink.append(source);
+        }
 
         self.sink = Arc::new(Mutex::new(new_sink));
         self.state = PlaybackState::Playing;
@@ -294,5 +323,69 @@ impl PlaybackBackend for LocalBackend {
         }
         let sink = self.lock_sink()?;
         Ok(sink.empty())
+    }
+}
+
+// --- TappedSource adapter for visualizer PCM feed ---
+
+/// A `Source` wrapper that copies each sample to a shared PCM buffer
+/// before yielding it. Used by the ProjectM visualizer to read audio data.
+#[cfg(feature = "visualizer")]
+pub struct TappedSource<S> {
+    inner: S,
+    pcm_buffer: Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>,
+}
+
+#[cfg(feature = "visualizer")]
+impl<S> TappedSource<S> {
+    /// Wrap a source, copying samples to the shared PCM buffer.
+    pub fn new(
+        inner: S,
+        pcm_buffer: Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>,
+    ) -> Self {
+        Self { inner, pcm_buffer }
+    }
+}
+
+#[cfg(feature = "visualizer")]
+impl<S> Iterator for TappedSource<S>
+where
+    S: Source<Item = f32>,
+{
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        let sample = self.inner.next()?;
+        // Copy to shared buffer (best-effort, don't block audio on lock contention)
+        if let Ok(mut buf) = self.pcm_buffer.try_lock() {
+            buf.write(&[sample]);
+        }
+        Some(sample)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+#[cfg(feature = "visualizer")]
+impl<S> Source for TappedSource<S>
+where
+    S: Source<Item = f32>,
+{
+    fn current_span_len(&self) -> Option<usize> {
+        self.inner.current_span_len()
+    }
+
+    fn channels(&self) -> u16 {
+        self.inner.channels()
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
     }
 }
