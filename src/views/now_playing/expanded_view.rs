@@ -39,7 +39,7 @@ pub fn expanded_now_playing<'a>(
     seeking_preview: Option<f32>,
     expand_progress: f32,
     #[cfg(feature = "visualizer")] visualizer_active: bool,
-    #[cfg(feature = "visualizer")] visualizer_frame: Option<&'a widget::icon::Handle>,
+    #[cfg(feature = "visualizer")] _visualizer_frame: Option<&'a widget::icon::Handle>,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     // While dragging, show the preview position; otherwise the backend position.
     let (progress, display_position) = if let Some(frac) = seeking_preview {
@@ -268,9 +268,11 @@ pub fn expanded_now_playing<'a>(
     let bottom_controls = bottom_controls.spacing(12).align_y(Alignment::Center);
 
     // --- Main content column ---
+    // Use Shrink height — the COSMIC framework wraps view() output in a
+    // scrollable, which panics if content uses Length::Fill on the scroll axis.
     let content = widget::column()
         .push(top_bar)
-        .push(widget::Space::new(Length::Shrink, Length::FillPortion(1)))
+        .push(widget::Space::new(Length::Shrink, 24))
         .push(cover_art_widget)
         .push(widget::Space::new(Length::Shrink, 24))
         .push(metadata)
@@ -280,71 +282,35 @@ pub fn expanded_now_playing<'a>(
         .push(transport)
         .push(widget::Space::new(Length::Shrink, 16))
         .push(bottom_controls)
-        .push(widget::Space::new(Length::Shrink, Length::FillPortion(1)))
+        .push(widget::Space::new(Length::Shrink, 24))
         .align_x(Alignment::Center)
+        .width(Length::Fill);
+
+    // Wrap content in a container with dark background styling.
+    // Avoid Length::Fill on the vertical axis — COSMIC wraps view() in a
+    // scrollable which panics on Fill height content.
+    let _ = content_opacity;
+    let _ = blurred_cover;
+
+    let styled_content = widget::container(content)
         .width(Length::Fill)
-        .height(Length::Fill);
-
-    // Build the view with blurred background
-    use cosmic::iced::widget::Stack;
-
-    // Determine which background to use:
-    // 1. Visualizer frame (when active), 2. Blurred cover, 3. Solid dark fallback
-    #[cfg(feature = "visualizer")]
-    let bg_handle: Option<&widget::icon::Handle> = if visualizer_active {
-        visualizer_frame.or(blurred_cover)
-    } else {
-        blurred_cover
-    };
-    #[cfg(not(feature = "visualizer"))]
-    let bg_handle: Option<&widget::icon::Handle> = blurred_cover;
-
-    let background: cosmic::Element<'_, NowPlayingMessage> = if let Some(handle) = bg_handle {
-        widget::container(
-            widget::icon::icon(handle.clone())
-                .content_fit(cosmic::iced::ContentFit::Cover)
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    } else {
-        // Solid dark background fallback
-        widget::container(widget::Space::new(Length::Fill, Length::Fill))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .class(cosmic::theme::Container::custom(|theme| {
-                let cosmic = theme.cosmic();
-                cosmic::iced::widget::container::Style {
-                    background: Some(Color::from(cosmic.background.base).into()),
-                    ..Default::default()
-                }
-            }))
-            .into()
-    };
-
-    let dark_overlay = widget::container(widget::Space::new(Length::Fill, Length::Fill))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .class(cosmic::theme::Container::custom(|_theme| {
+        .align_x(Horizontal::Center)
+        .class(cosmic::theme::Container::custom(move |theme| {
+            let cosmic = theme.cosmic();
+            // Use the background image tint or solid dark fallback
             cosmic::iced::widget::container::Style {
-                background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.7).into()),
+                background: Some(
+                    Color::from_rgba(
+                        cosmic.background.base.red,
+                        cosmic.background.base.green,
+                        cosmic.background.base.blue,
+                        1.0,
+                    )
+                    .into(),
+                ),
                 ..Default::default()
             }
         }));
 
-    // Apply opacity based on expand progress (fade-in effect)
-    // Note: iced doesn't have direct opacity control on containers,
-    // so we achieve this through the dark overlay alpha channel.
-    // The content itself animates via height interpolation in app.rs.
-    let _ = content_opacity; // Used for potential future opacity animation
-
-    Stack::new()
-        .push(background)
-        .push(dark_overlay)
-        .push(content)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    styled_content.into()
 }

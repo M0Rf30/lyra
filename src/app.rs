@@ -743,9 +743,9 @@ impl cosmic::Application for AppModel {
         .map(map_now_playing_msg);
 
         // Main layout: content + optional scanning indicator + bottom playback bar
-        // When expand_progress > 0, show expanded view instead of normal content
+        // When expand_progress > 0, show expanded now-playing view replacing normal content
         let layout: Element<'_, Self::Message> = if self.expand_progress > 0.0 {
-            // Expanded state: show expanded now-playing view
+            // Expanded/animating: show expanded now-playing view
             let expanded = now_playing::expanded_view::expanded_now_playing(
                 self.current_track.as_ref(),
                 state,
@@ -765,55 +765,9 @@ impl cosmic::Application for AppModel {
             )
             .map(map_now_playing_msg);
 
-            // During animation, interpolate heights:
-            // - Content area shrinks from Fill to 0
-            // - Expanded view grows from bar height to Fill
-            if self.expand_progress >= 1.0 {
-                // Fully expanded: only show expanded view
-                widget::container(expanded)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into()
-            } else {
-                // Animating: show both with interpolated heights
-                // Content gets FillPortion based on (1 - progress)
-                // Expanded gets FillPortion based on progress
-                let content_portion = ((1.0 - self.expand_progress) * 100.0) as u16;
-                let expanded_portion = (self.expand_progress * 100.0) as u16;
-
-                let mut layout_col = widget::column();
-
-                if content_portion > 0 {
-                    layout_col = layout_col.push(
-                        widget::container(content)
-                            .width(Length::Fill)
-                            .height(Length::FillPortion(content_portion.max(1))),
-                    );
-                }
-
-                if self.library_scanning && content_portion > 0 {
-                    layout_col = layout_col.push(
-                        widget::container(
-                            widget::row()
-                                .push(widget::text::caption(fl!("scanning-library")))
-                                .spacing(8)
-                                .align_y(Alignment::Center),
-                        )
-                        .padding(4)
-                        .width(Length::Fill),
-                    );
-                }
-
-                if expanded_portion > 0 {
-                    layout_col = layout_col.push(
-                        widget::container(expanded)
-                            .width(Length::Fill)
-                            .height(Length::FillPortion(expanded_portion.max(1))),
-                    );
-                }
-
-                layout_col.into()
-            }
+            widget::container(expanded)
+                .width(Length::Fill)
+                .into()
         } else {
             // Collapsed state: normal layout
             let mut layout_col = widget::column().push(

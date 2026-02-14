@@ -159,9 +159,12 @@ impl ProjectMRenderer {
     /// Feed PCM audio data to projectM, render a frame into the FBO,
     /// and read pixels back.
     pub fn render_frame(&self, pcm: &[f32]) -> Vec<u8> {
-        // Feed audio samples if available
+        // Feed audio samples if available, clamped to projectM's max buffer size
         if !pcm.is_empty() {
-            self.projectm.pcm_add_float(pcm, projectm::core::STEREO);
+            let max = ProjectM::pcm_get_max_samples() as usize;
+            let clamped = if pcm.len() > max { &pcm[..max] } else { pcm };
+            self.projectm
+                .pcm_add_float(clamped, projectm::core::STEREO);
         }
 
         // Render the visualization
