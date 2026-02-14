@@ -107,6 +107,10 @@ pub struct AppModel {
     visualizer_active: bool,
     #[cfg(feature = "visualizer")]
     visualizer_frame: Option<cosmic::iced::widget::image::Handle>,
+    /// Previous visualizer frame — kept alive so iced's raster cache retains
+    /// the old texture until the new one is uploaded, preventing white flashes.
+    #[cfg(feature = "visualizer")]
+    visualizer_frame_prev: Option<cosmic::iced::widget::image::Handle>,
     #[cfg(feature = "visualizer")]
     pcm_buffer: Option<Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>>,
     /// Shared flag to signal preset change to the render thread.
@@ -457,6 +461,8 @@ impl cosmic::Application for AppModel {
             #[cfg(feature = "visualizer")]
             visualizer_frame: None,
             #[cfg(feature = "visualizer")]
+            visualizer_frame_prev: None,
+            #[cfg(feature = "visualizer")]
             pcm_buffer,
             #[cfg(feature = "visualizer")]
             next_preset_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -769,6 +775,8 @@ impl cosmic::Application for AppModel {
                 self.visualizer_active,
                 #[cfg(feature = "visualizer")]
                 self.visualizer_frame.as_ref(),
+                #[cfg(feature = "visualizer")]
+                self.visualizer_frame_prev.as_ref(),
             )
             .map(map_now_playing_msg);
 
@@ -973,7 +981,7 @@ impl cosmic::Application for AppModel {
                     // Create the renderer on this dedicated thread
                     let preset_dir =
                         dirs::data_dir().map(|d| d.join("projectm").join("presets"));
-                    let renderer =
+                    let mut renderer =
                         match crate::views::now_playing::visualizer::ProjectMRenderer::new(
                             preset_dir,
                         ) {
@@ -1808,6 +1816,9 @@ impl cosmic::Application for AppModel {
 
             #[cfg(feature = "visualizer")]
             Message::VisualizerFrame(handle) => {
+                // Double-buffer: keep previous frame alive so iced's raster
+                // cache retains its texture while the new one uploads.
+                self.visualizer_frame_prev = self.visualizer_frame.take();
                 self.visualizer_frame = Some(handle);
             }
 

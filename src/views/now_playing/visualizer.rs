@@ -17,6 +17,7 @@
 //! to iced's `image::Handle` / `image::Id` API.
 
 use projectm::core::ProjectM;
+use projectm::playlist::Playlist;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,6 +34,8 @@ const RENDER_HEIGHT: usize = 360;
 /// as RGBA pixels and sent to the UI.
 pub struct ProjectMRenderer {
     projectm: ProjectM,
+    /// Playlist manager for preset cycling.
+    playlist: Option<Playlist>,
     /// OpenGL framebuffer object for offscreen rendering.
     _fbo: u32,
     /// OpenGL renderbuffer for color attachment.
@@ -149,16 +152,33 @@ impl ProjectMRenderer {
         pm.set_window_size(RENDER_WIDTH, RENDER_HEIGHT);
         pm.set_fps(30);
 
-        // Load presets if directory is provided
-        if let Some(dir) = preset_dir
+        // Create playlist and load presets if directory is provided
+        let playlist = if let Some(ref dir) = preset_dir
             && dir.exists()
         {
+            // Set texture search paths so presets can find their textures
             let search_paths = vec![dir.to_string_lossy().to_string()];
             pm.set_texture_search_paths(&search_paths, search_paths.len());
-        }
+
+            let mut pl = Playlist::create(&pm);
+            pl.add_path(&dir.to_string_lossy(), true);
+            pl.set_shuffle(true);
+            let count = pl.len();
+            tracing::info!("ProjectM: loaded {count} presets from {dir:?}");
+            if count > 0 {
+                // Start with a random preset
+                pl.play_next();
+                Some(pl)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         Ok(Self {
             projectm: pm,
+            playlist,
             _fbo: fbo,
             _color_rb: color_rb,
             _gl_ready: true,
@@ -222,24 +242,11 @@ impl ProjectMRenderer {
         (RENDER_WIDTH as u32, RENDER_HEIGHT as u32)
     }
 
-    /// Select the next preset with a smooth transition.
-    pub fn next_preset(&self) {
-        // ProjectM handles preset cycling internally.
-        // We trigger it by temporarily unlocking and relocking.
-        let was_locked = self.projectm.get_preset_locked();
-        self.projectm.set_preset_locked(false);
-        // Force a switch by setting a very short duration briefly
-        let old_duration = self.projectm.get_preset_duration();
-        self.projectm.set_preset_duration(0.01);
-        // Restore after a tiny render to trigger the switch
-        self.projectm.render_frame();
-        self.projectm.set_preset_duration(old_duration);
-        self.projectm.set_preset_locked(was_locked);
-    }
-
-    /// Load a preset file directly.
-    pub fn load_preset(&self, path: &str) {
-        self.projectm.load_preset_file(path, true);
+    /// Switch to the next preset via the playlist (hard cut).
+    pub fn next_preset(&mut self) {
+        if let Some(ref mut pl) = self.playlist {
+            pl.play_next();
+        }
     }
 }
 
@@ -346,8 +353,8 @@ impl VisualizerState {
     }
 
     /// Request the next preset.
-    pub fn next_preset(&self) {
-        if let Some(renderer) = &self.renderer {
+    pub fn next_preset(&mut self) {
+        if let Some(renderer) = &mut self.renderer {
             renderer.next_preset();
         }
     }

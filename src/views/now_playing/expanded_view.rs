@@ -43,6 +43,9 @@ pub fn expanded_now_playing<'a>(
     #[cfg(feature = "visualizer")] visualizer_frame: Option<
         &'a cosmic::iced::widget::image::Handle,
     >,
+    #[cfg(feature = "visualizer")] visualizer_frame_prev: Option<
+        &'a cosmic::iced::widget::image::Handle,
+    >,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     // While dragging, show the preview position; otherwise the backend position.
     let (progress, display_position) = if let Some(frac) = seeking_preview {
@@ -354,6 +357,22 @@ pub fn expanded_now_playing<'a>(
     });
 
     if let Some(bg_layer) = bg_image_handle {
+        // Solid black base layer — prevents white flashes when the image
+        // texture is momentarily unavailable (iced creates a new texture ID
+        // per frame for dynamic RGBA handles; the gap between old-evict and
+        // new-upload can flash the window background through).
+        let black_base: cosmic::Element<'_, NowPlayingMessage> =
+            widget::container(widget::Space::new(0, 0))
+                .width(Length::Fill)
+                .height(Length::Fixed(800.0))
+                .class(cosmic::theme::Container::custom(|_theme| {
+                    cosmic::iced::widget::container::Style {
+                        background: Some(Color::BLACK.into()),
+                        ..Default::default()
+                    }
+                }))
+                .into();
+
         // Dark overlay for text legibility.
         // When the visualizer is the background, use a lighter overlay so
         // the animation is visible; for static blurred art use a heavier one.
@@ -370,9 +389,26 @@ pub fn expanded_now_playing<'a>(
                 }))
                 .into();
 
-        // Stack: bg (bottom) → overlay (middle) → content (top)
-        // First child (bg_layer) dictates the Stack's intrinsic size (800px tall).
-        let stack: cosmic::Element<'_, NowPlayingMessage> = Stack::new()
+        // Stack: black base → [prev frame] → current frame → overlay → content
+        // The previous frame layer keeps its texture in iced's cache, so when
+        // the current frame's texture isn't ready yet, the previous frame
+        // shows through instead of a black/white flash.
+        #[allow(unused_mut)]
+        let mut stack = Stack::new().push(black_base);
+
+        // Insert previous visualizer frame (if any) as a cache-warming layer
+        #[cfg(feature = "visualizer")]
+        if let Some(prev_handle) = visualizer_frame_prev {
+            let prev_layer: cosmic::Element<'_, NowPlayingMessage> =
+                cosmic::widget::image(prev_handle.clone())
+                    .content_fit(cosmic::iced::ContentFit::Cover)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(800.0))
+                    .into();
+            stack = stack.push(prev_layer);
+        }
+
+        let stack: cosmic::Element<'_, NowPlayingMessage> = stack
             .push(bg_layer)
             .push(overlay)
             .push(content)
