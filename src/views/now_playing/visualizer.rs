@@ -152,27 +152,44 @@ impl ProjectMRenderer {
         pm.set_window_size(RENDER_WIDTH, RENDER_HEIGHT);
         pm.set_fps(30);
 
-        // Create playlist and load presets if directory is provided
-        let playlist = if let Some(ref dir) = preset_dir
-            && dir.exists()
-        {
-            // Set texture search paths so presets can find their textures
-            let search_paths = vec![dir.to_string_lossy().to_string()];
-            pm.set_texture_search_paths(&search_paths, search_paths.len());
+        // Search for preset directories in common locations.
+        // The caller-supplied dir is checked first, then system paths.
+        let mut search_dirs: Vec<PathBuf> = Vec::new();
+        if let Some(ref dir) = preset_dir {
+            search_dirs.push(dir.clone());
+        }
+        // Common system-wide preset locations
+        search_dirs.extend([
+            PathBuf::from("/usr/share/projectM/presets"),
+            PathBuf::from("/usr/local/share/projectM/presets"),
+            PathBuf::from("/usr/share/projectm/presets"),
+        ]);
+        // Flatpak location
+        if let Some(data) = dirs::data_dir() {
+            search_dirs.push(data.join("projectM").join("presets"));
+        }
 
-            let mut pl = Playlist::create(&pm);
-            pl.add_path(&dir.to_string_lossy(), true);
-            pl.set_shuffle(true);
-            let count = pl.len();
-            tracing::info!("ProjectM: loaded {count} presets from {dir:?}");
-            if count > 0 {
-                // Start with a random preset
-                pl.play_next();
-                Some(pl)
-            } else {
-                None
+        let mut pl = Playlist::create(&pm);
+        let mut texture_paths = Vec::new();
+        for dir in &search_dirs {
+            if dir.exists() {
+                let dir_str = dir.to_string_lossy().to_string();
+                pl.add_path(&dir_str, true);
+                texture_paths.push(dir_str);
             }
+        }
+        if !texture_paths.is_empty() {
+            pm.set_texture_search_paths(&texture_paths, texture_paths.len());
+        }
+
+        let count = pl.len();
+        tracing::info!("ProjectM: loaded {count} presets from {search_dirs:?}");
+        let playlist = if count > 0 {
+            pl.set_shuffle(true);
+            pl.play_next();
+            Some(pl)
         } else {
+            tracing::warn!("ProjectM: no presets found in any search directory");
             None
         };
 
@@ -195,8 +212,7 @@ impl ProjectMRenderer {
         if !pcm.is_empty() {
             let max = ProjectM::pcm_get_max_samples() as usize;
             let clamped = if pcm.len() > max { &pcm[..max] } else { pcm };
-            self.projectm
-                .pcm_add_float(clamped, projectm::core::STEREO);
+            self.projectm.pcm_add_float(clamped, projectm::core::STEREO);
         }
 
         // Render the visualization
