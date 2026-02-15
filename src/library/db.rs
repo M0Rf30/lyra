@@ -31,6 +31,7 @@ const SCHEMA_BASE: &str = "
     CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album);
     CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
     CREATE INDEX IF NOT EXISTS idx_tracks_album_artist ON tracks(album_artist);
+    CREATE INDEX IF NOT EXISTS idx_tracks_album_grouping ON tracks(album_artist, album, disc_number, track_number);
 
     CREATE TABLE IF NOT EXISTS cover_cache (
         album_key TEXT PRIMARY KEY,

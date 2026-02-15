@@ -32,6 +32,8 @@ pub struct AppModel {
     key_binds: HashMap<menu::KeyBind, MenuAction>,
     about: About,
     config: Config,
+    /// Cached cosmic-config context to avoid repeated D-Bus watcher creation attempts.
+    config_context: Option<cosmic_config::Config>,
     context_page: ContextPage,
 
     // Providers
@@ -421,11 +423,13 @@ impl cosmic::Application for AppModel {
             .links([(fl!("repository"), REPOSITORY)])
             .license("GPL-3.0");
 
-        // Load config
-        let mut config = cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
-            .map(|context| match Config::get_entry(&context) {
-                Ok(config) => config,
-                Err((_errors, config)) => config,
+        // Load config and cache the context to avoid repeated D-Bus watcher creation
+        let config_context = cosmic_config::Config::new(Self::APP_ID, Config::VERSION).ok();
+        let mut config = config_context
+            .as_ref()
+            .and_then(|context| match Config::get_entry(context) {
+                Ok(config) => Some(config),
+                Err((_errors, config)) => Some(config),
             })
             .unwrap_or_default();
 
@@ -493,9 +497,8 @@ impl cosmic::Application for AppModel {
 
             // Persist config if any passwords were migrated.
             if config_changed {
-                if let Ok(context) =
-                    cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
-                    && let Err(e) = config.write_entry(&context)
+                if let Some(ref context) = config_context
+                    && let Err(e) = config.write_entry(context)
                 {
                     tracing::error!("Failed to save config after keyring migration: {e:?}");
                 }
@@ -595,6 +598,7 @@ impl cosmic::Application for AppModel {
             key_binds: HashMap::new(),
             about,
             config,
+            config_context: config_context.clone(),
             context_page: ContextPage::default(),
             registry,
             mpd_providers,
@@ -2879,21 +2883,32 @@ impl AppModel {
             .await
             .unwrap_or_default();
 
-            // Extract cover art
+            // Extract cover art in parallel
+            let cover_tasks: Vec<_> = albums
+                .iter()
+                .filter_map(|album| {
+                    let key = crate::library::CoverArt::album_key(&album.artist, &album.name);
+                    album.tracks.first().map(|track| (key, track.path.clone()))
+                })
+                .map(|(key, path)| {
+                    tokio::task::spawn_blocking(move || {
+                        crate::library::CoverArt::get_cover_art(&path)
+                            .map(|bytes| (key, bytes))
+                    })
+                })
+                .collect();
+
             let mut cover_images = HashMap::new();
             let mut cover_art_bytes = HashMap::new();
-            for album in &albums {
-                let key = crate::library::CoverArt::album_key(&album.artist, &album.name);
-                if let Some(first_track) = album.tracks.first()
-                    && let Some(bytes) =
-                        crate::library::CoverArt::get_cover_art(&first_track.path)
-                {
+            for task in cover_tasks {
+                if let Ok(Some((key, bytes))) = task.await {
                     let handle = widget::icon::from_raster_bytes(bytes.clone());
                     cover_images.insert(key.clone(), handle);
                     cover_art_bytes.insert(key, bytes);
                 }
             }
 
+            // Generate artist avatars (fast, keep sequential)
             let mut artist_avatars = HashMap::new();
             for artist in &artists {
                 let bytes = crate::library::CoverArt::generate_artist_avatar(&artist.name, 64);
@@ -2966,23 +2981,28 @@ impl AppModel {
                             }
                         };
 
-                        // Fetch cover art for this batch.
+                        // Fetch cover art for this batch in parallel.
+                        let prov = Arc::clone(&provider);
+                        let cover_tasks: Vec<_> = albums
+                            .iter()
+                            .map(|album| {
+                                let key = crate::library::CoverArt::album_key(
+                                    &album.artist,
+                                    &album.name,
+                                );
+                                let prov2 = Arc::clone(&prov);
+                                let hint = album.cover_hint();
+                                tokio::task::spawn_blocking(move || {
+                                    let result = prov2.get_cover_art(&hint);
+                                    (key, result)
+                                })
+                            })
+                            .collect();
+
                         let mut cover_images = HashMap::new();
                         let mut cover_art_bytes = HashMap::new();
-                        let prov = Arc::clone(&provider);
-                        for album in &albums {
-                            let key = crate::library::CoverArt::album_key(
-                                &album.artist,
-                                &album.name,
-                            );
-                            let prov2 = Arc::clone(&prov);
-                            let hint = album.cover_hint();
-                            if let Ok(Some(bytes)) = tokio::task::spawn_blocking(move || {
-                                prov2.get_cover_art(&hint)
-                            })
-                            .await
-                            .unwrap_or(Ok(None))
-                            {
+                        for task in cover_tasks {
+                            if let Ok((key, Ok(Some(bytes)))) = task.await {
                                 let handle = widget::icon::from_raster_bytes(bytes.clone());
                                 cover_images.insert(key.clone(), handle);
                                 cover_art_bytes.insert(key, bytes);
@@ -3028,23 +3048,28 @@ impl AppModel {
 
                         let batch_count = albums.len();
 
-                        // Fetch cover art for this batch.
+                        // Fetch cover art for this batch in parallel.
+                        let prov = Arc::clone(&provider);
+                        let cover_tasks: Vec<_> = albums
+                            .iter()
+                            .map(|album| {
+                                let key = crate::library::CoverArt::album_key(
+                                    &album.artist,
+                                    &album.name,
+                                );
+                                let prov2 = Arc::clone(&prov);
+                                let hint = album.cover_hint();
+                                tokio::task::spawn_blocking(move || {
+                                    let result = prov2.get_cover_art(&hint);
+                                    (key, result)
+                                })
+                            })
+                            .collect();
+
                         let mut cover_images = HashMap::new();
                         let mut cover_art_bytes = HashMap::new();
-                        let prov = Arc::clone(&provider);
-                        for album in &albums {
-                            let key = crate::library::CoverArt::album_key(
-                                &album.artist,
-                                &album.name,
-                            );
-                            let prov2 = Arc::clone(&prov);
-                            let hint = album.cover_hint();
-                            if let Ok(Some(bytes)) = tokio::task::spawn_blocking(move || {
-                                prov2.get_cover_art(&hint)
-                            })
-                            .await
-                            .unwrap_or(Ok(None))
-                            {
+                        for task in cover_tasks {
+                            if let Ok((key, Ok(Some(bytes)))) = task.await {
                                 let handle = widget::icon::from_raster_bytes(bytes.clone());
                                 cover_images.insert(key.clone(), handle);
                                 cover_art_bytes.insert(key, bytes);
@@ -3086,9 +3111,8 @@ impl AppModel {
 
     /// Persist the current config via cosmic-config.
     fn save_config(&self) {
-        if let Ok(context) =
-            cosmic_config::Config::new(<AppModel as cosmic::Application>::APP_ID, Config::VERSION)
-            && let Err(e) = self.config.write_entry(&context)
+        if let Some(ref context) = self.config_context
+            && let Err(e) = self.config.write_entry(context)
         {
             tracing::error!("Failed to save config: {e:?}");
         }
