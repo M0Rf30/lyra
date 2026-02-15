@@ -1365,15 +1365,24 @@ impl cosmic::Application for AppModel {
                         let (tx, mut rx) = tokio::sync::mpsc::channel::<PathBuf>(256);
 
                         // Create watcher that sends changed paths through the channel.
+                        // IMPORTANT: Only react to content changes (Create/Modify/Remove),
+                        // NOT Access events. Reading files during scanning triggers Access
+                        // events which would create an infinite scan loop.
                         let _watcher = {
                             let tx = tx.clone();
                             let mut watcher = match notify::RecommendedWatcher::new(
                                 move |result: Result<notify::Event, notify::Error>| {
                                     if let Ok(event) = result {
-                                        for path in event.paths {
-                                            // Best-effort send; if the channel is full,
-                                            // the debounce loop will pick up other events.
-                                            let _ = tx.blocking_send(path);
+                                        use notify::EventKind;
+                                        match event.kind {
+                                            EventKind::Create(_)
+                                            | EventKind::Modify(_)
+                                            | EventKind::Remove(_) => {
+                                                for path in event.paths {
+                                                    let _ = tx.blocking_send(path);
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 },
@@ -1518,8 +1527,11 @@ impl cosmic::Application for AppModel {
             Message::LibraryScanComplete(count) => {
                 self.library_scanning = false;
                 tracing::info!("Library scan complete: {count} tracks updated");
-                // Reload library data
-                return self.reload_library();
+                // Only reload if tracks actually changed to avoid unnecessary
+                // view rebuilds (which reset scroll position).
+                if count > 0 || self.all_tracks.is_empty() {
+                    return self.reload_library();
+                }
             }
 
             Message::LibraryLoaded {
@@ -1583,6 +1595,16 @@ impl cosmic::Application for AppModel {
 
             // -- Filesystem watcher --
             Message::FilesChanged(paths) => {
+                // Filter out directories and non-existent-but-not-deleted paths.
+                let paths: Vec<PathBuf> = paths
+                    .into_iter()
+                    .filter(|p| p.is_file() || !p.exists())
+                    .collect();
+
+                if paths.is_empty() {
+                    return Task::none();
+                }
+
                 tracing::info!(
                     "Filesystem watcher detected {} changed paths",
                     paths.len()

@@ -320,9 +320,13 @@ impl LibraryDb {
     #[tracing::instrument(skip(self), level = "debug")]
     pub fn all_albums(&self, provider: Option<&str>) -> Result<Vec<Album>, String> {
         let tracks = self.all_tracks(provider)?;
-        let mut albums: Vec<Album> = Vec::new();
-        // Index maps (album_name, album_artist) → position in `albums` vec.
-        let mut index: HashMap<(String, String), usize> = HashMap::new();
+
+        if tracks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut albums: Vec<Album> = Vec::with_capacity(tracks.len() / 10);
+        let mut index: HashMap<(String, String), usize> = HashMap::with_capacity(tracks.len() / 10);
 
         for track in tracks {
             let key = (track.album.clone(), track.album_artist.clone());
@@ -341,7 +345,7 @@ impl LibraryDb {
             }
         }
 
-        albums.sort_by(|a, b| a.artist.cmp(&b.artist).then(a.year.cmp(&b.year)));
+        albums.sort_unstable_by(|a, b| a.artist.cmp(&b.artist).then(a.year.cmp(&b.year)));
         Ok(albums)
     }
 
@@ -351,8 +355,13 @@ impl LibraryDb {
     #[tracing::instrument(skip(self), level = "debug")]
     pub fn all_artists(&self, provider: Option<&str>) -> Result<Vec<Artist>, String> {
         let albums = self.all_albums(provider)?;
-        let mut artists: Vec<Artist> = Vec::new();
-        let mut index: HashMap<String, usize> = HashMap::new();
+
+        if albums.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut artists: Vec<Artist> = Vec::with_capacity(albums.len() / 3);
+        let mut index: HashMap<String, usize> = HashMap::with_capacity(albums.len() / 3);
 
         for album in albums {
             if let Some(&idx) = index.get(&album.artist) {
@@ -368,7 +377,7 @@ impl LibraryDb {
             }
         }
 
-        artists.sort_by(|a, b| a.name.cmp(&b.name));
+        artists.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         Ok(artists)
     }
 
