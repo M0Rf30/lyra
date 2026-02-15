@@ -3,13 +3,16 @@
 //! Audio playback engine with pluggable backend support.
 
 pub mod backend;
+pub mod eq_source;
 pub mod equalizer;
 mod http_range_reader;
 pub mod local_backend;
 pub mod mpd_backend;
 
+use crate::config::ReplayGainMode;
 use crate::library::{Track, TrackSource};
 use backend::{PlaybackBackend, PlayerError};
+pub use eq_source::EqController;
 use local_backend::LocalBackend;
 use mpd_backend::MpdBackend;
 use std::time::Duration;
@@ -65,6 +68,10 @@ pub struct Player {
     volume: f32,
     queue: Vec<Track>,
     queue_index: usize,
+    /// Whether the next track has been pre-queued in the sink for gapless playback.
+    next_pre_queued: bool,
+    /// Replay gain mode for volume normalization.
+    replay_gain_mode: ReplayGainMode,
 }
 
 impl Player {
@@ -82,6 +89,8 @@ impl Player {
             volume: 0.8,
             queue: Vec::new(),
             queue_index: 0,
+            next_pre_queued: false,
+            replay_gain_mode: ReplayGainMode::Off,
         })
     }
 
@@ -123,6 +132,9 @@ impl Player {
         match &source {
             TrackSource::LocalFile(_) | TrackSource::HttpStream(_) => {
                 self.active_backend = ActiveBackend::Local;
+                // Apply replay gain to the local backend before playing.
+                let gain = self.compute_replay_gain(track);
+                self.local_backend.set_replay_gain_db(gain);
             }
             TrackSource::MpdFile(_) => {
                 if self.mpd_backend.is_none() {
@@ -141,6 +153,38 @@ impl Player {
         Ok(())
     }
 
+    /// Compute the replay gain adjustment for a track based on the current mode.
+    fn compute_replay_gain(&self, track: &Track) -> Option<f32> {
+        match self.replay_gain_mode {
+            ReplayGainMode::Off => None,
+            ReplayGainMode::Track => track.rg_track_gain,
+            ReplayGainMode::Album => track.rg_album_gain.or(track.rg_track_gain),
+            ReplayGainMode::Auto => {
+                // Use album gain when playing tracks sequentially from the same album
+                // (i.e. the queue appears to be an album playback), track gain otherwise.
+                if self.is_playing_album_sequentially(track) {
+                    track.rg_album_gain.or(track.rg_track_gain)
+                } else {
+                    track.rg_track_gain.or(track.rg_album_gain)
+                }
+            }
+        }
+    }
+
+    /// Heuristic: check if we're playing tracks from the same album in order.
+    fn is_playing_album_sequentially(&self, current: &Track) -> bool {
+        if self.queue.len() < 2 {
+            return false;
+        }
+        // Check if a majority of the queue is from the same album.
+        let album = &current.album;
+        if album.is_empty() {
+            return false;
+        }
+        let same_album_count = self.queue.iter().filter(|t| t.album == *album).count();
+        same_album_count > self.queue.len() / 2
+    }
+
     /// Toggle play/pause.
     #[tracing::instrument(skip(self), level = "debug")]
     pub fn toggle_playback(&mut self) -> Result<(), String> {
@@ -155,6 +199,7 @@ impl Player {
     pub fn stop(&mut self) -> Result<(), String> {
         self.active_mut().stop().map_err(|e| e.to_string())?;
         self.current_track = None;
+        self.next_pre_queued = false;
         Ok(())
     }
 
@@ -211,20 +256,64 @@ impl Player {
     pub fn set_queue(&mut self, tracks: Vec<Track>) {
         self.queue = tracks;
         self.queue_index = 0;
+        self.next_pre_queued = false;
     }
 
     /// Play the next track in the queue.
     /// Returns the track that is now playing, or None if queue is empty.
+    ///
+    /// If gapless pre-queuing was used (`pre_queue_next()` was called earlier),
+    /// the audio is already playing in the sink — this just advances the index
+    /// and updates metadata. Otherwise, it does a full `play_track()`.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<&Track>, String> {
         if self.queue.is_empty() {
             return Ok(None);
         }
         self.queue_index = (self.queue_index + 1) % self.queue.len();
+
+        // If the next track was already pre-queued into the sink, we just
+        // update the metadata without restarting playback.
+        if self.next_pre_queued {
+            self.next_pre_queued = false;
+            let track = self.queue[self.queue_index].clone();
+            self.current_track = Some(NowPlaying {
+                duration: track.duration,
+                track,
+            });
+            // Pre-queue the track after this one for continued gapless.
+            self.pre_queue_next();
+            return Ok(self.queue.get(self.queue_index));
+        }
+
         let track = self.queue[self.queue_index].clone();
         let source = resolve_track_source(&track);
         self.play_track(&track, source)?;
+        // After starting a new track, pre-queue the next one for gapless.
+        self.pre_queue_next();
         Ok(self.queue.get(self.queue_index))
+    }
+
+    /// Pre-queue the next track in the queue for gapless playback.
+    ///
+    /// Only works for `LocalBackend` with local files (not HTTP streams or MPD).
+    /// No-op if the queue has only one track or the active backend isn't local.
+    pub fn pre_queue_next(&mut self) {
+        if self.queue.len() <= 1 || self.active_backend != ActiveBackend::Local {
+            return;
+        }
+        let next_idx = (self.queue_index + 1) % self.queue.len();
+        let next_track = &self.queue[next_idx];
+        let source = resolve_track_source(next_track);
+        match self.local_backend.queue_next(source) {
+            Ok(()) => {
+                self.next_pre_queued = true;
+            }
+            Err(e) => {
+                tracing::warn!("Failed to pre-queue next track: {e}");
+                self.next_pre_queued = false;
+            }
+        }
     }
 
     /// Play the previous track in the queue.
@@ -232,6 +321,7 @@ impl Player {
         if self.queue.is_empty() {
             return Ok(None);
         }
+        self.next_pre_queued = false;
         if self.queue_index == 0 {
             self.queue_index = self.queue.len() - 1;
         } else {
@@ -240,6 +330,7 @@ impl Player {
         let track = self.queue[self.queue_index].clone();
         let source = resolve_track_source(&track);
         self.play_track(&track, source)?;
+        self.pre_queue_next();
         Ok(self.queue.get(self.queue_index))
     }
 
@@ -248,10 +339,13 @@ impl Player {
         if index >= self.queue.len() {
             return Err("Index out of bounds".into());
         }
+        self.next_pre_queued = false;
         self.queue_index = index;
         let track = self.queue[index].clone();
         let source = resolve_track_source(&track);
-        self.play_track(&track, source)
+        self.play_track(&track, source)?;
+        self.pre_queue_next();
+        Ok(())
     }
 
     pub fn queue(&self) -> &[Track] {
@@ -275,5 +369,20 @@ impl Player {
     /// Get a mutable reference to the MPD backend (if present).
     pub fn mpd_backend_mut(&mut self) -> Option<&mut MpdBackend> {
         self.mpd_backend.as_mut()
+    }
+
+    /// Get a reference to the local backend's EQ controller.
+    pub fn eq_controller(&self) -> &EqController {
+        self.local_backend.eq_controller()
+    }
+
+    /// Set crossfade duration on the local backend.
+    pub fn set_crossfade(&mut self, secs: f32) {
+        self.local_backend.set_crossfade(secs);
+    }
+
+    /// Set the replay gain mode.
+    pub fn set_replay_gain_mode(&mut self, mode: ReplayGainMode) {
+        self.replay_gain_mode = mode;
     }
 }

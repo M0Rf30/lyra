@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: GPL-3.0
+
+//! Secure credential storage using the system keyring.
+//!
+//! Passwords for MPD and Subsonic providers are stored in the platform's
+//! native credential store (e.g., GNOME Keyring, KDE Wallet, macOS Keychain)
+//! via the `keyring` crate. Each password is keyed by `(SERVICE, provider_id)`.
+
+const SERVICE: &str = "io.github.m0rf30.Lyra";
+
+/// Store a password in the system keyring for the given provider ID.
+pub fn store_password(provider_id: &str, password: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(SERVICE, provider_id)
+        .map_err(|e| format!("Failed to create keyring entry for '{provider_id}': {e}"))?;
+    entry
+        .set_password(password)
+        .map_err(|e| format!("Failed to store password for '{provider_id}': {e}"))
+}
+
+/// Retrieve a password from the system keyring for the given provider ID.
+///
+/// Returns `Ok(None)` if no entry exists (rather than treating it as an error).
+pub fn retrieve_password(provider_id: &str) -> Result<Option<String>, String> {
+    let entry = keyring::Entry::new(SERVICE, provider_id)
+        .map_err(|e| format!("Failed to create keyring entry for '{provider_id}': {e}"))?;
+    match entry.get_password() {
+        Ok(password) => Ok(Some(password)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!(
+            "Failed to retrieve password for '{provider_id}': {e}"
+        )),
+    }
+}
+
+/// Delete a password from the system keyring for the given provider ID.
+///
+/// Silently succeeds if no entry exists.
+pub fn delete_password(provider_id: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(SERVICE, provider_id)
+        .map_err(|e| format!("Failed to create keyring entry for '{provider_id}': {e}"))?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!(
+            "Failed to delete password for '{provider_id}': {e}"
+        )),
+    }
+}
+
+/// Check whether the system keyring is available and functional.
+///
+/// Performs a test store/delete cycle with a probe key. Returns `true` if the
+/// keyring is usable, `false` otherwise.
+pub fn is_keyring_available() -> bool {
+    const PROBE_USER: &str = "__lyra_keyring_probe__";
+    const PROBE_PASSWORD: &str = "probe";
+
+    let entry = match keyring::Entry::new(SERVICE, PROBE_USER) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+
+    if entry.set_password(PROBE_PASSWORD).is_err() {
+        return false;
+    }
+
+    // Clean up the probe entry; ignore errors during cleanup.
+    let _ = entry.delete_credential();
+    true
+}

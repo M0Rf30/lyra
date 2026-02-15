@@ -19,6 +19,9 @@ pub struct MpdConfigEntry {
     /// Optional password for authentication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// Whether the password is stored in the system keyring.
+    #[serde(default)]
+    pub password_in_keyring: bool,
 }
 
 fn default_mpd_port() -> u16 {
@@ -33,6 +36,7 @@ impl Default for MpdConfigEntry {
             host: "localhost".to_string(),
             port: 6600,
             password: None,
+            password_in_keyring: false,
         }
     }
 }
@@ -51,9 +55,18 @@ pub struct SubsonicConfigEntry {
     /// Password (stored as plaintext for now; keyring TODO).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// Whether the password is stored in the system keyring.
+    #[serde(default)]
+    pub password_in_keyring: bool,
     /// Accept invalid TLS certificates (self-signed, Tailscale, etc.).
     #[serde(default)]
     pub accept_invalid_certs: bool,
+    /// Maximum bitrate for transcoding (None = original quality).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcoding_max_bitrate: Option<u32>,
+    /// Transcoding format (None = original format, e.g., "mp3", "ogg", "opus").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcoding_format: Option<String>,
 }
 
 impl Default for SubsonicConfigEntry {
@@ -64,7 +77,10 @@ impl Default for SubsonicConfigEntry {
             url: "https://music.example.com".to_string(),
             username: String::new(),
             password: None,
+            password_in_keyring: false,
             accept_invalid_certs: false,
+            transcoding_max_bitrate: None,
+            transcoding_format: None,
         }
     }
 }
@@ -98,9 +114,19 @@ impl RepeatMode {
     }
 }
 
+/// Replay gain mode for volume normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplayGainMode {
+    Off,
+    Track,
+    Album,
+    Auto,
+}
+
 /// Persistent configuration stored via cosmic-config.
 #[derive(Debug, Clone, CosmicConfigEntry, PartialEq)]
-#[version = 1]
+#[version = 2]
 pub struct Config {
     /// Music library directories to scan.
     pub music_dirs: Vec<PathBuf>,
@@ -120,6 +146,10 @@ pub struct Config {
     pub mpd_servers: Vec<MpdConfigEntry>,
     /// Configured OpenSubsonic/Navidrome server connections.
     pub subsonic_servers: Vec<SubsonicConfigEntry>,
+    /// Crossfade duration in seconds (0 = disabled).
+    pub crossfade_duration_secs: f32,
+    /// Replay gain mode.
+    pub replay_gain_mode: ReplayGainMode,
 }
 
 impl Default for Config {
@@ -142,6 +172,8 @@ impl Default for Config {
             last_view: "albums".to_string(),
             mpd_servers: Vec::new(),
             subsonic_servers: Vec::new(),
+            crossfade_duration_secs: 0.0,
+            replay_gain_mode: ReplayGainMode::Off,
         }
     }
 }

@@ -67,4 +67,10 @@ pub trait PlaybackBackend: Send {
 
     /// Check if the current track has finished playing.
     fn is_finished(&self) -> Result<bool, PlayerError>;
+
+    /// Pre-queue the next track for gapless playback.
+    /// Default implementation is a no-op (backends that don't support gapless ignore this).
+    fn queue_next(&mut self, _source: crate::library::TrackSource) -> Result<(), PlayerError> {
+        Ok(())
+    }
 }

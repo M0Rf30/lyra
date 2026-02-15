@@ -3,6 +3,7 @@
 //! Provider settings view — configure MPD and Subsonic servers.
 
 use crate::fl;
+use crate::provider::ProviderType;
 use cosmic::iced::Alignment;
 use cosmic::iced_core::Color;
 use cosmic::prelude::*;
@@ -47,6 +48,7 @@ impl MpdEditState {
             } else {
                 Some(self.password.clone())
             },
+            password_in_keyring: false,
         }
     }
 
@@ -73,6 +75,10 @@ pub struct SubsonicEditState {
     pub username: String,
     pub password: String,
     pub accept_invalid_certs: bool,
+    /// Transcoding max bitrate (None = original quality).
+    pub transcoding_max_bitrate: Option<u32>,
+    /// Transcoding format (None = original format).
+    pub transcoding_format: Option<String>,
 }
 
 impl SubsonicEditState {
@@ -85,6 +91,8 @@ impl SubsonicEditState {
             username: entry.username.clone(),
             password: entry.password.clone().unwrap_or_default(),
             accept_invalid_certs: entry.accept_invalid_certs,
+            transcoding_max_bitrate: entry.transcoding_max_bitrate,
+            transcoding_format: entry.transcoding_format.clone(),
         }
     }
 
@@ -100,7 +108,10 @@ impl SubsonicEditState {
             } else {
                 Some(self.password.clone())
             },
+            password_in_keyring: false,
             accept_invalid_certs: self.accept_invalid_certs,
+            transcoding_max_bitrate: self.transcoding_max_bitrate,
+            transcoding_format: self.transcoding_format.clone(),
         }
     }
 
@@ -113,6 +124,8 @@ impl SubsonicEditState {
             username: String::new(),
             password: String::new(),
             accept_invalid_certs: false,
+            transcoding_max_bitrate: None,
+            transcoding_format: None,
         }
     }
 }
@@ -122,6 +135,10 @@ impl SubsonicEditState {
 /// Messages emitted by the providers settings view.
 #[derive(Debug, Clone)]
 pub enum ProvidersMessage {
+    // Local music directories
+    AddMusicDir,
+    RemoveMusicDir(usize),
+
     // MPD
     AddMpd,
     EditName(usize, String),
@@ -142,19 +159,125 @@ pub enum ProvidersMessage {
     SubsonicSave(usize),
     SubsonicRemove(usize),
     SubsonicTestConnection(usize),
+    /// Subsonic transcoding bitrate changed (server index, bitrate or None for original).
+    SubsonicTranscodingBitrate(usize, Option<u32>),
+    /// Subsonic transcoding format changed (server index, format or None for original).
+    SubsonicTranscodingFormat(usize, Option<String>),
+
+    // Playback settings (Task 107, 108)
+    /// Crossfade duration changed (seconds, 0 = disabled).
+    SetCrossfade(f32),
+    /// Replay gain mode changed.
+    SetReplayGainMode(crate::config::ReplayGainMode),
 }
 
 // ── View ───────────────────────────────────────────────────────────────────
 
 /// Render the providers settings panel (shown in the context drawer).
 pub fn providers_view<'a>(
+    music_dirs: &'a [std::path::PathBuf],
     mpd_servers: &'a [MpdEditState],
     mpd_connection_status: &'a [Option<String>],
     subsonic_servers: &'a [SubsonicEditState],
     subsonic_connection_status: &'a [Option<String>],
+    crossfade_secs: f32,
+    replay_gain_mode: crate::config::ReplayGainMode,
+    active_provider_type: Option<ProviderType>,
 ) -> cosmic::Element<'a, ProvidersMessage> {
     let mut col = widget::column().spacing(16).padding(16);
 
+    // ── Playback settings (Task 107, 108) ──────────────────────────────────
+    col = col.push(widget::text::title4(fl!("playback-settings")));
+
+    // Task 107: Crossfade duration slider (0-12s)
+    // Task 122: Only show for Local and MPD providers (not Subsonic)
+    let show_crossfade = active_provider_type
+        .map(|pt| matches!(pt, ProviderType::Local | ProviderType::Mpd))
+        .unwrap_or(true);
+
+    if show_crossfade {
+        let crossfade_label = if crossfade_secs < 0.1 {
+            fl!("crossfade-disabled")
+        } else {
+            fl!("crossfade-seconds", secs = format!("{:.0}", crossfade_secs))
+        };
+
+        col = col.push(
+            widget::column()
+                .push(
+                    widget::row()
+                        .push(widget::text::body(fl!("crossfade-duration")))
+                        .push(widget::horizontal_space())
+                        .push(widget::text::caption(crossfade_label)),
+                )
+                .push(
+                    widget::slider(0.0..=12.0, crossfade_secs, ProvidersMessage::SetCrossfade)
+                        .step(0.5),
+                )
+                .spacing(4),
+        );
+    }
+
+    // Task 108: Replay gain mode selector
+    // Task 122: Only show for Local and MPD providers
+    let show_replay_gain = active_provider_type
+        .map(|pt| matches!(pt, ProviderType::Local | ProviderType::Mpd))
+        .unwrap_or(true);
+
+    if show_replay_gain {
+        use crate::config::ReplayGainMode;
+
+        let modes = [
+            (ReplayGainMode::Off, fl!("replay-gain-off")),
+            (ReplayGainMode::Track, fl!("replay-gain-track")),
+            (ReplayGainMode::Album, fl!("replay-gain-album")),
+            (ReplayGainMode::Auto, fl!("replay-gain-auto")),
+        ];
+
+        let mut mode_row = widget::row().spacing(8).align_y(Alignment::Center);
+        mode_row = mode_row.push(widget::text::body(fl!("replay-gain")));
+        for (mode, label) in modes {
+            let btn = if mode == replay_gain_mode {
+                widget::button::suggested(label)
+            } else {
+                widget::button::standard(label)
+            };
+            mode_row = mode_row.push(btn.on_press(ProvidersMessage::SetReplayGainMode(mode)));
+        }
+        col = col.push(mode_row);
+    }
+
+    col = col.push(widget::divider::horizontal::default());
+
+    // ── Local music directories ────────────────────────────────────────────
+    col = col.push(widget::text::title4(fl!("local-music-dirs")));
+
+    if music_dirs.is_empty() {
+        col = col.push(widget::text::body(fl!("no-music-dirs")));
+    } else {
+        for (i, dir) in music_dirs.iter().enumerate() {
+            col = col.push(
+                widget::row()
+                    .push(
+                        widget::text::body(dir.to_string_lossy()).width(cosmic::iced::Length::Fill),
+                    )
+                    .push(
+                        widget::button::destructive(fl!("remove"))
+                            .on_press(ProvidersMessage::RemoveMusicDir(i)),
+                    )
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            );
+        }
+    }
+
+    col = col.push(
+        widget::button::standard(fl!("add-music-folder")).on_press(ProvidersMessage::AddMusicDir),
+    );
+
+    col = col.push(widget::divider::horizontal::default());
+
+    // Remote providers section
     let has_any = !mpd_servers.is_empty() || !subsonic_servers.is_empty();
 
     if !has_any {
@@ -278,6 +401,68 @@ fn subsonic_server_card<'a>(
         buttons = buttons.push(status_label(status));
     }
 
+    // Task 109: Transcoding controls
+    let bitrate_options: Vec<(Option<u32>, String)> = vec![
+        (None, fl!("transcoding-original")),
+        (Some(320), "320 kbps".to_string()),
+        (Some(256), "256 kbps".to_string()),
+        (Some(192), "192 kbps".to_string()),
+        (Some(128), "128 kbps".to_string()),
+        (Some(96), "96 kbps".to_string()),
+        (Some(64), "64 kbps".to_string()),
+    ];
+
+    let format_options: Vec<(Option<String>, String)> = vec![
+        (None, fl!("transcoding-original")),
+        (Some("mp3".to_string()), "MP3".to_string()),
+        (Some("ogg".to_string()), "OGG Vorbis".to_string()),
+        (Some("opus".to_string()), "Opus".to_string()),
+        (Some("aac".to_string()), "AAC".to_string()),
+    ];
+
+    let current_bitrate = server.transcoding_max_bitrate;
+    let mut bitrate_row = widget::row().spacing(8).align_y(Alignment::Center);
+    bitrate_row = bitrate_row.push(widget::text::body(fl!("transcoding-bitrate")));
+    for (bitrate, label) in bitrate_options {
+        let btn = if bitrate == current_bitrate {
+            widget::button::suggested(label)
+        } else {
+            widget::button::standard(label)
+        };
+        bitrate_row = bitrate_row
+            .push(btn.on_press(ProvidersMessage::SubsonicTranscodingBitrate(index, bitrate)));
+    }
+
+    let current_format = server.transcoding_format.clone();
+    let mut format_row = widget::row().spacing(8).align_y(Alignment::Center);
+    format_row = format_row.push(widget::text::body(fl!("transcoding-format")));
+    for (fmt, label) in format_options {
+        let btn = if fmt == current_format {
+            widget::button::suggested(label)
+        } else {
+            widget::button::standard(label)
+        };
+        let f = fmt;
+        format_row =
+            format_row.push(btn.on_press(ProvidersMessage::SubsonicTranscodingFormat(index, f)));
+    }
+
+    // Task 110: Bandwidth savings estimate
+    let mut transcoding_col = widget::column()
+        .push(widget::text::title4(fl!("transcoding")))
+        .push(bitrate_row)
+        .push(format_row)
+        .spacing(8);
+
+    if let Some(bitrate) = current_bitrate {
+        // Rough estimate: typical FLAC ~1000 kbps, so savings ≈ (1 - bitrate/1000) * 100
+        let savings_pct = ((1.0 - (bitrate as f32 / 1000.0)) * 100.0).max(0.0) as u32;
+        transcoding_col = transcoding_col.push(widget::text::caption(fl!(
+            "transcoding-bandwidth-estimate",
+            percent = savings_pct.to_string()
+        )));
+    }
+
     widget::column()
         .push(widget::text::title4(format!("Subsonic: {}", &server.name)))
         .push(name_input)
@@ -289,6 +474,7 @@ fn subsonic_server_card<'a>(
                 .spacing(8),
         )
         .push(tls_toggle)
+        .push(transcoding_col)
         .push(buttons)
         .push(widget::divider::horizontal::default())
         .spacing(8)

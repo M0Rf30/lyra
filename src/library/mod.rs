@@ -9,7 +9,7 @@ mod scanner;
 
 pub use cover_art::CoverArt;
 pub use db::LibraryDb;
-pub use lyrics::LyricsProvider;
+pub use lyrics::{parse_lrc, LyricsProvider};
 pub use scanner::LibraryScanner;
 
 use std::path::PathBuf;
@@ -61,6 +61,14 @@ pub struct Track {
     pub provider_id: Arc<str>,
     /// Provider-specific identifier (file path for local, MPD relative path, Subsonic song ID).
     pub source_uri: String,
+    /// Whether this track is marked as a favorite.
+    pub is_favorite: bool,
+    /// User rating (1-5), or None if unrated.
+    pub rating: Option<u8>,
+    /// ReplayGain track gain in dB (e.g., -6.5).
+    pub rg_track_gain: Option<f32>,
+    /// ReplayGain album gain in dB.
+    pub rg_album_gain: Option<f32>,
 }
 
 impl Track {
@@ -148,4 +156,32 @@ impl Artist {
     pub fn track_count(&self) -> usize {
         self.albums.iter().map(|a| a.tracks.len()).sum()
     }
+}
+
+/// A user-created playlist.
+#[derive(Debug, Clone)]
+pub struct Playlist {
+    pub id: String,
+    pub name: String,
+    pub tracks: Vec<Track>,
+    pub track_count: u32,
+    pub total_duration: Duration,
+}
+
+/// A single line in synced lyrics.
+#[derive(Debug, Clone)]
+pub struct LyricLine {
+    /// Timestamp in milliseconds from track start.
+    pub timestamp_ms: u64,
+    /// The lyric text for this line.
+    pub text: String,
+}
+
+/// Lyrics data, either time-synchronized or plain text.
+#[derive(Debug, Clone)]
+pub enum Lyrics {
+    /// Time-synchronized lyrics with per-line timestamps.
+    Synced(Vec<LyricLine>),
+    /// Plain text lyrics without timing information.
+    Unsynced(String),
 }

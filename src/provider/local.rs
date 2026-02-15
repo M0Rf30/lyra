@@ -7,7 +7,8 @@
 
 use super::{MusicProvider, ProviderError, ProviderType};
 use crate::library::{
-    Album, Artist, CoverArt, LibraryDb, LibraryScanner, LyricsProvider, Track, TrackSource,
+    Album, Artist, CoverArt, LibraryDb, LibraryScanner, LyricsProvider, Playlist, Track,
+    TrackSource,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -69,10 +70,13 @@ impl MusicProvider for LocalProvider {
             .map_err(ProviderError::Database)
     }
 
-    fn search(&self, _query: &str) -> Result<Vec<Track>, ProviderError> {
-        // TODO: Implement SQL LIKE search across title, artist, album.
-        // For now, return all tracks (search filtering will be added in a later phase).
-        self.browse_tracks()
+    fn search(&self, query: &str) -> Result<Vec<Track>, ProviderError> {
+        if query.is_empty() {
+            return self.browse_tracks();
+        }
+        let db = self.lock_db()?;
+        db.search_tracks(query, Some("local"))
+            .map_err(ProviderError::Database)
     }
 
     fn resolve_audio(&self, track: &Track) -> Result<TrackSource, ProviderError> {
@@ -87,7 +91,7 @@ impl MusicProvider for LocalProvider {
         Ok(bytes)
     }
 
-    fn get_lyrics(&self, track: &Track) -> Result<Option<String>, ProviderError> {
+    fn get_lyrics(&self, track: &Track) -> Result<Option<crate::library::Lyrics>, ProviderError> {
         // Try embedded tags first, then .lrc sidecar file.
         // Online LRCLIB fetch is async and handled separately by the app.
         let lyrics = LyricsProvider::from_tags(&track.path)
@@ -98,5 +102,97 @@ impl MusicProvider for LocalProvider {
     fn sync_library(&self) -> Result<usize, ProviderError> {
         let db = self.lock_db()?;
         LibraryScanner::scan(&db, &self.music_dirs).map_err(ProviderError::Database)
+    }
+
+    // --- Playlists ---
+
+    fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError> {
+        let db = self.lock_db()?;
+        db.list_playlists().map_err(ProviderError::Database)
+    }
+
+    fn get_playlist(&self, id: &str) -> Result<Playlist, ProviderError> {
+        let db = self.lock_db()?;
+        db.get_playlist(id).map_err(ProviderError::Database)
+    }
+
+    fn create_playlist(&self, name: &str) -> Result<Playlist, ProviderError> {
+        let db = self.lock_db()?;
+        db.create_playlist(name).map_err(ProviderError::Database)
+    }
+
+    fn delete_playlist(&self, id: &str) -> Result<(), ProviderError> {
+        let db = self.lock_db()?;
+        db.delete_playlist(id).map_err(ProviderError::Database)
+    }
+
+    fn rename_playlist(&self, id: &str, new_name: &str) -> Result<(), ProviderError> {
+        let db = self.lock_db()?;
+        db.rename_playlist(id, new_name)
+            .map_err(ProviderError::Database)
+    }
+
+    fn add_to_playlist(
+        &self,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        let db = self.lock_db()?;
+        db.add_to_playlist(playlist_id, track_ids)
+            .map_err(ProviderError::Database)
+    }
+
+    // --- Favorites and Ratings ---
+
+    fn toggle_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
+        let id: i64 = track_id
+            .parse()
+            .map_err(|_| ProviderError::Other(format!("Invalid track ID: {track_id}")))?;
+        let db = self.lock_db()?;
+        db.toggle_favorite(id).map_err(ProviderError::Database)
+    }
+
+    fn is_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
+        let id: i64 = track_id
+            .parse()
+            .map_err(|_| ProviderError::Other(format!("Invalid track ID: {track_id}")))?;
+        let db = self.lock_db()?;
+        db.is_favorite(id).map_err(ProviderError::Database)
+    }
+
+    fn set_rating(&self, track_id: &str, rating: u8) -> Result<(), ProviderError> {
+        let id: i64 = track_id
+            .parse()
+            .map_err(|_| ProviderError::Other(format!("Invalid track ID: {track_id}")))?;
+        let db = self.lock_db()?;
+        db.set_rating(id, rating).map_err(ProviderError::Database)
+    }
+
+    fn get_rating(&self, track_id: &str) -> Result<Option<u8>, ProviderError> {
+        let id: i64 = track_id
+            .parse()
+            .map_err(|_| ProviderError::Other(format!("Invalid track ID: {track_id}")))?;
+        let db = self.lock_db()?;
+        db.get_rating(id).map_err(ProviderError::Database)
+    }
+
+    fn list_favorites(&self) -> Result<Vec<Track>, ProviderError> {
+        let db = self.lock_db()?;
+        db.list_favorites(Some("local"))
+            .map_err(ProviderError::Database)
+    }
+
+    // --- Genres ---
+
+    fn list_genres(&self) -> Result<Vec<String>, ProviderError> {
+        let db = self.lock_db()?;
+        db.list_genres(Some("local"))
+            .map_err(ProviderError::Database)
+    }
+
+    fn get_tracks_by_genre(&self, genre: &str) -> Result<Vec<Track>, ProviderError> {
+        let db = self.lock_db()?;
+        db.tracks_by_genre(genre, Some("local"))
+            .map_err(ProviderError::Database)
     }
 }

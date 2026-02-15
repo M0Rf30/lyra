@@ -47,7 +47,7 @@ pub fn playback_bar<'a>(
         (p, position)
     };
 
-    // --- Left: cover art + track info ---
+    // --- Left: cover art + track info + heart icon ---
     let track_info: cosmic::Element<'_, NowPlayingMessage> = if let Some(track) = current_track {
         let art: cosmic::Element<'_, NowPlayingMessage> = if let Some(handle) = cover_art {
             widget::icon::icon(handle.clone()).size(48).into()
@@ -56,6 +56,15 @@ pub fn playback_bar<'a>(
                 .size(40)
                 .into()
         };
+
+        // Task 100: Heart icon for favorite toggle
+        let fav_icon_name = if track.is_favorite {
+            "emblem-favorite-symbolic"
+        } else {
+            "non-starred-symbolic"
+        };
+        let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(16))
+            .on_press(NowPlayingMessage::ToggleFavorite(track.id.to_string()));
 
         widget::row()
             .push(
@@ -71,6 +80,7 @@ pub fn playback_bar<'a>(
                     .push(widget::text::caption(track.artist.as_str()))
                     .spacing(2),
             )
+            .push(heart_btn)
             .spacing(12)
             .align_y(Alignment::Center)
             .width(Length::Shrink)

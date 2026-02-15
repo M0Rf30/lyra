@@ -15,6 +15,12 @@ pub enum ArtistMessage {
     PlayArtistAlbum(usize, usize),
     PlayTrack(usize, usize, usize),
     BackToList,
+    /// Toggle favorite for a track (track ID as string).
+    ToggleFavorite(String),
+    /// Set rating for a track (track ID, rating 0-5).
+    SetRating(String, u8),
+    /// Filter by genre.
+    FilterByGenre(String),
 }
 
 /// Render the artist list.
@@ -159,11 +165,38 @@ pub fn artist_detail_view<'a>(
 
         let mut track_list = widget::column().spacing(1);
         for (track_idx, track) in album.tracks.iter().enumerate() {
+            let track_id = track.id.to_string();
+
+            // Task 99: Heart icon for favorite toggle
+            let fav_icon_name = if track.is_favorite {
+                "emblem-favorite-symbolic"
+            } else {
+                "non-starred-symbolic"
+            };
+            let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(16))
+                .on_press(ArtistMessage::ToggleFavorite(track_id.clone()));
+
+            // Task 101: Star rating widget
+            let rating_row = artist_star_rating(track_id, track.rating);
+
+            // Task 103: Genre chip
+            let genre_widget: cosmic::Element<'_, ArtistMessage> = if !track.genre.is_empty() {
+                widget::button::custom(widget::text::caption(&track.genre))
+                    .on_press(ArtistMessage::FilterByGenre(track.genre.clone()))
+                    .class(cosmic::theme::Button::Standard)
+                    .into()
+            } else {
+                widget::Space::with_width(0).into()
+            };
+
             let row = widget::button::custom(
                 widget::row()
                     .push(widget::text(format!("{}", track.track_number)).width(32))
                     .push(widget::text(track.title.as_str()).width(Length::Fill))
                     .push(widget::text(track.duration_string()).width(60))
+                    .push(heart_btn)
+                    .push(rating_row)
+                    .push(genre_widget)
                     .spacing(8)
                     .align_y(Alignment::Center)
                     .padding(4),
@@ -182,4 +215,27 @@ pub fn artist_detail_view<'a>(
     widget::scrollable(widget::container(content).padding(16).width(Length::Fill))
         .height(Length::Fill)
         .into()
+}
+
+/// Star rating widget for artist detail tracks (1-5 stars).
+fn artist_star_rating<'a>(
+    track_id: String,
+    current_rating: Option<u8>,
+) -> cosmic::Element<'a, ArtistMessage> {
+    let rating = current_rating.unwrap_or(0);
+    let mut row = widget::row().spacing(0).align_y(Alignment::Center);
+
+    for star in 1u8..=5 {
+        let icon_name = if star <= rating {
+            "starred-symbolic"
+        } else {
+            "non-starred-symbolic"
+        };
+        let new_rating = if star == rating { 0 } else { star };
+        let btn = widget::button::icon(widget::icon::from_name(icon_name).size(14))
+            .on_press(ArtistMessage::SetRating(track_id.clone(), new_rating));
+        row = row.push(btn);
+    }
+
+    row.into()
 }

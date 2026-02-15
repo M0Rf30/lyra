@@ -4,6 +4,7 @@
 
 pub mod app;
 pub mod config;
+pub mod credentials;
 pub mod i18n;
 pub mod library;
 pub mod player;

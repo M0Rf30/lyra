@@ -9,7 +9,7 @@ pub mod local;
 pub mod mpd;
 pub mod subsonic;
 
-use crate::library::{Album, Artist, CoverSource, Track, TrackSource};
+use crate::library::{Album, Artist, CoverSource, Lyrics, Track, TrackSource};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -102,12 +102,93 @@ pub trait MusicProvider: Send + Sync {
     /// Get cover art bytes for an album, if available.
     fn get_cover_art(&self, album: &Album) -> Result<Option<Vec<u8>>, ProviderError>;
 
-    /// Get lyrics text for a track, if available.
-    fn get_lyrics(&self, track: &Track) -> Result<Option<String>, ProviderError>;
+    /// Get lyrics for a track, if available.
+    fn get_lyrics(&self, track: &Track) -> Result<Option<Lyrics>, ProviderError>;
 
     /// Synchronize / refresh the provider's library.
     /// Returns the number of tracks added or updated.
     fn sync_library(&self) -> Result<usize, ProviderError>;
+
+    // --- Playlist methods (optional, default: NotSupported) ---
+
+    /// List all playlists from this provider.
+    fn list_playlists(&self) -> Result<Vec<crate::library::Playlist>, ProviderError> {
+        Err(ProviderError::NotSupported("playlists".into()))
+    }
+
+    /// Get a playlist with its tracks.
+    fn get_playlist(&self, id: &str) -> Result<crate::library::Playlist, ProviderError> {
+        let _ = id;
+        Err(ProviderError::NotSupported("playlists".into()))
+    }
+
+    /// Create a new playlist with the given name.
+    fn create_playlist(&self, name: &str) -> Result<crate::library::Playlist, ProviderError> {
+        let _ = name;
+        Err(ProviderError::NotSupported("playlists".into()))
+    }
+
+    /// Delete a playlist by ID.
+    fn delete_playlist(&self, id: &str) -> Result<(), ProviderError> {
+        let _ = id;
+        Err(ProviderError::NotSupported("playlists".into()))
+    }
+
+    /// Rename a playlist.
+    fn rename_playlist(&self, id: &str, new_name: &str) -> Result<(), ProviderError> {
+        let _ = (id, new_name);
+        Err(ProviderError::NotSupported("playlists".into()))
+    }
+
+    /// Add tracks to a playlist.
+    fn add_to_playlist(&self, playlist_id: &str, track_ids: &[String]) -> Result<(), ProviderError> {
+        let _ = (playlist_id, track_ids);
+        Err(ProviderError::NotSupported("playlists".into()))
+    }
+
+    // --- Favorites and ratings methods (optional, default: not supported) ---
+
+    /// Toggle favorite status for a track (by source_uri or provider-specific ID).
+    fn toggle_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
+        let _ = track_id;
+        Err(ProviderError::NotSupported("favorites".into()))
+    }
+
+    /// Check if a track is a favorite.
+    fn is_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
+        let _ = track_id;
+        Ok(false)
+    }
+
+    /// Set a rating (1-5) for a track. Pass 0 to clear.
+    fn set_rating(&self, track_id: &str, rating: u8) -> Result<(), ProviderError> {
+        let _ = (track_id, rating);
+        Err(ProviderError::NotSupported("ratings".into()))
+    }
+
+    /// Get the rating for a track.
+    fn get_rating(&self, track_id: &str) -> Result<Option<u8>, ProviderError> {
+        let _ = track_id;
+        Ok(None)
+    }
+
+    /// List all favorite tracks.
+    fn list_favorites(&self) -> Result<Vec<Track>, ProviderError> {
+        Err(ProviderError::NotSupported("favorites".into()))
+    }
+
+    // --- Genre methods (optional, default: empty) ---
+
+    /// List all distinct genres from this provider.
+    fn list_genres(&self) -> Result<Vec<String>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    /// Get all tracks matching the given genre.
+    fn get_tracks_by_genre(&self, genre: &str) -> Result<Vec<Track>, ProviderError> {
+        let _ = genre;
+        Ok(Vec::new())
+    }
 }
 
 /// Manages all registered music providers.

@@ -7,7 +7,7 @@
 //! decoded locally by the `LocalBackend`.
 
 use super::{MusicProvider, ProviderError, ProviderType};
-use crate::library::{Album, Artist, CoverSource, Track, TrackSource};
+use crate::library::{Album, Artist, CoverSource, LyricLine, Lyrics, Playlist, Track, TrackSource};
 use opensubsonic::{Auth, Client};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,6 +33,10 @@ pub struct SubsonicConfig {
     pub password: String,
     /// Accept invalid TLS certificates (self-signed, Tailscale, etc.).
     pub accept_invalid_certs: bool,
+    /// Maximum bitrate for transcoding (None = original quality).
+    pub transcoding_max_bitrate: Option<u32>,
+    /// Transcoding format (None = original format, e.g., "mp3", "ogg", "opus").
+    pub transcoding_format: Option<String>,
 }
 
 impl Default for SubsonicConfig {
@@ -44,19 +48,48 @@ impl Default for SubsonicConfig {
             username: String::new(),
             password: String::new(),
             accept_invalid_certs: false,
+            transcoding_max_bitrate: None,
+            transcoding_format: None,
         }
     }
 }
 
 impl From<crate::config::SubsonicConfigEntry> for SubsonicConfig {
     fn from(entry: crate::config::SubsonicConfigEntry) -> Self {
+        // Task 85/86: Retrieve password from keyring when password_in_keyring is set.
+        let password = if entry.password_in_keyring {
+            match crate::credentials::retrieve_password(&entry.id) {
+                Ok(Some(pw)) => pw,
+                Ok(None) => {
+                    // Task 86: password_in_keyring is true but no keyring entry found.
+                    tracing::error!(
+                        "Subsonic provider '{}': password marked as stored in keyring but not found. \
+                         Please re-enter the password in provider settings.",
+                        entry.id
+                    );
+                    String::new()
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Subsonic provider '{}': failed to retrieve password from keyring: {e}",
+                        entry.id
+                    );
+                    String::new()
+                }
+            }
+        } else {
+            entry.password.unwrap_or_default()
+        };
+
         Self {
             id: entry.id,
             name: entry.name,
             url: entry.url,
             username: entry.username,
-            password: entry.password.unwrap_or_default(),
+            password,
             accept_invalid_certs: entry.accept_invalid_certs,
+            transcoding_max_bitrate: entry.transcoding_max_bitrate,
+            transcoding_format: entry.transcoding_format,
         }
     }
 }
@@ -148,11 +181,28 @@ impl SubsonicProvider {
 
         // Pre-build the authenticated stream URL so the player can use it
         // directly without needing access to the Subsonic client.
+        // Pass transcoding parameters from config if configured.
+        let max_bit_rate = self.config.transcoding_max_bitrate.map(|b| b as i32);
+        let format_ref = self.config.transcoding_format.as_deref();
         let source_uri = self
             .client
-            .stream_url(&child.id, None, None)
+            .stream_url(&child.id, max_bit_rate, format_ref)
             .map(|url| url.to_string())
             .unwrap_or_else(|_| child.id.clone());
+
+        let is_favorite = child.starred.is_some();
+        let rating = child
+            .user_rating
+            .and_then(|r| if r > 0 { Some(r as u8) } else { None });
+
+        let rg_track_gain = child
+            .replay_gain
+            .as_ref()
+            .and_then(|rg| rg.track_gain.map(|g| g as f32));
+        let rg_album_gain = child
+            .replay_gain
+            .as_ref()
+            .and_then(|rg| rg.album_gain.map(|g| g as f32));
 
         Track {
             id: 0,
@@ -170,6 +220,10 @@ impl SubsonicProvider {
             sample_rate,
             provider_id: Arc::clone(&self.provider_id),
             source_uri,
+            is_favorite,
+            rating,
+            rg_track_gain,
+            rg_album_gain,
         }
     }
 
@@ -491,12 +545,32 @@ impl MusicProvider for SubsonicProvider {
         }
     }
 
-    fn get_lyrics(&self, track: &Track) -> Result<Option<String>, ProviderError> {
+    fn get_lyrics(&self, track: &Track) -> Result<Option<Lyrics>, ProviderError> {
+        // Extract the Subsonic song ID from the stream URL path.
+        let song_id = track.path.to_string_lossy();
         self.block_on(async {
             // Try getLyricsBySongId first (OpenSubsonic extension).
-            match self.client.get_lyrics_by_song_id(&track.source_uri).await {
+            match self.client.get_lyrics_by_song_id(&song_id).await {
                 Ok(lyrics_list) => {
                     if let Some(structured) = lyrics_list.structured_lyrics.first() {
+                        if structured.synced {
+                            // Build synced lyrics from timestamps.
+                            let offset_ms = structured.offset.unwrap_or(0.0);
+                            let lines: Vec<LyricLine> = structured
+                                .line
+                                .iter()
+                                .filter_map(|l| {
+                                    l.start.map(|start| LyricLine {
+                                        timestamp_ms: (start + offset_ms).max(0.0) as u64,
+                                        text: l.value.clone(),
+                                    })
+                                })
+                                .collect();
+                            if !lines.is_empty() {
+                                return Ok(Some(Lyrics::Synced(lines)));
+                            }
+                        }
+                        // Unsynced structured lyrics — join lines.
                         let text: String = structured
                             .line
                             .iter()
@@ -504,7 +578,7 @@ impl MusicProvider for SubsonicProvider {
                             .collect::<Vec<_>>()
                             .join("\n");
                         if !text.is_empty() {
-                            return Ok(Some(text));
+                            return Ok(Some(Lyrics::Unsynced(text)));
                         }
                     }
                 }
@@ -523,7 +597,7 @@ impl MusicProvider for SubsonicProvider {
                     if let Some(text) = lyrics.value
                         && !text.is_empty()
                     {
-                        return Ok(Some(text));
+                        return Ok(Some(Lyrics::Unsynced(text)));
                     }
                 }
                 Err(e) => {
@@ -546,6 +620,189 @@ impl MusicProvider for SubsonicProvider {
                 Err(e) => tracing::warn!("Subsonic startScan: {e}"),
             }
             Ok(0)
+        })
+    }
+
+    // --- Playlists ---
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError> {
+        self.block_on(async {
+            let playlists = self
+                .client
+                .get_playlists(None)
+                .await
+                .map_err(subsonic_err("getPlaylists"))?;
+
+            Ok(playlists
+                .into_iter()
+                .map(|p| Playlist {
+                    id: p.id,
+                    name: p.name,
+                    tracks: Vec::new(),
+                    track_count: p.song_count.unwrap_or(0) as u32,
+                    total_duration: Duration::from_secs(p.duration.unwrap_or(0) as u64),
+                })
+                .collect())
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn get_playlist(&self, id: &str) -> Result<Playlist, ProviderError> {
+        let id_owned = id.to_string();
+        self.block_on(async {
+            let p = self
+                .client
+                .get_playlist(&id_owned)
+                .await
+                .map_err(subsonic_err("getPlaylist"))?;
+
+            let tracks: Vec<Track> = p.entry.iter().map(|s| self.child_to_track(s)).collect();
+            let total_duration = tracks.iter().map(|t| t.duration).sum();
+
+            Ok(Playlist {
+                id: p.id,
+                name: p.name,
+                track_count: tracks.len() as u32,
+                total_duration,
+                tracks,
+            })
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn create_playlist(&self, name: &str) -> Result<Playlist, ProviderError> {
+        let name_owned = name.to_string();
+        self.block_on(async {
+            let p = self
+                .client
+                .create_playlist(None, Some(&name_owned), &[])
+                .await
+                .map_err(subsonic_err("createPlaylist"))?;
+
+            Ok(Playlist {
+                id: p.id,
+                name: p.name,
+                tracks: Vec::new(),
+                track_count: 0,
+                total_duration: Duration::ZERO,
+            })
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn delete_playlist(&self, id: &str) -> Result<(), ProviderError> {
+        let id_owned = id.to_string();
+        self.block_on(async {
+            self.client
+                .delete_playlist(&id_owned)
+                .await
+                .map_err(subsonic_err("deletePlaylist"))
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn add_to_playlist(&self, playlist_id: &str, track_ids: &[String]) -> Result<(), ProviderError> {
+        let pid = playlist_id.to_string();
+        let ids: Vec<String> = track_ids.to_vec();
+        self.block_on(async {
+            let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            self.client
+                .update_playlist(&pid, None, None, None, &id_refs, &[])
+                .await
+                .map_err(subsonic_err("updatePlaylist"))
+        })
+    }
+
+    // --- Favorites and ratings ---
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn toggle_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
+        let id = track_id.to_string();
+        self.block_on(async {
+            // Check if already starred by fetching the song.
+            let song = self
+                .client
+                .get_song(&id)
+                .await
+                .map_err(subsonic_err("getSong"))?;
+
+            if song.starred.is_some() {
+                // Currently starred → unstar.
+                self.client
+                    .unstar(&[id.as_str()], &[], &[])
+                    .await
+                    .map_err(subsonic_err("unstar"))?;
+                Ok(false)
+            } else {
+                // Not starred → star.
+                self.client
+                    .star(&[id.as_str()], &[], &[])
+                    .await
+                    .map_err(subsonic_err("star"))?;
+                Ok(true)
+            }
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn set_rating(&self, track_id: &str, rating: u8) -> Result<(), ProviderError> {
+        let id = track_id.to_string();
+        self.block_on(async {
+            self.client
+                .set_rating(&id, rating as i32)
+                .await
+                .map_err(subsonic_err("setRating"))
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn list_favorites(&self) -> Result<Vec<Track>, ProviderError> {
+        self.block_on(async {
+            let starred = self
+                .client
+                .get_starred2(None)
+                .await
+                .map_err(subsonic_err("getStarred2"))?;
+
+            let tracks: Vec<Track> = starred
+                .song
+                .iter()
+                .map(|s| self.child_to_track(s))
+                .collect();
+            Ok(tracks)
+        })
+    }
+
+    // --- Genres ---
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn list_genres(&self) -> Result<Vec<String>, ProviderError> {
+        self.block_on(async {
+            let genres = self
+                .client
+                .get_genres()
+                .await
+                .map_err(subsonic_err("getGenres"))?;
+
+            let mut names: Vec<String> = genres.into_iter().map(|g| g.name).collect();
+            names.sort();
+            Ok(names)
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn get_tracks_by_genre(&self, genre: &str) -> Result<Vec<Track>, ProviderError> {
+        let genre_owned = genre.to_string();
+        self.block_on(async {
+            let songs = self
+                .client
+                .get_songs_by_genre(&genre_owned, Some(500), None, None)
+                .await
+                .map_err(subsonic_err("getSongsByGenre"))?;
+
+            let tracks: Vec<Track> = songs.iter().map(|s| self.child_to_track(s)).collect();
+            Ok(tracks)
         })
     }
 }

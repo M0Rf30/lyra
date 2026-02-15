@@ -35,6 +35,8 @@ pub enum NowPlayingMessage {
     ExpandToggle,
     /// Collapse button or Escape — return to compact bar.
     Collapse,
+    /// Toggle favorite for the currently playing track (track ID as string).
+    ToggleFavorite(String),
     /// Toggle the ProjectM visualizer on/off.
     #[cfg(feature = "visualizer")]
     ToggleVisualizer,

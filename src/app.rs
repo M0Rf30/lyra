@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0
 
-use crate::config::Config;
+use crate::config::{Config, ReplayGainMode};
 use crate::fl;
-use crate::library::{Album, Artist, LibraryDb, LibraryScanner, LyricsProvider, Track};
+use crate::library::{Album, Artist, LibraryDb, LibraryScanner, Lyrics, LyricsProvider, Track};
 use crate::player::mpd_backend::MpdBackend;
 use crate::player::{ActiveBackend, PlaybackState, Player};
 use crate::provider::local::LocalProvider;
 use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{MusicProvider, ProviderRegistry};
-use crate::views::{albums, artists, equalizer, lyrics, now_playing, providers, songs};
+use crate::views::{albums, artists, equalizer, genres, lyrics, now_playing, playlists, providers, songs};
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::{Alignment, Length, Subscription};
@@ -68,11 +68,27 @@ pub struct AppModel {
     selected_album: Option<usize>,
     selected_artist: Option<usize>,
     songs_sort: songs::SortField,
+    /// When true, the Songs view shows only favorite tracks.
+    favorites_filter: bool,
+    /// When set, the Songs view shows only tracks matching this genre.
+    genre_filter: Option<String>,
+    /// Available playlists for the Playlists view.
+    playlists: Vec<crate::library::Playlist>,
+    /// Currently selected playlist index (for detail view).
+    selected_playlist: Option<usize>,
+    /// Text input for new playlist name.
+    new_playlist_name: String,
+    /// All distinct genres from the active provider.
+    all_genres: Vec<String>,
+    /// Currently selected genre index (for detail view).
+    selected_genre: Option<usize>,
+    /// Tracks filtered by the currently selected genre.
+    genre_tracks: Vec<Track>,
     cover_images: HashMap<String, widget::icon::Handle>,
     artist_avatars: HashMap<String, widget::icon::Handle>,
 
     // Lyrics
-    lyrics_text: Option<String>,
+    lyrics_text: Option<Lyrics>,
     lyrics_loading: bool,
 
     // Equalizer
@@ -123,8 +139,6 @@ pub enum Message {
     // Navigation / chrome
     LaunchUrl(String),
     ToggleContextPage(ContextPage),
-    Surface(cosmic::surface::Action),
-
     // Library
     ScanLibrary,
     LibraryScanComplete(usize),
@@ -137,6 +151,10 @@ pub enum Message {
         /// Raw cover art bytes for blur processing.
         cover_art_bytes: HashMap<String, Vec<u8>>,
     },
+    /// Filesystem watcher detected changes in music directories.
+    /// Contains the deduplicated list of changed paths after debounce.
+    FilesChanged(Vec<PathBuf>),
+
     /// Incremental batch of albums from a remote provider (e.g. Subsonic).
     /// Each batch appends albums, derives tracks/artists, and updates the UI.
     LibraryBatch {
@@ -178,10 +196,62 @@ pub enum Message {
 
     // Songs view
     SortSongs(songs::SortField),
+    /// Toggle the favorites-only filter in the Songs view.
+    ToggleFavoritesFilter,
+
+    // Favorites & ratings
+    /// Toggle favorite status for a track (by track ID string).
+    ToggleFavorite(String),
+    /// Set rating (1-5) for a track. Pass 0 to clear.
+    SetRating(String, u8),
+
+    // Playlist actions
+    /// Add a track to a playlist. (track source_uri, playlist ID)
+    AddToPlaylist(String, String),
+
+    // Playlists view
+    /// Select a playlist to show its detail view.
+    SelectPlaylist(usize),
+    /// Go back from playlist detail to the list.
+    BackToPlaylistList,
+    /// Create a new playlist with the given name.
+    CreatePlaylist(String),
+    /// Delete a playlist by index.
+    DeletePlaylist(usize),
+    /// Rename a playlist (index, new name).
+    RenamePlaylist(usize, String),
+    /// Play all tracks in a playlist.
+    PlayPlaylist(usize),
+    /// Play a specific track within a playlist (playlist idx, track idx).
+    PlayPlaylistTrack(usize, usize),
+    /// Remove a track from a playlist (playlist idx, track idx).
+    RemovePlaylistTrack(usize, usize),
+    /// The new-playlist name input changed.
+    NewPlaylistNameChanged(String),
+    /// The rename input changed (playlist index, new text).
+    RenamePlaylistInput(usize, String),
+    /// Playlists have been loaded from the provider.
+    PlaylistsLoaded(Vec<crate::library::Playlist>),
+
+    // Genre filtering
+    /// Filter tracks by genre name.
+    FilterByGenre(String),
+
+    // Genres view
+    /// Select a genre to show its tracks.
+    SelectGenre(usize),
+    /// Go back from genre detail to the grid.
+    BackToGenreGrid,
+    /// Play a track in the genre detail view (index within genre_tracks).
+    PlayGenreTrack(usize),
+    /// Genres have been loaded from the provider.
+    GenresLoaded(Vec<String>),
+    /// Genre tracks have been loaded.
+    GenreTracksLoaded(Vec<Track>),
 
     // Lyrics
     ShowLyrics,
-    LyricsLoaded(Option<String>),
+    LyricsLoaded(Option<Lyrics>),
     FetchLyricsOnline,
 
     // Equalizer
@@ -191,6 +261,9 @@ pub enum Message {
 
     // Settings
     AddMusicDir,
+    /// Result from the XDG Desktop Portal directory picker.
+    DirPickerResult(Result<PathBuf, String>),
+    RemoveMusicDir(usize),
     UpdateConfig(Config),
 
     // Provider switching
@@ -232,6 +305,16 @@ pub enum Message {
     SubsonicRemoveServer(usize),
     SubsonicTestConnection(usize),
     SubsonicTestResult(usize, Result<(), String>),
+    /// Subsonic transcoding bitrate changed (server index, bitrate or None).
+    SubsonicTranscodingBitrate(usize, Option<u32>),
+    /// Subsonic transcoding format changed (server index, format or None).
+    SubsonicTranscodingFormat(usize, Option<String>),
+
+    // Playback settings (Tasks 107, 108, 113, 114)
+    /// Set crossfade duration (seconds, 0 = disabled).
+    SetCrossfade(f32),
+    /// Set replay gain mode.
+    SetReplayGainMode(ReplayGainMode),
 
     // Expanded now-playing view
     ExpandNowPlaying,
@@ -261,6 +344,10 @@ impl From<albums::AlbumMessage> for Message {
             albums::AlbumMessage::PlayTrack(ai, ti) => Message::PlayAlbumTrack(ai, ti),
             albums::AlbumMessage::SelectAlbum(i) => Message::SelectAlbum(i),
             albums::AlbumMessage::BackToGrid => Message::BackToAlbumGrid,
+            albums::AlbumMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
+            albums::AlbumMessage::SetRating(id, r) => Message::SetRating(id, r),
+            albums::AlbumMessage::FilterByGenre(g) => Message::FilterByGenre(g),
+            albums::AlbumMessage::AddToPlaylist(uri, pid) => Message::AddToPlaylist(uri, pid),
         }
     }
 }
@@ -274,6 +361,9 @@ impl From<artists::ArtistMessage> for Message {
             }
             artists::ArtistMessage::SelectArtist(i) => Message::SelectArtist(i),
             artists::ArtistMessage::BackToList => Message::BackToArtistList,
+            artists::ArtistMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
+            artists::ArtistMessage::SetRating(id, r) => Message::SetRating(id, r),
+            artists::ArtistMessage::FilterByGenre(g) => Message::FilterByGenre(g),
         }
     }
 }
@@ -314,6 +404,16 @@ impl cosmic::Application for AppModel {
             .data::<Page>(Page::Songs)
             .icon(icon::from_name("audio-x-generic-symbolic"));
 
+        nav.insert()
+            .text(fl!("playlists"))
+            .data::<Page>(Page::Playlists)
+            .icon(icon::from_name("playlist-symbolic"));
+
+        nav.insert()
+            .text(fl!("genres"))
+            .data::<Page>(Page::Genres)
+            .icon(icon::from_name("audio-x-generic-symbolic"));
+
         let about = About::default()
             .name(fl!("app-title"))
             .icon(widget::icon::from_svg_bytes(APP_ICON))
@@ -322,12 +422,85 @@ impl cosmic::Application for AppModel {
             .license("GPL-3.0");
 
         // Load config
-        let config = cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
+        let mut config = cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
             .map(|context| match Config::get_entry(&context) {
                 Ok(config) => config,
                 Err((_errors, config)) => config,
             })
             .unwrap_or_default();
+
+        // Tasks 83-84: Migrate plaintext passwords to system keyring.
+        // For each provider config entry that has a password but hasn't been
+        // migrated yet, attempt to store it in the keyring. On failure, keep
+        // the plaintext password and log a warning.
+        {
+            let keyring_ok = crate::credentials::is_keyring_available();
+            let mut config_changed = false;
+
+            if keyring_ok {
+                for entry in &mut config.mpd_servers {
+                    if entry.password.is_some() && !entry.password_in_keyring {
+                        let pw = entry.password.as_deref().unwrap_or_default();
+                        match crate::credentials::store_password(&entry.id, pw) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    "Migrated MPD password for '{}' to system keyring",
+                                    entry.id
+                                );
+                                entry.password_in_keyring = true;
+                                entry.password = None;
+                                config_changed = true;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to migrate MPD password for '{}' to keyring, \
+                                     keeping plaintext in config: {e}",
+                                    entry.id
+                                );
+                            }
+                        }
+                    }
+                }
+
+                for entry in &mut config.subsonic_servers {
+                    if entry.password.is_some() && !entry.password_in_keyring {
+                        let pw = entry.password.as_deref().unwrap_or_default();
+                        match crate::credentials::store_password(&entry.id, pw) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    "Migrated Subsonic password for '{}' to system keyring",
+                                    entry.id
+                                );
+                                entry.password_in_keyring = true;
+                                entry.password = None;
+                                config_changed = true;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to migrate Subsonic password for '{}' to keyring, \
+                                     keeping plaintext in config: {e}",
+                                    entry.id
+                                );
+                            }
+                        }
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "System keyring is not available; passwords will remain in plaintext config"
+                );
+            }
+
+            // Persist config if any passwords were migrated.
+            if config_changed {
+                if let Ok(context) =
+                    cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
+                    && let Err(e) = config.write_entry(&context)
+                {
+                    tracing::error!("Failed to save config after keyring migration: {e:?}");
+                }
+            }
+        }
 
         // Open library database and initialize provider registry
         let db_path = dirs::data_dir()
@@ -440,6 +613,14 @@ impl cosmic::Application for AppModel {
             selected_album: None,
             selected_artist: None,
             songs_sort: songs::SortField::Title,
+            favorites_filter: false,
+            genre_filter: None,
+            playlists: Vec::new(),
+            selected_playlist: None,
+            new_playlist_name: String::new(),
+            all_genres: Vec::new(),
+            selected_genre: None,
+            genre_tracks: Vec::new(),
             cover_images: HashMap::new(),
             artist_avatars: HashMap::new(),
             lyrics_text: None,
@@ -570,13 +751,24 @@ impl cosmic::Application for AppModel {
                 .title(fl!("equalizer"))
             }
             ContextPage::Providers => {
+                let active_provider_type =
+                    self.registry.active().map(|p| p.provider_type());
                 let providers_content = providers::providers_view(
+                    &self.config.music_dirs,
                     &self.mpd_edit_states,
                     &self.mpd_connection_status,
                     &self.subsonic_edit_states,
                     &self.subsonic_connection_status,
+                    self.config.crossfade_duration_secs,
+                    self.config.replay_gain_mode,
+                    active_provider_type,
                 )
                 .map(|msg| match msg {
+                    // Local music directories
+                    providers::ProvidersMessage::AddMusicDir => Message::AddMusicDir,
+                    providers::ProvidersMessage::RemoveMusicDir(i) => {
+                        Message::RemoveMusicDir(i)
+                    }
                     // MPD
                     providers::ProvidersMessage::AddMpd => Message::MpdAddServer,
                     providers::ProvidersMessage::EditName(i, v) => Message::MpdEditName(i, v),
@@ -616,6 +808,18 @@ impl cosmic::Application for AppModel {
                     providers::ProvidersMessage::SubsonicTestConnection(i) => {
                         Message::SubsonicTestConnection(i)
                     }
+                    // Transcoding (Task 109)
+                    providers::ProvidersMessage::SubsonicTranscodingBitrate(i, br) => {
+                        Message::SubsonicTranscodingBitrate(i, br)
+                    }
+                    providers::ProvidersMessage::SubsonicTranscodingFormat(i, f) => {
+                        Message::SubsonicTranscodingFormat(i, f)
+                    }
+                    // Playback settings (Tasks 107, 108)
+                    providers::ProvidersMessage::SetCrossfade(v) => Message::SetCrossfade(v),
+                    providers::ProvidersMessage::SetReplayGainMode(m) => {
+                        Message::SetReplayGainMode(m)
+                    }
                 });
 
                 context_drawer::context_drawer(
@@ -632,10 +836,11 @@ impl cosmic::Application for AppModel {
                     .unwrap_or(("", ""));
 
                 let lyrics_content = lyrics::lyrics_view(
-                    self.lyrics_text.as_deref(),
+                    self.lyrics_text.as_ref(),
                     title,
                     artist,
                     self.lyrics_loading,
+                    self.playback_position,
                 )
                 .map(|msg| match msg {
                     lyrics::LyricsMessage::FetchLyrics => Message::FetchLyricsOnline,
@@ -660,7 +865,7 @@ impl cosmic::Application for AppModel {
             Page::Albums => {
                 if let Some(album_idx) = self.selected_album {
                     if let Some(album) = self.all_albums.get(album_idx) {
-                        albums::album_detail_view(album, album_idx, &self.cover_images)
+                        albums::album_detail_view(album, album_idx, &self.cover_images, &self.playlists)
                             .map(Message::from)
                     } else {
                         widget::text("Album not found").into()
@@ -691,10 +896,80 @@ impl cosmic::Application for AppModel {
             }
 
             Page::Songs => {
-                songs::songs_list_view(&self.all_tracks, self.songs_sort).map(|msg| match msg {
+                songs::songs_list_view(
+                    &self.all_tracks,
+                    self.songs_sort,
+                    self.favorites_filter,
+                    self.genre_filter.as_deref(),
+                    &self.playlists,
+                ).map(|msg| match msg {
                     songs::SongMessage::PlayTrack(i) => Message::PlayTrackIndex(i),
                     songs::SongMessage::SortBy(f) => Message::SortSongs(f),
+                    songs::SongMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
+                    songs::SongMessage::SetRating(id, r) => Message::SetRating(id, r),
+                    songs::SongMessage::AddToPlaylist(uri, pid) => Message::AddToPlaylist(uri, pid),
+                    songs::SongMessage::ToggleFavoritesFilter => Message::ToggleFavoritesFilter,
+                    songs::SongMessage::FilterByGenre(g) => Message::FilterByGenre(g),
+                    songs::SongMessage::ClearGenreFilter => Message::FilterByGenre(String::new()),
                 })
+            }
+
+            Page::Playlists => {
+                if let Some(pl_idx) = self.selected_playlist {
+                    if let Some(playlist) = self.playlists.get(pl_idx) {
+                        playlists::playlist_detail_view(playlist, pl_idx)
+                            .map(|msg| match msg {
+                                playlists::PlaylistMessage::BackToList => Message::BackToPlaylistList,
+                                playlists::PlaylistMessage::PlayPlaylist(i) => Message::PlayPlaylist(i),
+                                playlists::PlaylistMessage::PlayTrack(pi, ti) => Message::PlayPlaylistTrack(pi, ti),
+                                playlists::PlaylistMessage::RemoveTrack(pi, ti) => Message::RemovePlaylistTrack(pi, ti),
+                                playlists::PlaylistMessage::SelectPlaylist(i) => Message::SelectPlaylist(i),
+                                playlists::PlaylistMessage::CreatePlaylist(n) => Message::CreatePlaylist(n),
+                                playlists::PlaylistMessage::DeletePlaylist(i) => Message::DeletePlaylist(i),
+                                playlists::PlaylistMessage::RenamePlaylist(i, n) => Message::RenamePlaylist(i, n),
+                                playlists::PlaylistMessage::NewPlaylistNameChanged(n) => Message::NewPlaylistNameChanged(n),
+                                playlists::PlaylistMessage::RenameInputChanged(i, n) => Message::RenamePlaylistInput(i, n),
+                            })
+                    } else {
+                        widget::text("Playlist not found").into()
+                    }
+                } else {
+                    playlists::playlist_list_view(&self.playlists, &self.new_playlist_name)
+                        .map(|msg| match msg {
+                            playlists::PlaylistMessage::SelectPlaylist(i) => Message::SelectPlaylist(i),
+                            playlists::PlaylistMessage::CreatePlaylist(n) => Message::CreatePlaylist(n),
+                            playlists::PlaylistMessage::DeletePlaylist(i) => Message::DeletePlaylist(i),
+                            playlists::PlaylistMessage::RenamePlaylist(i, n) => Message::RenamePlaylist(i, n),
+                            playlists::PlaylistMessage::NewPlaylistNameChanged(n) => Message::NewPlaylistNameChanged(n),
+                            playlists::PlaylistMessage::RenameInputChanged(i, n) => Message::RenamePlaylistInput(i, n),
+                            playlists::PlaylistMessage::BackToList => Message::BackToPlaylistList,
+                            playlists::PlaylistMessage::PlayPlaylist(i) => Message::PlayPlaylist(i),
+                            playlists::PlaylistMessage::PlayTrack(pi, ti) => Message::PlayPlaylistTrack(pi, ti),
+                            playlists::PlaylistMessage::RemoveTrack(pi, ti) => Message::RemovePlaylistTrack(pi, ti),
+                        })
+                }
+            }
+
+            Page::Genres => {
+                if let Some(genre_idx) = self.selected_genre {
+                    if let Some(genre_name) = self.all_genres.get(genre_idx) {
+                        genres::genre_detail_view(genre_name, &self.genre_tracks)
+                            .map(|msg| match msg {
+                                genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
+                                genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
+                                genres::GenreMessage::SelectGenre(i) => Message::SelectGenre(i),
+                            })
+                    } else {
+                        widget::text("Genre not found").into()
+                    }
+                } else {
+                    genres::genre_grid_view(&self.all_genres)
+                        .map(|msg| match msg {
+                            genres::GenreMessage::SelectGenre(i) => Message::SelectGenre(i),
+                            genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
+                            genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
+                        })
+                }
             }
         };
 
@@ -739,6 +1014,7 @@ impl cosmic::Application for AppModel {
             now_playing::NowPlayingMessage::ShowLyrics => Message::ShowLyrics,
             now_playing::NowPlayingMessage::ExpandToggle => Message::ExpandNowPlaying,
             now_playing::NowPlayingMessage::Collapse => Message::CollapseNowPlaying,
+            now_playing::NowPlayingMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
             #[cfg(feature = "visualizer")]
             now_playing::NowPlayingMessage::ToggleVisualizer => Message::ToggleVisualizer,
             #[cfg(feature = "visualizer")]
@@ -1065,6 +1341,101 @@ impl cosmic::Application for AppModel {
             ));
         }
 
+        // Filesystem watcher subscription — only when the Local provider is active.
+        // Uses notify::RecommendedWatcher to watch music_dirs recursively.
+        // Debounces events with a 2-second quiet timer before emitting
+        // Message::FilesChanged with the collected paths.
+        {
+            let is_local_active = self
+                .registry
+                .active()
+                .is_some_and(|p| p.provider_type() == crate::provider::ProviderType::Local);
+
+            if is_local_active && !self.config.music_dirs.is_empty() {
+                let music_dirs = self.config.music_dirs.clone();
+                subs.push(Subscription::run_with_id(
+                    "fs-watcher",
+                    iced_futures::stream::channel(4, move |mut emitter| async move {
+                        use notify::{RecursiveMode, Watcher};
+
+                        let (tx, mut rx) = tokio::sync::mpsc::channel::<PathBuf>(256);
+
+                        // Create watcher that sends changed paths through the channel.
+                        let _watcher = {
+                            let tx = tx.clone();
+                            let mut watcher = match notify::RecommendedWatcher::new(
+                                move |result: Result<notify::Event, notify::Error>| {
+                                    if let Ok(event) = result {
+                                        for path in event.paths {
+                                            // Best-effort send; if the channel is full,
+                                            // the debounce loop will pick up other events.
+                                            let _ = tx.blocking_send(path);
+                                        }
+                                    }
+                                },
+                                notify::Config::default(),
+                            ) {
+                                Ok(w) => w,
+                                Err(e) => {
+                                    tracing::error!("Failed to create filesystem watcher: {e}");
+                                    // Keep the future alive so the subscription ID is stable.
+                                    std::future::pending::<()>().await;
+                                    return;
+                                }
+                            };
+
+                            for dir in &music_dirs {
+                                if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
+                                    tracing::warn!(
+                                        "Failed to watch directory {}: {e}",
+                                        dir.display()
+                                    );
+                                }
+                            }
+
+                            watcher // keep alive
+                        };
+
+                        // Debounce loop: collect paths, wait for 2s of quiet, then emit.
+                        let debounce_duration = Duration::from_secs(2);
+                        loop {
+                            // Wait for the first event.
+                            let first = match rx.recv().await {
+                                Some(path) => path,
+                                None => break, // channel closed
+                            };
+
+                            let mut changed_paths = vec![first];
+
+                            // Collect more events until 2 seconds of silence.
+                            loop {
+                                match tokio::time::timeout(debounce_duration, rx.recv()).await {
+                                    Ok(Some(path)) => {
+                                        changed_paths.push(path);
+                                    }
+                                    Ok(None) => break, // channel closed
+                                    Err(_) => break,   // timeout — debounce complete
+                                }
+                            }
+
+                            // Deduplicate paths.
+                            changed_paths.sort();
+                            changed_paths.dedup();
+
+                            tracing::debug!(
+                                "Filesystem watcher: {} changed paths after debounce",
+                                changed_paths.len()
+                            );
+
+                            _ = emitter
+                                .send(Message::FilesChanged(changed_paths))
+                                .await;
+                        }
+                    }),
+                ));
+            }
+        }
+
         // Escape key to collapse expanded view
         if self.expand_progress > 0.0 || self.expand_target.is_some() {
             subs.push(cosmic::iced::event::listen_with(
@@ -1104,8 +1475,6 @@ impl cosmic::Application for AppModel {
                     self.core.window.show_context = true;
                 }
             }
-
-            Message::Surface(_) => {}
 
             // -- Library --
             Message::ScanLibrary => {
@@ -1206,6 +1575,51 @@ impl cosmic::Application for AppModel {
                     self.all_tracks.len(),
                     self.all_artists.len()
                 );
+            }
+
+            // -- Filesystem watcher --
+            Message::FilesChanged(paths) => {
+                tracing::info!(
+                    "Filesystem watcher detected {} changed paths",
+                    paths.len()
+                );
+
+                // Run incremental scan on the changed paths in a background task.
+                if let Some(provider) = self.registry.active_shared()
+                    && provider.provider_type() == crate::provider::ProviderType::Local
+                {
+                    self.library_scanning = true;
+                    return cosmic::task::future(async move {
+                        let count = tokio::task::spawn_blocking(move || {
+                            // The LocalProvider wraps LibraryDb in a Mutex.
+                            // For incremental scan, we access the DB through the
+                            // same path used by sync_library — open a temporary DB
+                            // connection for the scan, or re-use the provider's scan.
+                            // Since LocalProvider::sync_library calls LibraryScanner::scan,
+                            // we open the DB directly for scan_paths.
+                            let db_path = dirs::data_dir()
+                                .unwrap_or_else(|| PathBuf::from("."))
+                                .join("lyra")
+                                .join("library.db");
+
+                            match crate::library::LibraryDb::open(&db_path) {
+                                Ok(db) => {
+                                    LibraryScanner::scan_paths(&db, &paths).unwrap_or_else(|e| {
+                                        tracing::error!("scan_paths failed: {e}");
+                                        0
+                                    })
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to open DB for incremental scan: {e}");
+                                    0
+                                }
+                            }
+                        })
+                        .await
+                        .unwrap_or(0);
+                        cosmic::Action::App(Message::LibraryScanComplete(count))
+                    });
+                }
             }
 
             // -- Playback --
@@ -1325,12 +1739,39 @@ impl cosmic::Application for AppModel {
                 }
             }
 
+            // Task 111: Wire shuffle toggle for MPD
             Message::ToggleShuffle => {
                 self.config.shuffle = !self.config.shuffle;
+                if let Some(mpd) = self.active_mpd_provider() {
+                    let enabled = self.config.shuffle;
+                    if let Err(e) = mpd.send_random(enabled) {
+                        tracing::error!("MPD send_random: {e}");
+                    }
+                }
             }
 
+            // Task 112: Wire repeat mode for MPD
             Message::CycleRepeat => {
                 self.config.repeat_mode = self.config.repeat_mode.next();
+                if let Some(mpd) = self.active_mpd_provider() {
+                    let (repeat, single) = match self.config.repeat_mode {
+                        crate::config::RepeatMode::None => {
+                            (false, mpd_client::commands::SingleMode::Disabled)
+                        }
+                        crate::config::RepeatMode::All => {
+                            (true, mpd_client::commands::SingleMode::Disabled)
+                        }
+                        crate::config::RepeatMode::One => {
+                            (true, mpd_client::commands::SingleMode::Enabled)
+                        }
+                    };
+                    if let Err(e) = mpd.send_repeat(repeat) {
+                        tracing::error!("MPD send_repeat: {e}");
+                    }
+                    if let Err(e) = mpd.send_single(single) {
+                        tracing::error!("MPD send_single: {e}");
+                    }
+                }
             }
 
             Message::MpdStatusUpdate {
@@ -1465,6 +1906,119 @@ impl cosmic::Application for AppModel {
                 self.sort_tracks(field);
             }
 
+            Message::ToggleFavoritesFilter => {
+                self.favorites_filter = !self.favorites_filter;
+                // Clear genre filter when toggling favorites
+                if self.favorites_filter {
+                    self.genre_filter = None;
+                }
+            }
+
+            Message::ToggleFavorite(track_id) => {
+                if let Some(provider) = self.registry.active_shared() {
+                    match provider.toggle_favorite(&track_id) {
+                        Ok(new_state) => {
+                            // Update the track's is_favorite in our local data.
+                            for track in &mut self.all_tracks {
+                                if track.id.to_string() == track_id {
+                                    track.is_favorite = new_state;
+                                }
+                            }
+                            for album in &mut self.all_albums {
+                                for track in &mut album.tracks {
+                                    if track.id.to_string() == track_id {
+                                        track.is_favorite = new_state;
+                                    }
+                                }
+                            }
+                            for artist in &mut self.all_artists {
+                                for album in &mut artist.albums {
+                                    for track in &mut album.tracks {
+                                        if track.id.to_string() == track_id {
+                                            track.is_favorite = new_state;
+                                        }
+                                    }
+                                }
+                            }
+                            // Also update the current playing track if it matches.
+                            if let Some(ref mut ct) = self.current_track {
+                                if ct.id.to_string() == track_id {
+                                    ct.is_favorite = new_state;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("toggle_favorite failed: {e}");
+                        }
+                    }
+                }
+            }
+
+            Message::SetRating(track_id, rating) => {
+                if let Some(provider) = self.registry.active_shared() {
+                    match provider.set_rating(&track_id, rating) {
+                        Ok(()) => {
+                            let new_rating = if rating == 0 { None } else { Some(rating) };
+                            for track in &mut self.all_tracks {
+                                if track.id.to_string() == track_id {
+                                    track.rating = new_rating;
+                                }
+                            }
+                            for album in &mut self.all_albums {
+                                for track in &mut album.tracks {
+                                    if track.id.to_string() == track_id {
+                                        track.rating = new_rating;
+                                    }
+                                }
+                            }
+                            for artist in &mut self.all_artists {
+                                for album in &mut artist.albums {
+                                    for track in &mut album.tracks {
+                                        if track.id.to_string() == track_id {
+                                            track.rating = new_rating;
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(ref mut ct) = self.current_track {
+                                if ct.id.to_string() == track_id {
+                                    ct.rating = new_rating;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("set_rating failed: {e}");
+                        }
+                    }
+                }
+            }
+
+            Message::AddToPlaylist(track_source_uri, playlist_id) => {
+                if let Some(provider) = self.registry.active_shared() {
+                    if let Err(e) = provider.add_to_playlist(&playlist_id, &[track_source_uri]) {
+                        tracing::warn!("add_to_playlist failed: {e}");
+                    }
+                }
+            }
+
+            Message::FilterByGenre(genre) => {
+                if genre.is_empty() {
+                    self.genre_filter = None;
+                } else {
+                    self.genre_filter = Some(genre);
+                    self.favorites_filter = false;
+                    // Navigate to Songs view.
+                    // Collect entity IDs first to avoid borrow conflict.
+                    let entities: Vec<_> = self.nav.iter().collect();
+                    for entity in entities {
+                        if self.nav.data::<Page>(entity).is_some_and(|p| *p == Page::Songs) {
+                            self.nav.activate(entity);
+                            break;
+                        }
+                    }
+                }
+            }
+
             // -- Lyrics --
             Message::ShowLyrics => {
                 self.context_page = ContextPage::Lyrics;
@@ -1496,8 +2050,13 @@ impl cosmic::Application for AppModel {
 
             // -- Equalizer --
             Message::EqSetBand(index, value) => {
+                let clamped = value.clamp(-12.0, 12.0);
                 if index < self.config.equalizer_bands.len() {
-                    self.config.equalizer_bands[index] = value.clamp(-12.0, 12.0);
+                    self.config.equalizer_bands[index] = clamped;
+                }
+                // Update the live DSP filter.
+                if let Some(ref player) = self.player {
+                    player.eq_controller().set_band(index, clamped);
                 }
                 self.eq_preset = None;
             }
@@ -1505,17 +2064,88 @@ impl cosmic::Application for AppModel {
             Message::EqSetPreset(preset) => {
                 let gains = preset.gains();
                 self.config.equalizer_bands = gains.to_vec();
+                // Update all 10 bands in the live DSP.
+                if let Some(ref player) = self.player {
+                    player.eq_controller().set_all(&gains);
+                }
                 self.eq_preset = Some(preset);
             }
 
             Message::EqToggle(enabled) => {
                 self.config.equalizer_enabled = enabled;
+                // Enable/bypass the live DSP.
+                if let Some(ref player) = self.player {
+                    player.eq_controller().set_enabled(enabled);
+                }
             }
 
             // -- Settings --
             Message::AddMusicDir => {
-                // TODO: Open a directory picker dialog
-                tracing::info!("Add music directory requested");
+                // Launch the XDG Desktop Portal directory picker asynchronously.
+                return cosmic::task::future(async {
+                    let result = async {
+                        use ashpd::desktop::file_chooser::SelectedFiles;
+
+                        let selected = SelectedFiles::open_file()
+                            .title("Select Music Directory")
+                            .directory(true)
+                            .modal(true)
+                            .send()
+                            .await
+                            .map_err(|e| format!("Portal request failed: {e}"))?
+                            .response()
+                            .map_err(|e| format!("Portal response failed: {e}"))?;
+
+                        let uris = selected.uris();
+                        if let Some(uri) = uris.first() {
+                            uri.to_file_path()
+                                .map_err(|_| format!("Could not convert URI to path: {uri}"))
+                        } else {
+                            Err("No directory selected".to_string())
+                        }
+                    }
+                    .await;
+                    cosmic::Action::App(Message::DirPickerResult(result))
+                });
+            }
+
+            Message::DirPickerResult(result) => {
+                match result {
+                    Ok(path) => {
+                        // Deduplicate: check if the path is already in music_dirs.
+                        if self.config.music_dirs.contains(&path) {
+                            tracing::info!(
+                                "Directory already in music_dirs: {}",
+                                path.display()
+                            );
+                        } else {
+                            tracing::info!("Adding music directory: {}", path.display());
+                            self.config.music_dirs.push(path);
+                            self.save_config();
+                            // Re-register the Local provider with updated scan dirs.
+                            self.reinit_local_provider();
+                            // Trigger a library rescan.
+                            return cosmic::task::message(
+                                cosmic::Action::App(Message::ScanLibrary),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Directory picker failed: {e}");
+                    }
+                }
+            }
+
+            Message::RemoveMusicDir(index) => {
+                if index < self.config.music_dirs.len() {
+                    let removed = self.config.music_dirs.remove(index);
+                    tracing::info!("Removed music directory: {}", removed.display());
+                    self.save_config();
+                    // Re-register the Local provider with updated scan dirs.
+                    self.reinit_local_provider();
+                    // Trigger a library rescan.
+                    return cosmic::task::message(cosmic::Action::App(Message::ScanLibrary));
+                }
             }
 
             Message::UpdateConfig(config) => {
@@ -1793,6 +2423,62 @@ impl cosmic::Application for AppModel {
                 }
             }
 
+            // Task 109: Subsonic transcoding bitrate/format changes
+            Message::SubsonicTranscodingBitrate(i, bitrate) => {
+                if let Some(state) = self.subsonic_edit_states.get_mut(i) {
+                    state.transcoding_max_bitrate = bitrate;
+                }
+            }
+            Message::SubsonicTranscodingFormat(i, format) => {
+                if let Some(state) = self.subsonic_edit_states.get_mut(i) {
+                    state.transcoding_format = format;
+                }
+            }
+
+            // Task 113: Wire crossfade config change to player and MPD
+            Message::SetCrossfade(secs) => {
+                self.config.crossfade_duration_secs = secs;
+
+                // Apply to local backend
+                if let Some(player) = &mut self.player {
+                    player.set_crossfade(secs);
+                }
+
+                // Forward to MPD if active
+                if let Some(mpd) = self.active_mpd_provider() {
+                    let seconds = secs as u64;
+                    return self.dispatch_mpd(async move {
+                        mpd.send_crossfade(seconds)
+                            .map_err(|e| format!("crossfade: {e}"))
+                    });
+                }
+            }
+
+            // Task 114: Wire replay gain mode change to player and MPD
+            Message::SetReplayGainMode(mode) => {
+                self.config.replay_gain_mode = mode;
+
+                // Apply to local backend
+                if let Some(player) = &mut self.player {
+                    player.set_replay_gain_mode(mode);
+                }
+
+                // Forward to MPD if active — convert config type to mpd_client type
+                if let Some(mpd) = self.active_mpd_provider() {
+                    use mpd_client::commands::ReplayGainMode as MpdReplayGainMode;
+                    let mpd_mode = match mode {
+                        ReplayGainMode::Off => MpdReplayGainMode::Off,
+                        ReplayGainMode::Track => MpdReplayGainMode::Track,
+                        ReplayGainMode::Album => MpdReplayGainMode::Album,
+                        ReplayGainMode::Auto => MpdReplayGainMode::Auto,
+                    };
+                    return self.dispatch_mpd(async move {
+                        mpd.send_replay_gain_mode(mpd_mode)
+                            .map_err(|e| format!("replay_gain_mode: {e}"))
+                    });
+                }
+            }
+
             Message::ExpandNowPlaying => {
                 self.expand_target = Some(1.0);
                 self.expand_anim_start = Some(std::time::Instant::now());
@@ -1857,6 +2543,137 @@ impl cosmic::Application for AppModel {
                 // widget picks them up in its next prepare() call.
             }
 
+            // -- Playlists view --
+            Message::SelectPlaylist(idx) => {
+                self.selected_playlist = Some(idx);
+            }
+
+            Message::BackToPlaylistList => {
+                self.selected_playlist = None;
+            }
+
+            Message::CreatePlaylist(name) => {
+                if let Some(provider) = self.registry.active_shared() {
+                    match provider.create_playlist(&name) {
+                        Ok(_) => {
+                            self.new_playlist_name.clear();
+                            return self.load_playlists();
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to create playlist: {e}");
+                        }
+                    }
+                }
+            }
+
+            Message::DeletePlaylist(idx) => {
+                if let Some(playlist) = self.playlists.get(idx) {
+                    let id = playlist.id.clone();
+                    if let Some(provider) = self.registry.active_shared() {
+                        match provider.delete_playlist(&id) {
+                            Ok(()) => {
+                                self.selected_playlist = None;
+                                return self.load_playlists();
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to delete playlist: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+
+            Message::RenamePlaylist(idx, new_name) => {
+                if let Some(playlist) = self.playlists.get(idx) {
+                    let id = playlist.id.clone();
+                    if let Some(provider) = self.registry.active_shared() {
+                        match provider.rename_playlist(&id, &new_name) {
+                            Ok(()) => {
+                                return self.load_playlists();
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to rename playlist: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+
+            Message::PlayPlaylist(idx) => {
+                if let Some(playlist) = self.playlists.get(idx) {
+                    if !playlist.tracks.is_empty() {
+                        return self.play_track_list(playlist.tracks.clone(), 0);
+                    }
+                }
+            }
+
+            Message::PlayPlaylistTrack(pl_idx, track_idx) => {
+                if let Some(playlist) = self.playlists.get(pl_idx) {
+                    return self.play_track_list(playlist.tracks.clone(), track_idx);
+                }
+            }
+
+            Message::RemovePlaylistTrack(_pl_idx, _track_idx) => {
+                // Track removal from playlists requires provider-specific
+                // support that isn't uniformly available yet. Log and reload.
+                tracing::info!("Track removal from playlist not yet implemented");
+                return self.load_playlists();
+            }
+
+            Message::NewPlaylistNameChanged(name) => {
+                self.new_playlist_name = name;
+            }
+
+            Message::RenamePlaylistInput(_idx, _text) => {
+                // Rename input state is handled locally in the view for now.
+            }
+
+            Message::PlaylistsLoaded(playlists) => {
+                self.playlists = playlists;
+            }
+
+            // -- Genres view --
+            Message::SelectGenre(idx) => {
+                self.selected_genre = Some(idx);
+                // Load tracks for the selected genre
+                if let Some(genre_name) = self.all_genres.get(idx) {
+                    let genre = genre_name.clone();
+                    if let Some(provider) = self.registry.active_shared() {
+                        let tracks = provider
+                            .get_tracks_by_genre(&genre)
+                            .unwrap_or_default();
+                        self.genre_tracks = tracks;
+                    } else {
+                        // Fall back to filtering local tracks
+                        self.genre_tracks = self
+                            .all_tracks
+                            .iter()
+                            .filter(|t| t.genre.eq_ignore_ascii_case(&genre))
+                            .cloned()
+                            .collect();
+                    }
+                }
+            }
+
+            Message::BackToGenreGrid => {
+                self.selected_genre = None;
+                self.genre_tracks.clear();
+            }
+
+            Message::PlayGenreTrack(idx) => {
+                if !self.genre_tracks.is_empty() {
+                    return self.play_track_list(self.genre_tracks.clone(), idx);
+                }
+            }
+
+            Message::GenresLoaded(genres) => {
+                self.all_genres = genres;
+            }
+
+            Message::GenreTracksLoaded(tracks) => {
+                self.genre_tracks = tracks;
+            }
+
             Message::Quit => {
                 return cosmic::iced::exit();
             }
@@ -1870,6 +2687,8 @@ impl cosmic::Application for AppModel {
         // Reset sub-view selections when switching pages
         self.selected_album = None;
         self.selected_artist = None;
+        self.selected_playlist = None;
+        self.selected_genre = None;
 
         // Collapse expanded now-playing view when navigating
         if self.expand_progress > 0.0 || self.expand_target.is_some() {
@@ -1878,7 +2697,16 @@ impl cosmic::Application for AppModel {
             self.expand_anim_from = self.expand_progress;
         }
 
-        self.update_title()
+        // Lazy-load data for Playlists and Genres pages
+        let page = self.nav.active_data::<Page>().cloned();
+        let page_task = match page {
+            Some(Page::Playlists) => self.load_playlists(),
+            Some(Page::Genres) => self.load_genres(),
+            _ => Task::none(),
+        };
+
+        let title_task = self.update_title();
+        Task::batch([title_task, page_task])
     }
 }
 
@@ -1906,6 +2734,38 @@ impl AppModel {
             return None;
         }
         Some(player.mpd_backend_ref()?.client())
+    }
+
+    /// Get the active MPD provider (if the active provider is MPD).
+    ///
+    /// Used by Tasks 111-112 to wire shuffle/repeat toggles to MPD.
+    fn active_mpd_provider(&self) -> Option<Arc<MpdProvider>> {
+        let active_id = self.registry.active_id();
+        self.mpd_providers
+            .iter()
+            .find(|p| p.id() == active_id)
+            .cloned()
+    }
+
+    /// Load playlists from the active provider asynchronously.
+    ///
+    /// Used by Task 119 to refresh playlists after CRUD operations.
+    fn load_playlists(&self) -> Task<cosmic::Action<Message>> {
+        if let Some(provider) = self.registry.active_shared() {
+            cosmic::task::future(async move {
+                let playlists = tokio::task::spawn_blocking(move || {
+                    provider.list_playlists().unwrap_or_else(|e| {
+                        tracing::warn!("list_playlists failed: {e}");
+                        Vec::new()
+                    })
+                })
+                .await
+                .unwrap_or_default();
+                cosmic::Action::App(Message::PlaylistsLoaded(playlists))
+            })
+        } else {
+            Task::none()
+        }
     }
 
     /// Dispatch an async MPD command, mapping errors to `MpdCommandError`.
@@ -2329,6 +3189,29 @@ impl AppModel {
         }
     }
 
+    /// Re-initialize the Local provider with the current `config.music_dirs`.
+    ///
+    /// Removes the old Local provider from the registry, creates a new one
+    /// with the updated scan directories, and rebuilds the provider list.
+    fn reinit_local_provider(&mut self) {
+        self.registry
+            .remove_by_type(crate::provider::ProviderType::Local);
+
+        let db_path = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("lyra")
+            .join("library.db");
+
+        if let Ok(db) = LibraryDb::open(&db_path) {
+            let local = LocalProvider::new(db, self.config.music_dirs.clone());
+            self.registry.register(Arc::new(local));
+        } else {
+            tracing::error!("Failed to open library database for reinit");
+        }
+
+        self.rebuild_provider_list();
+    }
+
     /// Try to create an `MpdBackend` for the currently active provider.
     ///
     /// Returns `Some(MpdBackend)` if the active provider is an MPD provider
@@ -2355,6 +3238,16 @@ impl AppModel {
                 if let Some(ref buf) = self.pcm_buffer {
                     p.set_pcm_buffer(Arc::clone(buf));
                 }
+
+                // Apply saved EQ state to the new player's DSP.
+                let eq = p.eq_controller();
+                eq.set_enabled(self.config.equalizer_enabled);
+                if self.config.equalizer_bands.len() == 10 {
+                    let mut gains = [0.0_f32; 10];
+                    gains.copy_from_slice(&self.config.equalizer_bands);
+                    eq.set_all(&gains);
+                }
+
                 self.player = Some(p);
             }
             Err(e) => {
@@ -2536,6 +3429,25 @@ impl AppModel {
             }
         })
     }
+
+    /// Load genres from the active provider and dispatch a GenresLoaded message.
+    fn load_genres(&self) -> Task<cosmic::Action<Message>> {
+        if let Some(provider) = self.registry.active_shared() {
+            cosmic::task::future(async move {
+                let genres = tokio::task::spawn_blocking(move || {
+                    provider.list_genres().unwrap_or_else(|e| {
+                        tracing::debug!("list_genres: {e}");
+                        Vec::new()
+                    })
+                })
+                .await
+                .unwrap_or_default();
+                cosmic::Action::App(Message::GenresLoaded(genres))
+            })
+        } else {
+            Task::none()
+        }
+    }
 }
 
 /// Navigation pages.
@@ -2544,6 +3456,8 @@ pub enum Page {
     Albums,
     Artists,
     Songs,
+    Playlists,
+    Genres,
 }
 
 /// Context drawer pages.

@@ -81,35 +81,70 @@ impl LibraryDb {
     /// Run idempotent migration: add provider columns if missing.
     fn run_migration(&self) -> Result<(), String> {
         let has_provider = self.column_exists("tracks", "provider")?;
-        if has_provider {
-            return Ok(());
+        if !has_provider {
+            tracing::info!("Running database migration: adding provider columns");
+
+            self.conn
+                .execute_batch(
+                    "ALTER TABLE tracks ADD COLUMN provider TEXT NOT NULL DEFAULT 'local';
+                     ALTER TABLE tracks ADD COLUMN provider_track_id TEXT NOT NULL DEFAULT '';",
+                )
+                .map_err(|e| format!("Migration error (add columns): {e}"))?;
+
+            self.conn
+                .execute(
+                    "UPDATE tracks SET provider_track_id = path WHERE provider_track_id = ''",
+                    [],
+                )
+                .map_err(|e| format!("Migration error (backfill): {e}"))?;
+
+            self.conn
+                .execute_batch(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_provider_id
+                         ON tracks(provider, provider_track_id);
+                     CREATE INDEX IF NOT EXISTS idx_tracks_provider ON tracks(provider);",
+                )
+                .map_err(|e| format!("Migration error (indexes): {e}"))?;
+
+            tracing::info!("Database migration complete");
         }
 
-        tracing::info!("Running database migration: adding provider columns");
+        // --- v2 migration: favorites, ratings, replay gain, playlists ---
+        let has_favorite = self.column_exists("tracks", "is_favorite")?;
+        if !has_favorite {
+            tracing::info!(
+                "Running database migration v2: adding favorites, ratings, replay gain, playlists"
+            );
 
-        self.conn
-            .execute_batch(
-                "ALTER TABLE tracks ADD COLUMN provider TEXT NOT NULL DEFAULT 'local';
-                 ALTER TABLE tracks ADD COLUMN provider_track_id TEXT NOT NULL DEFAULT '';",
-            )
-            .map_err(|e| format!("Migration error (add columns): {e}"))?;
+            self.conn
+                .execute_batch(
+                    "ALTER TABLE tracks ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;
+                     ALTER TABLE tracks ADD COLUMN rating INTEGER;
+                     ALTER TABLE tracks ADD COLUMN rg_track_gain REAL;
+                     ALTER TABLE tracks ADD COLUMN rg_album_gain REAL;
 
-        self.conn
-            .execute(
-                "UPDATE tracks SET provider_track_id = path WHERE provider_track_id = ''",
-                [],
-            )
-            .map_err(|e| format!("Migration error (backfill): {e}"))?;
+                     CREATE TABLE IF NOT EXISTS playlists (
+                         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                         name       TEXT NOT NULL,
+                         created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                     );
 
-        self.conn
-            .execute_batch(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_provider_id
-                     ON tracks(provider, provider_track_id);
-                 CREATE INDEX IF NOT EXISTS idx_tracks_provider ON tracks(provider);",
-            )
-            .map_err(|e| format!("Migration error (indexes): {e}"))?;
+                     CREATE TABLE IF NOT EXISTS playlist_tracks (
+                         playlist_id INTEGER NOT NULL,
+                         track_id    INTEGER NOT NULL,
+                         position    INTEGER NOT NULL,
+                         FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+                         FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+                     );
 
-        tracing::info!("Database migration complete");
+                     CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist
+                         ON playlist_tracks(playlist_id, position);",
+                )
+                .map_err(|e| format!("Migration v2 error: {e}"))?;
+
+            tracing::info!("Database migration v2 complete");
+        }
+
         Ok(())
     }
 
@@ -243,7 +278,7 @@ impl LibraryDb {
             Some(p) => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
                  FROM tracks
                  WHERE provider = ?1
                  ORDER BY album_artist, album, disc_number, track_number"
@@ -253,7 +288,7 @@ impl LibraryDb {
             None => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
-                        provider, provider_track_id
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
                  FROM tracks
                  ORDER BY album_artist, album, disc_number, track_number"
                     .to_string(),
@@ -358,6 +393,16 @@ impl LibraryDb {
             .ok()
     }
 
+    /// Remove a single track by its file path.
+    ///
+    /// Used by the incremental filesystem-watcher scan to remove deleted files.
+    pub fn remove_track_by_path(&self, path: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM tracks WHERE path = ?1", params![path])
+            .map_err(|e| format!("Delete by path error: {e}"))?;
+        Ok(())
+    }
+
     /// Get track mtime to determine if rescan is needed.
     pub fn get_track_mtime(&self, path: &str) -> Option<i64> {
         self.conn
@@ -389,6 +434,406 @@ impl LibraryDb {
         }
     }
 
+    // ---- Search ----
+
+    /// Search tracks by matching query against title, artist, album, or genre.
+    pub fn search_tracks(&self, query: &str, provider: Option<&str>) -> Result<Vec<Track>, String> {
+        let pattern = format!("%{query}%");
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match provider {
+            Some(p) => (
+                "SELECT id, path, title, artist, album_artist, album, genre,
+                        track_number, disc_number, year, duration_ms, bitrate, sample_rate,
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                 FROM tracks
+                 WHERE provider = ?1
+                   AND (title LIKE ?2 OR artist LIKE ?2 OR album LIKE ?2 OR genre LIKE ?2)
+                 ORDER BY
+                   CASE WHEN title LIKE ?2 THEN 0 ELSE 1 END,
+                   title"
+                    .to_string(),
+                vec![
+                    Box::new(p.to_string()),
+                    Box::new(pattern),
+                ],
+            ),
+            None => (
+                "SELECT id, path, title, artist, album_artist, album, genre,
+                        track_number, disc_number, year, duration_ms, bitrate, sample_rate,
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                 FROM tracks
+                 WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1 OR genre LIKE ?1
+                 ORDER BY
+                   CASE WHEN title LIKE ?1 THEN 0 ELSE 1 END,
+                   title"
+                    .to_string(),
+                vec![Box::new(pattern)],
+            ),
+        };
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| format!("Search query error: {e}"))?;
+
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let tracks = stmt
+            .query_map(params_ref.as_slice(), Self::row_to_track)
+            .map_err(|e| format!("Search query error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(tracks)
+    }
+
+    // ---- Playlists ----
+
+    /// List all playlists.
+    pub fn list_playlists(&self) -> Result<Vec<super::Playlist>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT p.id, p.name,
+                        COUNT(pt.track_id) as track_count,
+                        COALESCE(SUM(t.duration_ms), 0) as total_duration_ms
+                 FROM playlists p
+                 LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
+                 LEFT JOIN tracks t ON t.id = pt.track_id
+                 GROUP BY p.id
+                 ORDER BY p.name",
+            )
+            .map_err(|e| format!("List playlists error: {e}"))?;
+
+        let playlists = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let name: String = row.get(1)?;
+                let track_count: u32 = row.get(2)?;
+                let total_ms: i64 = row.get(3)?;
+                Ok(super::Playlist {
+                    id: id.to_string(),
+                    name,
+                    tracks: Vec::new(),
+                    track_count,
+                    total_duration: Duration::from_millis(total_ms as u64),
+                })
+            })
+            .map_err(|e| format!("List playlists error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(playlists)
+    }
+
+    /// Get a playlist with its tracks.
+    pub fn get_playlist(&self, playlist_id: &str) -> Result<super::Playlist, String> {
+        let id: i64 = playlist_id
+            .parse()
+            .map_err(|_| "Invalid playlist ID".to_string())?;
+
+        let (name, created_at): (String, String) = self
+            .conn
+            .query_row(
+                "SELECT name, created_at FROM playlists WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| format!("Get playlist error: {e}"))?;
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT t.id, t.path, t.title, t.artist, t.album_artist, t.album, t.genre,
+                        t.track_number, t.disc_number, t.year, t.duration_ms, t.bitrate, t.sample_rate,
+                        t.provider, t.provider_track_id, t.is_favorite, t.rating, t.rg_track_gain, t.rg_album_gain
+                 FROM playlist_tracks pt
+                 JOIN tracks t ON t.id = pt.track_id
+                 WHERE pt.playlist_id = ?1
+                 ORDER BY pt.position",
+            )
+            .map_err(|e| format!("Get playlist tracks error: {e}"))?;
+
+        let tracks: Vec<Track> = stmt
+            .query_map(params![id], Self::row_to_track)
+            .map_err(|e| format!("Get playlist tracks error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let total_duration = tracks.iter().map(|t| t.duration).sum();
+        let track_count = tracks.len() as u32;
+        let _ = created_at; // available if needed later
+
+        Ok(super::Playlist {
+            id: playlist_id.to_string(),
+            name,
+            tracks,
+            track_count,
+            total_duration,
+        })
+    }
+
+    /// Create a new playlist.
+    pub fn create_playlist(&self, name: &str) -> Result<super::Playlist, String> {
+        self.conn
+            .execute("INSERT INTO playlists (name) VALUES (?1)", params![name])
+            .map_err(|e| format!("Create playlist error: {e}"))?;
+
+        let id = self.conn.last_insert_rowid();
+        Ok(super::Playlist {
+            id: id.to_string(),
+            name: name.to_string(),
+            tracks: Vec::new(),
+            track_count: 0,
+            total_duration: Duration::ZERO,
+        })
+    }
+
+    /// Delete a playlist.
+    pub fn delete_playlist(&self, playlist_id: &str) -> Result<(), String> {
+        let id: i64 = playlist_id
+            .parse()
+            .map_err(|_| "Invalid playlist ID".to_string())?;
+
+        // CASCADE handles playlist_tracks deletion.
+        self.conn
+            .execute("DELETE FROM playlists WHERE id = ?1", params![id])
+            .map_err(|e| format!("Delete playlist error: {e}"))?;
+        Ok(())
+    }
+
+    /// Rename a playlist.
+    pub fn rename_playlist(&self, playlist_id: &str, new_name: &str) -> Result<(), String> {
+        let id: i64 = playlist_id
+            .parse()
+            .map_err(|_| "Invalid playlist ID".to_string())?;
+
+        self.conn
+            .execute(
+                "UPDATE playlists SET name = ?1 WHERE id = ?2",
+                params![new_name, id],
+            )
+            .map_err(|e| format!("Rename playlist error: {e}"))?;
+        Ok(())
+    }
+
+    /// Add tracks to a playlist by their IDs.
+    pub fn add_to_playlist(&self, playlist_id: &str, track_ids: &[String]) -> Result<(), String> {
+        let pid: i64 = playlist_id
+            .parse()
+            .map_err(|_| "Invalid playlist ID".to_string())?;
+
+        // Get current max position.
+        let max_pos: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) FROM playlist_tracks WHERE playlist_id = ?1",
+                params![pid],
+                |row| row.get(0),
+            )
+            .unwrap_or(-1);
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+            )
+            .map_err(|e| format!("Add to playlist prepare error: {e}"))?;
+
+        for (i, tid) in track_ids.iter().enumerate() {
+            let track_id: i64 = tid
+                .parse()
+                .map_err(|_| format!("Invalid track ID: {tid}"))?;
+            stmt.execute(params![pid, track_id, max_pos + 1 + i as i64])
+                .map_err(|e| format!("Add to playlist error: {e}"))?;
+        }
+        Ok(())
+    }
+
+    // ---- Favorites and Ratings ----
+
+    /// Toggle the favorite status of a track. Returns the new status.
+    pub fn toggle_favorite(&self, track_id: i64) -> Result<bool, String> {
+        self.conn
+            .execute(
+                "UPDATE tracks SET is_favorite = CASE WHEN is_favorite = 0 THEN 1 ELSE 0 END
+                 WHERE id = ?1",
+                params![track_id],
+            )
+            .map_err(|e| format!("Toggle favorite error: {e}"))?;
+
+        let new_val: bool = self
+            .conn
+            .query_row(
+                "SELECT is_favorite FROM tracks WHERE id = ?1",
+                params![track_id],
+                |row| row.get::<_, i32>(0).map(|v| v != 0),
+            )
+            .map_err(|e| format!("Toggle favorite read error: {e}"))?;
+
+        Ok(new_val)
+    }
+
+    /// Check if a track is a favorite.
+    pub fn is_favorite(&self, track_id: i64) -> Result<bool, String> {
+        self.conn
+            .query_row(
+                "SELECT is_favorite FROM tracks WHERE id = ?1",
+                params![track_id],
+                |row| row.get::<_, i32>(0).map(|v| v != 0),
+            )
+            .map_err(|e| format!("Is favorite error: {e}"))
+    }
+
+    /// Set a rating (1-5) for a track. Pass 0 to clear.
+    pub fn set_rating(&self, track_id: i64, rating: u8) -> Result<(), String> {
+        let val: Option<u8> = if rating == 0 { None } else { Some(rating) };
+        self.conn
+            .execute(
+                "UPDATE tracks SET rating = ?1 WHERE id = ?2",
+                params![val, track_id],
+            )
+            .map_err(|e| format!("Set rating error: {e}"))?;
+        Ok(())
+    }
+
+    /// Get the rating for a track.
+    pub fn get_rating(&self, track_id: i64) -> Result<Option<u8>, String> {
+        self.conn
+            .query_row(
+                "SELECT rating FROM tracks WHERE id = ?1",
+                params![track_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Get rating error: {e}"))
+    }
+
+    /// List all favorite tracks.
+    pub fn list_favorites(&self, provider: Option<&str>) -> Result<Vec<Track>, String> {
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match provider {
+            Some(p) => (
+                "SELECT id, path, title, artist, album_artist, album, genre,
+                        track_number, disc_number, year, duration_ms, bitrate, sample_rate,
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                 FROM tracks
+                 WHERE provider = ?1 AND is_favorite = 1
+                 ORDER BY title"
+                    .to_string(),
+                vec![Box::new(p.to_string())],
+            ),
+            None => (
+                "SELECT id, path, title, artist, album_artist, album, genre,
+                        track_number, disc_number, year, duration_ms, bitrate, sample_rate,
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                 FROM tracks
+                 WHERE is_favorite = 1
+                 ORDER BY title"
+                    .to_string(),
+                vec![],
+            ),
+        };
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| format!("List favorites error: {e}"))?;
+
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let tracks = stmt
+            .query_map(params_ref.as_slice(), Self::row_to_track)
+            .map_err(|e| format!("List favorites error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(tracks)
+    }
+
+    // ---- Genres ----
+
+    /// List all distinct genres.
+    pub fn list_genres(&self, provider: Option<&str>) -> Result<Vec<String>, String> {
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match provider {
+            Some(p) => (
+                "SELECT DISTINCT genre FROM tracks
+                 WHERE provider = ?1 AND genre != ''
+                 ORDER BY genre"
+                    .to_string(),
+                vec![Box::new(p.to_string())],
+            ),
+            None => (
+                "SELECT DISTINCT genre FROM tracks
+                 WHERE genre != ''
+                 ORDER BY genre"
+                    .to_string(),
+                vec![],
+            ),
+        };
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| format!("List genres error: {e}"))?;
+
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let genres = stmt
+            .query_map(params_ref.as_slice(), |row| row.get(0))
+            .map_err(|e| format!("List genres error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(genres)
+    }
+
+    /// Get all tracks matching a genre.
+    pub fn tracks_by_genre(
+        &self,
+        genre: &str,
+        provider: Option<&str>,
+    ) -> Result<Vec<Track>, String> {
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match provider {
+            Some(p) => (
+                "SELECT id, path, title, artist, album_artist, album, genre,
+                        track_number, disc_number, year, duration_ms, bitrate, sample_rate,
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                 FROM tracks
+                 WHERE provider = ?1 AND genre = ?2
+                 ORDER BY album_artist, album, disc_number, track_number"
+                    .to_string(),
+                vec![Box::new(p.to_string()), Box::new(genre.to_string())],
+            ),
+            None => (
+                "SELECT id, path, title, artist, album_artist, album, genre,
+                        track_number, disc_number, year, duration_ms, bitrate, sample_rate,
+                        provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
+                 FROM tracks
+                 WHERE genre = ?1
+                 ORDER BY album_artist, album, disc_number, track_number"
+                    .to_string(),
+                vec![Box::new(genre.to_string())],
+            ),
+        };
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| format!("Tracks by genre error: {e}"))?;
+
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let tracks = stmt
+            .query_map(params_ref.as_slice(), Self::row_to_track)
+            .map_err(|e| format!("Tracks by genre error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(tracks)
+    }
+
     /// Map a database row to a Track struct.
     fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         let path_str: String = row.get(1)?;
@@ -408,6 +853,10 @@ impl LibraryDb {
             sample_rate: row.get(12)?,
             provider_id: Arc::from(row.get::<_, String>(13)?),
             source_uri: row.get(14)?,
+            is_favorite: row.get::<_, i32>(15).unwrap_or(0) != 0,
+            rating: row.get::<_, Option<u8>>(16).unwrap_or(None),
+            rg_track_gain: row.get::<_, Option<f32>>(17).unwrap_or(None),
+            rg_album_gain: row.get::<_, Option<f32>>(18).unwrap_or(None),
         })
     }
 }

@@ -6,14 +6,21 @@
 //! library, controls remote playback, and receives real-time idle events.
 
 use super::{MusicProvider, ProviderError, ProviderType};
-use crate::library::{Album, Artist, CoverSource, Track, TrackSource};
+use crate::library::{Album, Artist, CoverSource, Playlist, Track, TrackSource};
 use mpd_client::client::{ConnectWithPasswordError, ConnectionEvents};
-use mpd_client::commands::{self, Find, List, Status, CurrentSong, Update};
-use mpd_client::filter::Filter;
+use mpd_client::commands::{
+    self, Find, List, Status, CurrentSong, Update,
+    GetPlaylists, GetPlaylist, SaveQueueAsPlaylist, DeletePlaylist, AddToPlaylist,
+    SetRandom, SetRepeat, SetSingle, Crossfade, SetReplayGainMode,
+    StickerGet, StickerSet, StickerDelete, StickerFind,
+    SingleMode, ReplayGainMode,
+};
+use mpd_client::filter::{Filter, Operator};
 use mpd_client::responses;
 use mpd_client::tag::Tag;
 use mpd_client::Client;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -53,12 +60,37 @@ impl Default for MpdConfig {
 
 impl From<crate::config::MpdConfigEntry> for MpdConfig {
     fn from(entry: crate::config::MpdConfigEntry) -> Self {
+        // Task 85/86: Retrieve password from keyring when password_in_keyring is set.
+        let password = if entry.password_in_keyring {
+            match crate::credentials::retrieve_password(&entry.id) {
+                Ok(Some(pw)) => Some(pw),
+                Ok(None) => {
+                    // Task 86: password_in_keyring is true but no keyring entry found.
+                    tracing::error!(
+                        "MPD provider '{}': password marked as stored in keyring but not found. \
+                         Please re-enter the password in provider settings.",
+                        entry.id
+                    );
+                    None
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "MPD provider '{}': failed to retrieve password from keyring: {e}",
+                        entry.id
+                    );
+                    None
+                }
+            }
+        } else {
+            entry.password
+        };
+
         Self {
             id: entry.id,
             name: entry.name,
             host: entry.host,
             port: entry.port,
-            password: entry.password,
+            password,
         }
     }
 }
@@ -83,6 +115,8 @@ pub struct MpdProvider {
     /// Command connection — used for browse, search, playback, etc.
     client: Arc<Mutex<Option<Client>>>,
     runtime: tokio::runtime::Handle,
+    /// Whether MPD stickers are supported (detected on connect).
+    stickers_supported: AtomicBool,
 }
 
 impl MpdProvider {
@@ -94,6 +128,7 @@ impl MpdProvider {
             provider_id,
             client: Arc::new(Mutex::new(None)),
             runtime,
+            stickers_supported: AtomicBool::new(false),
         }
     }
 
@@ -143,8 +178,25 @@ impl MpdProvider {
     /// Must be called after `connect_idle()` succeeds. The `ConnectionEvents`
     /// from this connection is intentionally dropped — we don't need idle
     /// events from the command connection.
+    ///
+    /// Also probes sticker support by attempting a harmless `sticker get`.
     pub async fn connect_command(&self) -> Result<(), ProviderError> {
         let (client, _events) = self.open_connection().await?;
+
+        // Probe sticker support: try a harmless sticker get on a nonexistent URI.
+        // If the server returns an error about unknown command, stickers are disabled.
+        let stickers_ok = match client.command(StickerGet::new("", "probe")).await {
+            Ok(_) => true,
+            Err(e) => {
+                let msg = format!("{e}");
+                // "unknown command" means stickers disabled; any other error
+                // (e.g., "no such sticker") means the command itself is supported.
+                !msg.contains("unknown command")
+            }
+        };
+        self.stickers_supported.store(stickers_ok, Ordering::Relaxed);
+        tracing::info!("MPD sticker support: {stickers_ok}");
+
         let mut guard = self.client.lock().await;
         *guard = Some(client);
         Ok(())
@@ -306,7 +358,74 @@ impl MpdProvider {
             sample_rate: 0,
             provider_id: Arc::clone(&self.provider_id),
             source_uri: uri,
+            is_favorite: false,
+            rating: None,
+            rg_track_gain: None,
+            rg_album_gain: None,
         }
+    }
+
+    // --- MPD state control methods (Tasks 56-59) ---
+
+    /// Send `random 0/1` to MPD.
+    pub fn send_random(&self, enabled: bool) -> Result<(), ProviderError> {
+        self.block_on(async {
+            let client = self.get_client().await?;
+            client
+                .command(SetRandom(enabled))
+                .await
+                .map_err(mpd_err("random"))
+        })
+    }
+
+    /// Send `repeat 0/1` to MPD.
+    pub fn send_repeat(&self, enabled: bool) -> Result<(), ProviderError> {
+        self.block_on(async {
+            let client = self.get_client().await?;
+            client
+                .command(SetRepeat(enabled))
+                .await
+                .map_err(mpd_err("repeat"))
+        })
+    }
+
+    /// Send `single 0/1/oneshot` to MPD.
+    pub fn send_single(&self, mode: SingleMode) -> Result<(), ProviderError> {
+        self.block_on(async {
+            let client = self.get_client().await?;
+            client
+                .command(SetSingle(mode))
+                .await
+                .map_err(mpd_err("single"))
+        })
+    }
+
+    /// Send `crossfade <seconds>` to MPD.
+    pub fn send_crossfade(&self, seconds: u64) -> Result<(), ProviderError> {
+        self.block_on(async {
+            let client = self.get_client().await?;
+            client
+                .command(Crossfade(Duration::from_secs(seconds)))
+                .await
+                .map_err(mpd_err("crossfade"))
+        })
+    }
+
+    /// Send `replay_gain_mode` to MPD.
+    pub fn send_replay_gain_mode(&self, mode: ReplayGainMode) -> Result<(), ProviderError> {
+        self.block_on(async {
+            let client = self.get_client().await?;
+            client
+                .command(SetReplayGainMode(mode))
+                .await
+                .map_err(mpd_err("replay_gain_mode"))
+        })
+    }
+
+    /// Read MPD status (sync). Returns the parsed status for reading
+    /// `random`, `repeat`, `single`, `crossfade`, etc.
+    pub fn status(&self) -> Result<responses::Status, ProviderError> {
+        self.block_on(self.status_async())
     }
 }
 
@@ -422,10 +541,9 @@ impl MusicProvider for MpdProvider {
         self.block_on(async {
             let client = self.get_client().await?;
 
-            // Search by title using the Find command with a tag filter.
-            // The mpd_client typed API doesn't have a "search any" command,
-            // so we search by title as a reasonable approximation.
-            let filter = Filter::tag(Tag::Title, &query_owned);
+            // Use the `any` pseudo-tag with `contains` operator to search
+            // across all metadata fields (Title, Artist, Album, etc.).
+            let filter = Filter::new(Tag::any(), Operator::Contain, &query_owned);
             let songs = client
                 .command(Find::new(filter))
                 .await
@@ -461,7 +579,7 @@ impl MusicProvider for MpdProvider {
         })
     }
 
-    fn get_lyrics(&self, _track: &Track) -> Result<Option<String>, ProviderError> {
+    fn get_lyrics(&self, _track: &Track) -> Result<Option<crate::library::Lyrics>, ProviderError> {
         // MPD doesn't serve lyrics; the app falls back to LRCLIB.
         Ok(None)
     }
@@ -475,6 +593,258 @@ impl MusicProvider for MpdProvider {
                 .await
                 .map_err(mpd_err("update"))?;
             Ok(0)
+        })
+    }
+
+    // --- Playlist methods (Tasks 47-51) ---
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn list_playlists(&self) -> Result<Vec<Playlist>, ProviderError> {
+        self.block_on(async {
+            let client = self.get_client().await?;
+            let playlists = client
+                .command(GetPlaylists)
+                .await
+                .map_err(mpd_err("listplaylists"))?;
+
+            Ok(playlists
+                .into_iter()
+                .map(|p| Playlist {
+                    id: p.name.clone(),
+                    name: p.name,
+                    tracks: Vec::new(),
+                    track_count: 0,
+                    total_duration: Duration::ZERO,
+                })
+                .collect())
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn get_playlist(&self, id: &str) -> Result<Playlist, ProviderError> {
+        let id_owned = id.to_string();
+        self.block_on(async {
+            let client = self.get_client().await?;
+            let songs = client
+                .command(GetPlaylist(&id_owned))
+                .await
+                .map_err(mpd_err("listplaylistinfo"))?;
+
+            let tracks: Vec<Track> = songs.iter().map(|s| self.song_to_track(s)).collect();
+            let total_duration = tracks.iter().map(|t| t.duration).sum();
+            let track_count = tracks.len() as u32;
+
+            Ok(Playlist {
+                id: id_owned.clone(),
+                name: id_owned,
+                tracks,
+                track_count,
+                total_duration,
+            })
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn create_playlist(&self, name: &str) -> Result<Playlist, ProviderError> {
+        let name_owned = name.to_string();
+        self.block_on(async {
+            let client = self.get_client().await?;
+            // MPD `save` saves the current queue as a playlist.
+            // We create an empty playlist by saving and then clearing it.
+            client
+                .command(SaveQueueAsPlaylist(&name_owned))
+                .await
+                .map_err(mpd_err("save"))?;
+
+            Ok(Playlist {
+                id: name_owned.clone(),
+                name: name_owned,
+                tracks: Vec::new(),
+                track_count: 0,
+                total_duration: Duration::ZERO,
+            })
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn delete_playlist(&self, id: &str) -> Result<(), ProviderError> {
+        let id_owned = id.to_string();
+        self.block_on(async {
+            let client = self.get_client().await?;
+            client
+                .command(DeletePlaylist(&id_owned))
+                .await
+                .map_err(mpd_err("rm"))
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn add_to_playlist(&self, playlist_id: &str, track_ids: &[String]) -> Result<(), ProviderError> {
+        let playlist_owned = playlist_id.to_string();
+        let uris: Vec<String> = track_ids.to_vec();
+        self.block_on(async {
+            let client = self.get_client().await?;
+            for uri in &uris {
+                client
+                    .command(AddToPlaylist::new(&playlist_owned, uri))
+                    .await
+                    .map_err(mpd_err("playlistadd"))?;
+            }
+            Ok(())
+        })
+    }
+
+    // --- Favorites and ratings via stickers (Tasks 52-53) ---
+
+    fn toggle_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
+        if !self.stickers_supported.load(Ordering::Relaxed) {
+            return Err(ProviderError::NotSupported(
+                "MPD stickers not enabled".into(),
+            ));
+        }
+        let uri = track_id.to_string();
+        self.block_on(async {
+            let client = self.get_client().await?;
+            // Check current favorite state
+            let is_fav = match client.command(StickerGet::new(&uri, "favorite")).await {
+                Ok(s) => s.value == "1",
+                Err(_) => false,
+            };
+
+            if is_fav {
+                // Remove favorite sticker
+                let _ = client
+                    .command(StickerDelete::new(&uri, "favorite"))
+                    .await;
+                Ok(false)
+            } else {
+                client
+                    .command(StickerSet::new(&uri, "favorite", "1"))
+                    .await
+                    .map_err(mpd_err("sticker set favorite"))?;
+                Ok(true)
+            }
+        })
+    }
+
+    fn is_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
+        if !self.stickers_supported.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let uri = track_id.to_string();
+        self.block_on(async {
+            let client = self.get_client().await?;
+            match client.command(StickerGet::new(&uri, "favorite")).await {
+                Ok(s) => Ok(s.value == "1"),
+                Err(_) => Ok(false),
+            }
+        })
+    }
+
+    fn set_rating(&self, track_id: &str, rating: u8) -> Result<(), ProviderError> {
+        if !self.stickers_supported.load(Ordering::Relaxed) {
+            return Err(ProviderError::NotSupported(
+                "MPD stickers not enabled".into(),
+            ));
+        }
+        let uri = track_id.to_string();
+        self.block_on(async {
+            let client = self.get_client().await?;
+            if rating == 0 {
+                // Clear rating
+                let _ = client
+                    .command(StickerDelete::new(&uri, "rating"))
+                    .await;
+                Ok(())
+            } else {
+                let val = rating.min(5).to_string();
+                client
+                    .command(StickerSet::new(&uri, "rating", &val))
+                    .await
+                    .map_err(mpd_err("sticker set rating"))
+            }
+        })
+    }
+
+    fn get_rating(&self, track_id: &str) -> Result<Option<u8>, ProviderError> {
+        if !self.stickers_supported.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let uri = track_id.to_string();
+        self.block_on(async {
+            let client = self.get_client().await?;
+            match client.command(StickerGet::new(&uri, "rating")).await {
+                Ok(s) => Ok(s.value.parse::<u8>().ok()),
+                Err(_) => Ok(None),
+            }
+        })
+    }
+
+    fn list_favorites(&self) -> Result<Vec<Track>, ProviderError> {
+        if !self.stickers_supported.load(Ordering::Relaxed) {
+            return Err(ProviderError::NotSupported(
+                "MPD stickers not enabled".into(),
+            ));
+        }
+        self.block_on(async {
+            let client = self.get_client().await?;
+            // Find all songs with favorite=1 sticker
+            let results = client
+                .command(StickerFind::new("", "favorite").where_eq("1"))
+                .await
+                .map_err(mpd_err("sticker find favorite"))?;
+
+            let mut tracks = Vec::with_capacity(results.value.len());
+            for (uri, _value) in &results.value {
+                // Look up each song's metadata
+                let filter = Filter::new(
+                    Tag::Other("file".into()),
+                    Operator::Equal,
+                    uri.as_str(),
+                );
+                if let Ok(songs) = client.command(Find::new(filter)).await {
+                    for song in &songs {
+                        let mut track = self.song_to_track(song);
+                        track.is_favorite = true;
+                        tracks.push(track);
+                    }
+                }
+            }
+            Ok(tracks)
+        })
+    }
+
+    // --- Genre methods (Tasks 54-55) ---
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn list_genres(&self) -> Result<Vec<String>, ProviderError> {
+        self.block_on(async {
+            let client = self.get_client().await?;
+            let genre_list = client
+                .command(List::new(Tag::Genre))
+                .await
+                .map_err(mpd_err("list genre"))?;
+
+            Ok(genre_list
+                .into_iter()
+                .filter(|g| !g.is_empty())
+                .collect())
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn get_tracks_by_genre(&self, genre: &str) -> Result<Vec<Track>, ProviderError> {
+        let genre_owned = genre.to_string();
+        self.block_on(async {
+            let client = self.get_client().await?;
+            let filter = Filter::tag(Tag::Genre, &genre_owned);
+            let songs = client
+                .command(Find::new(filter))
+                .await
+                .map_err(mpd_err("find genre"))?;
+
+            let tracks: Vec<Track> = songs.iter().map(|s| self.song_to_track(s)).collect();
+            Ok(tracks)
         })
     }
 }
