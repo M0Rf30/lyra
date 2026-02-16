@@ -1,6 +1,6 @@
 # Transparent/Empty Second Window Appears Alongside Main Application Window
 
-**Status**: Open  
+**Status**: Reported to upstream (https://github.com/pop-os/libcosmic/issues/1125)  
 **Affects**: Lyra music player on COSMIC Desktop Environment  
 **Suspected Component**: libcosmic/iced-wgpu or cosmic-comp  
 
