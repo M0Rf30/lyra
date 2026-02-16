@@ -3320,7 +3320,10 @@ impl AppModel {
                 // Re-wire PCM buffer for visualizer
                 #[cfg(feature = "visualizer")]
                 if let Some(ref buf) = self.pcm_buffer {
+                    tracing::debug!("Reconnecting PCM buffer to new player instance");
                     p.set_pcm_buffer(Arc::clone(buf));
+                } else {
+                    tracing::warn!("PCM buffer is None - visualizer will not receive audio");
                 }
 
                 // Apply saved EQ state to the new player's DSP.

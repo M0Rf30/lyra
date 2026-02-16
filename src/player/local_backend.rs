@@ -241,6 +241,14 @@ impl LocalBackend {
         let started_at = Arc::clone(&self.play_started_at);
         let http_client = self.http_client.clone();
 
+        // Capture PCM buffer and pipeline parameters for the background thread
+        #[cfg(feature = "visualizer")]
+        let pcm_buffer = self.pcm_buffer.clone();
+        let eq_coeffs = Arc::clone(&self.eq_coeffs);
+        let eq_bypass = Arc::clone(&self.eq_bypass);
+        let track_finished = Arc::clone(&self.track_finished);
+        let replay_gain_db = self.replay_gain_db;
+
         std::thread::spawn(move || {
             let result = (|| -> Result<(), String> {
                 let reader = HttpRangeReader::new(url, Some(http_client))?;
@@ -260,8 +268,41 @@ impl LocalBackend {
 
                 let duration = source.total_duration().unwrap_or(Duration::ZERO);
 
+                // Build the full source pipeline (ReplayGain → EQ → TrackBoundary → TappedSource)
+                // to match local file playback behavior and enable visualizer audio feed.
+                let amplified: Box<dyn Source<Item = f32> + Send> =
+                    if let Some(gain_db) = replay_gain_db {
+                        let linear = 10.0_f32.powf(gain_db / 20.0);
+                        Box::new(source.amplify(linear))
+                    } else {
+                        Box::new(source)
+                    };
+
+                let eq_source = EqSource::new(amplified, eq_coeffs, eq_bypass);
+                let boundary_source = TrackBoundarySource::new(eq_source, track_finished);
+
                 if let Ok(sink) = sink_arc.lock() {
-                    sink.append(source);
+                    // Apply visualizer tapping if enabled
+                    #[cfg(feature = "visualizer")]
+                    {
+                        if let Some(ref pcm_buf) = pcm_buffer {
+                            tracing::debug!(
+                                "Creating TappedSource for HTTP stream visualizer audio feed"
+                            );
+                            let tapped = TappedSource::new(boundary_source, Arc::clone(pcm_buf));
+                            sink.append(tapped);
+                        } else {
+                            tracing::debug!(
+                                "No PCM buffer for HTTP stream - visualizer audio tapping disabled"
+                            );
+                            sink.append(boundary_source);
+                        }
+                    }
+                    #[cfg(not(feature = "visualizer"))]
+                    {
+                        sink.append(boundary_source);
+                    }
+
                     sink.play();
                 }
 
@@ -367,9 +408,11 @@ impl LocalBackend {
         #[cfg(feature = "visualizer")]
         {
             if let Some(ref pcm_buf) = self.pcm_buffer {
+                tracing::debug!("Creating TappedSource for visualizer audio feed");
                 let tapped = TappedSource::new(boundary_source, Arc::clone(pcm_buf));
                 sink.append(tapped);
             } else {
+                tracing::debug!("No PCM buffer set - visualizer audio tapping disabled");
                 sink.append(boundary_source);
             }
         }
@@ -641,6 +684,16 @@ where
         // Copy to shared buffer (best-effort, don't block audio on lock contention)
         if let Ok(mut buf) = self.pcm_buffer.try_lock() {
             buf.write(&[sample]);
+        } else {
+            // Log occasional lock contention (debug build only)
+            #[cfg(debug_assertions)]
+            {
+                static WARN_COUNTER: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                if WARN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 48000 == 0 {
+                    tracing::debug!("PCM buffer lock contention (visualizer may be lagging)");
+                }
+            }
         }
         Some(sample)
     }
