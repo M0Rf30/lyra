@@ -89,6 +89,11 @@ pub struct AppModel {
     cover_images: HashMap<String, widget::icon::Handle>,
     artist_avatars: HashMap<String, widget::icon::Handle>,
 
+    // Keyboard input state
+    /// Tracks whether any text input field currently has keyboard focus.
+    /// When true, space bar should type a space character instead of toggling playback.
+    text_input_focused: bool,
+
     // Lyrics
     lyrics_text: Option<Lyrics>,
     lyrics_loading: bool,
@@ -141,6 +146,9 @@ pub enum Message {
     // Navigation / chrome
     LaunchUrl(String),
     ToggleContextPage(ContextPage),
+    /// Tracks text input focus state for keyboard shortcuts.
+    /// When true, text input has focus; when false, input lost focus.
+    TextInputFocused(bool),
     // Library
     ScanLibrary,
     LibraryScanComplete(usize),
@@ -627,6 +635,7 @@ impl cosmic::Application for AppModel {
             genre_tracks: Vec::new(),
             cover_images: HashMap::new(),
             artist_avatars: HashMap::new(),
+            text_input_focused: false,
             lyrics_text: None,
             lyrics_loading: false,
             eq_preset: None,
@@ -1471,6 +1480,31 @@ impl cosmic::Application for AppModel {
             ));
         }
 
+        // Space bar to toggle playback (unless captured by a text input widget)
+        subs.push(cosmic::iced::event::listen_with(
+            |event, status, _id| {
+                if let cosmic::iced::Event::Keyboard(
+                    cosmic::iced::keyboard::Event::KeyPressed {
+                        key: cosmic::iced::keyboard::Key::Named(
+                            cosmic::iced::keyboard::key::Named::Space,
+                        ),
+                        modifiers,
+                        ..
+                    },
+                ) = event
+                {
+                    // Only toggle playback if:
+                    // 1. Space key pressed
+                    // 2. No modifier keys (Ctrl, Shift, Alt, etc.)
+                    // 3. Event not captured by a widget (e.g., text input)
+                    if modifiers.is_empty() && status != cosmic::iced::event::Status::Captured {
+                        return Some(Message::TogglePlayback);
+                    }
+                }
+                None
+            },
+        ));
+
         Subscription::batch(subs)
     }
 
@@ -1487,6 +1521,10 @@ impl cosmic::Application for AppModel {
                     self.context_page = page;
                     self.core.window.show_context = true;
                 }
+            }
+
+            Message::TextInputFocused(focused) => {
+                self.text_input_focused = focused;
             }
 
             // -- Library --
