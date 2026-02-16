@@ -3,6 +3,7 @@
 //! Audio playback engine with pluggable backend support.
 
 pub mod backend;
+pub mod eq_presets;
 pub mod eq_source;
 pub mod equalizer;
 mod http_range_reader;

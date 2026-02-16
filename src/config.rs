@@ -140,6 +140,10 @@ pub struct Config {
     pub equalizer_bands: Vec<f32>,
     /// Whether the equalizer is enabled.
     pub equalizer_enabled: bool,
+    /// Preamp gain in dB (-20.0 to +10.0), applied before EQ bands.
+    pub equalizer_preamp: f32,
+    /// Name of the currently active EQ preset (empty = no preset selected).
+    pub active_eq_preset_name: String,
     /// Last active view ("albums", "artists", "songs", "playlists").
     pub last_view: String,
     /// Configured MPD server connections.
@@ -169,6 +173,8 @@ impl Default for Config {
             // 10-band EQ: 31Hz, 62Hz, 125Hz, 250Hz, 500Hz, 1kHz, 2kHz, 4kHz, 8kHz, 16kHz
             equalizer_bands: vec![0.0; 10],
             equalizer_enabled: false,
+            equalizer_preamp: 0.0,
+            active_eq_preset_name: String::new(),
             last_view: "albums".to_string(),
             mpd_servers: Vec::new(),
             subsonic_servers: Vec::new(),

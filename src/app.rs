@@ -100,6 +100,19 @@ pub struct AppModel {
 
     // Equalizer
     eq_preset: Option<crate::player::equalizer::EqPreset>,
+    preset_manager: crate::player::eq_presets::EqPresetManager,
+    all_presets: Vec<crate::player::equalizer::EqPresetData>,
+    active_preset_name: Option<String>,
+    eq_dirty: bool,
+    save_as_name: String,
+
+    // AutoEQ
+    autoeq_manager: Option<crate::autoeq::AutoEQManager>,
+    /// AutoEQ profiles loaded from GitHub, available in the preset dropdown.
+    autoeq_profiles: Vec<crate::autoeq::AutoEQProfileMetadata>,
+    autoeq_loading: bool,
+    /// Current search query for filtering AutoEQ profiles in the dropdown.
+    autoeq_search: String,
 
     // Provider settings (editing state)
     mpd_edit_states: Vec<providers::MpdEditState>,
@@ -268,6 +281,31 @@ pub enum Message {
     EqSetBand(usize, f32),
     EqSetPreset(crate::player::equalizer::EqPreset),
     EqToggle(bool),
+    EqSetPreamp(f32),
+    /// Select a preset by name from the combined preset list.
+    EqSelectPreset(String),
+    /// Overwrite the currently loaded custom preset with current band/preamp values.
+    EqSavePreset,
+    /// Save current band/preamp values as a new named custom preset.
+    EqSavePresetAs(String),
+    /// Delete the currently active custom preset.
+    EqDeletePreset,
+    /// Reset to Flat (all bands 0, preamp 0, clear selection).
+    EqResetPreset,
+    /// Update the "Save As" name input.
+    EqSaveAsNameChanged(String),
+
+    // AutoEQ
+    /// Update the AutoEQ search query (filters profiles in dropdown).
+    AutoEQSearchChanged(String),
+    /// Fetch AutoEQ index from GitHub (triggered by "Load AutoEQ..." button).
+    FetchAutoEQIndex,
+    /// AutoEQ index fetched successfully (or error).
+    AutoEQIndexLoaded(Result<Vec<crate::autoeq::AutoEQProfileMetadata>, String>),
+    /// Select an AutoEQ profile by path from the dropdown.
+    EqSelectAutoEQ(String),
+    /// AutoEQ profile fetched and ready to apply (or error).
+    AutoEQProfileLoaded(Result<crate::autoeq::AutoEQProfile, String>),
 
     // Settings
     AddMusicDir,
@@ -639,6 +677,22 @@ impl cosmic::Application for AppModel {
             lyrics_text: None,
             lyrics_loading: false,
             eq_preset: None,
+            preset_manager: {
+                let presets_dir = dirs::config_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("lyra")
+                    .join("eq_presets");
+                crate::player::eq_presets::EqPresetManager::new(presets_dir)
+                    .expect("Failed to create EQ presets directory")
+            },
+            all_presets: Vec::new(), // loaded below after construction
+            active_preset_name: None,
+            eq_dirty: false,
+            save_as_name: String::new(),
+            autoeq_manager: None,
+            autoeq_profiles: Vec::new(),
+            autoeq_loading: false,
+            autoeq_search: String::new(),
             mpd_edit_states,
             mpd_connection_status,
             subsonic_edit_states,
@@ -667,6 +721,11 @@ impl cosmic::Application for AppModel {
         };
 
         app.rebuild_provider_list();
+        app.all_presets = app.preset_manager.load_all();
+        // Restore active preset name from config
+        if !app.config.active_eq_preset_name.is_empty() {
+            app.active_preset_name = Some(app.config.active_eq_preset_name.clone());
+        }
         let title_cmd = app.update_title();
 
         // Trigger initial library scan
@@ -746,15 +805,43 @@ impl cosmic::Application for AppModel {
                 Message::ToggleContextPage(ContextPage::About),
             ),
             ContextPage::Equalizer => {
+                let save_as = self.save_as_name.clone();
+
                 let eq_content = equalizer::equalizer_view(
                     &self.config.equalizer_bands,
                     self.config.equalizer_enabled,
-                    self.eq_preset,
+                    self.config.equalizer_preamp,
+                    &self.all_presets,
+                    self.active_preset_name.as_deref(),
+                    self.eq_dirty,
+                    &self.save_as_name,
+                    &self.autoeq_profiles,
+                    self.autoeq_loading,
+                    &self.autoeq_search,
                 )
-                .map(|msg| match msg {
+                .map(move |msg| match msg {
                     equalizer::EqualizerMessage::SetBand(i, v) => Message::EqSetBand(i, v),
-                    equalizer::EqualizerMessage::SetPreset(p) => Message::EqSetPreset(p),
                     equalizer::EqualizerMessage::ToggleEnabled(e) => Message::EqToggle(e),
+                    equalizer::EqualizerMessage::SetPreamp(v) => Message::EqSetPreamp(v),
+                    equalizer::EqualizerMessage::SelectPreset(name) => {
+                        Message::EqSelectPreset(name)
+                    }
+                    equalizer::EqualizerMessage::SelectAutoEQ(path) => {
+                        Message::EqSelectAutoEQ(path)
+                    }
+                    equalizer::EqualizerMessage::SavePreset => Message::EqSavePreset,
+                    equalizer::EqualizerMessage::SaveAsNameChanged(name) => {
+                        Message::EqSaveAsNameChanged(name)
+                    }
+                    equalizer::EqualizerMessage::SavePresetAs => {
+                        Message::EqSavePresetAs(save_as.clone())
+                    }
+                    equalizer::EqualizerMessage::DeletePreset => Message::EqDeletePreset,
+                    equalizer::EqualizerMessage::ResetPreset => Message::EqResetPreset,
+                    equalizer::EqualizerMessage::FetchAutoEQ => Message::FetchAutoEQIndex,
+                    equalizer::EqualizerMessage::AutoEQSearchChanged(query) => {
+                        Message::AutoEQSearchChanged(query)
+                    }
                 });
 
                 context_drawer::context_drawer(
@@ -2123,6 +2210,7 @@ impl cosmic::Application for AppModel {
                     player.eq_controller().set_band(index, clamped);
                 }
                 self.eq_preset = None;
+                self.eq_dirty = true;
             }
 
             Message::EqSetPreset(preset) => {
@@ -2140,6 +2228,214 @@ impl cosmic::Application for AppModel {
                 // Enable/bypass the live DSP.
                 if let Some(ref player) = self.player {
                     player.eq_controller().set_enabled(enabled);
+                }
+            }
+
+            Message::EqSetPreamp(value) => {
+                let clamped = value.clamp(-20.0, 10.0);
+                self.config.equalizer_preamp = clamped;
+                // TODO: Apply preamp to audio backend if supported
+                tracing::debug!("Preamp set to {:+.1} dB", clamped);
+                self.eq_preset = None;
+                self.eq_dirty = true;
+            }
+
+            Message::EqSelectPreset(name) => {
+                if let Some(preset) = self.all_presets.iter().find(|p| p.name == name) {
+                    self.config.equalizer_bands = preset.bands.to_vec();
+                    self.config.equalizer_preamp = preset.preamp;
+                    if let Some(ref player) = self.player {
+                        player.eq_controller().set_all(&preset.bands);
+                    }
+                    self.active_preset_name = Some(name.clone());
+                    self.config.active_eq_preset_name = name;
+                    self.eq_dirty = false;
+                    self.eq_preset = None; // clear legacy preset tracking
+                }
+            }
+
+            Message::EqSavePreset => {
+                if let Some(ref name) = self.active_preset_name {
+                    if self.preset_manager.is_builtin_name(name) {
+                        tracing::warn!("Cannot overwrite built-in preset '{}'", name);
+                    } else {
+                        let preset = crate::player::equalizer::EqPresetData {
+                            name: name.clone(),
+                            bands: {
+                                let mut b = [0.0_f32; 10];
+                                for (i, v) in self.config.equalizer_bands.iter().enumerate().take(10) {
+                                    b[i] = *v;
+                                }
+                                b
+                            },
+                            preamp: self.config.equalizer_preamp,
+                            source: crate::player::equalizer::PresetSource::Custom,
+                        };
+                        if let Err(e) = self.preset_manager.save_preset(&preset) {
+                            tracing::error!("Failed to save preset: {}", e);
+                        } else {
+                            self.all_presets = self.preset_manager.load_all();
+                            self.eq_dirty = false;
+                        }
+                    }
+                }
+            }
+
+            Message::EqSavePresetAs(name) => {
+                if name.trim().is_empty() {
+                    tracing::warn!("Cannot save preset with empty name");
+                } else if self.preset_manager.is_builtin_name(&name) {
+                    tracing::warn!("Cannot use the name of a built-in preset: '{}'", name);
+                } else {
+                    let preset = crate::player::equalizer::EqPresetData {
+                        name: name.clone(),
+                        bands: {
+                            let mut b = [0.0_f32; 10];
+                            for (i, v) in self.config.equalizer_bands.iter().enumerate().take(10) {
+                                b[i] = *v;
+                            }
+                            b
+                        },
+                        preamp: self.config.equalizer_preamp,
+                        source: crate::player::equalizer::PresetSource::Custom,
+                    };
+                    if let Err(e) = self.preset_manager.save_preset(&preset) {
+                        tracing::error!("Failed to save preset: {}", e);
+                    } else {
+                        self.all_presets = self.preset_manager.load_all();
+                        self.active_preset_name = Some(name.clone());
+                        self.config.active_eq_preset_name = name;
+                        self.eq_dirty = false;
+                    }
+                }
+            }
+
+            Message::EqDeletePreset => {
+                if let Some(ref name) = self.active_preset_name {
+                    if self.preset_manager.is_builtin_name(name) {
+                        tracing::warn!("Cannot delete built-in preset '{}'", name);
+                    } else if let Err(e) = self.preset_manager.delete_preset(name) {
+                        tracing::error!("Failed to delete preset: {}", e);
+                    } else {
+                        self.all_presets = self.preset_manager.load_all();
+                        self.active_preset_name = None;
+                        self.config.active_eq_preset_name = String::new();
+                        self.eq_dirty = false;
+                    }
+                }
+            }
+
+            Message::EqSaveAsNameChanged(name) => {
+                self.save_as_name = name;
+            }
+
+            Message::EqResetPreset => {
+                self.config.equalizer_bands = vec![0.0; 10];
+                self.config.equalizer_preamp = 0.0;
+                if let Some(ref player) = self.player {
+                    player.eq_controller().set_all(&[0.0; 10]);
+                }
+                self.active_preset_name = None;
+                self.config.active_eq_preset_name = String::new();
+                self.eq_preset = None;
+                self.eq_dirty = false;
+            }
+
+            // -- AutoEQ --
+            Message::AutoEQSearchChanged(query) => {
+                self.autoeq_search = query;
+            }
+
+            Message::FetchAutoEQIndex => {
+                if self.autoeq_loading {
+                    return Task::none(); // already fetching
+                }
+                self.autoeq_loading = true;
+
+                let cache_dir = dirs::cache_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("lyra")
+                    .join("autoeq");
+                let timeout = std::time::Duration::from_secs(30);
+
+                return cosmic::task::future(async move {
+                    let result = match crate::autoeq::AutoEQManager::new(cache_dir, timeout) {
+                        Ok(mut manager) => manager
+                            .fetch_index()
+                            .await
+                            .map_err(|e| e.to_string()),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    cosmic::Action::App(Message::AutoEQIndexLoaded(result))
+                });
+            }
+
+            Message::AutoEQIndexLoaded(result) => {
+                self.autoeq_loading = false;
+                match result {
+                    Ok(profiles) => {
+                        tracing::info!("Loaded {} AutoEQ profiles", profiles.len());
+                        self.autoeq_profiles = profiles;
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to fetch AutoEQ index: {}", e);
+                    }
+                }
+            }
+
+            Message::EqSelectAutoEQ(path) => {
+                // Find the profile metadata to get the name
+                let name = self
+                    .autoeq_profiles
+                    .iter()
+                    .find(|p| p.path == path)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+
+                tracing::info!("Fetching AutoEQ profile: {} ({})", name, path);
+
+                let cache_dir = dirs::cache_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("lyra")
+                    .join("autoeq");
+                let timeout = std::time::Duration::from_secs(30);
+
+                return cosmic::task::future(async move {
+                    let result = match crate::autoeq::AutoEQManager::new(cache_dir, timeout) {
+                        Ok(mut manager) => manager
+                            .fetch_profile(&path)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    cosmic::Action::App(Message::AutoEQProfileLoaded(result))
+                });
+            }
+
+            Message::AutoEQProfileLoaded(result) => {
+                match result {
+                    Ok(profile) => {
+                        // Apply bands + preamp
+                        self.config.equalizer_bands = profile.bands.to_vec();
+                        self.config.equalizer_preamp = profile.preamp;
+                        if let Some(ref player) = self.player {
+                            player.eq_controller().set_all(&profile.bands);
+                        }
+                        // Clear preset selection (user can "Save As" to keep)
+                        self.active_preset_name = None;
+                        self.config.active_eq_preset_name = String::new();
+                        self.eq_dirty = false;
+                        self.eq_preset = None;
+
+                        tracing::info!(
+                            "Applied AutoEQ profile: {} (preamp: {:+.1} dB)",
+                            profile.name,
+                            profile.preamp
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to load AutoEQ profile: {}", e);
+                    }
                 }
             }
 
