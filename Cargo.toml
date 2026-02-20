@@ -8,10 +8,7 @@ repository = "https://github.com/M0Rf30/lyra"
 
 [dependencies]
 # COSMIC / UI framework
-# Pinned to a3cf875 to avoid FAMILY_MAP RwLock deadlock in ae830ca
-# (perf(font): use RwLock) — it holds a read lock while unwrap_or_else
-# tries to acquire a write lock on first font access.
-libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "a3cf875", features = [
+libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "384e8f6", features = [
     "about",
     "tokio",
     "wayland",
@@ -62,7 +59,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ashpd = "0.12"
 
 # Credential storage (system keyring)
-keyring = "3"
+# linux-native-sync-persistent = kernel keyring (persistent) + D-Bus secret service fallback
+keyring = { version = "3", features = ["linux-native-sync-persistent", "sync-secret-service", "crypto-rust"] }
 
 # Misc
 open = "5"

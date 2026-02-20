@@ -489,7 +489,27 @@ impl cosmic::Application for AppModel {
 
             if keyring_ok {
                 for entry in &mut config.mpd_servers {
-                    if entry.password.is_some() && !entry.password_in_keyring {
+                    if entry.password_in_keyring {
+                        // Verify the keyring entry still exists; reset if lost.
+                        match crate::credentials::retrieve_password(&entry.id) {
+                            Ok(None) => {
+                                tracing::warn!(
+                                    "MPD password for '{}' was marked as stored in keyring \
+                                     but the entry is missing; resetting so user can re-enter.",
+                                    entry.id
+                                );
+                                entry.password_in_keyring = false;
+                                config_changed = true;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to verify keyring entry for MPD '{}': {e}",
+                                    entry.id
+                                );
+                            }
+                            Ok(Some(_)) => {}
+                        }
+                    } else if entry.password.is_some() {
                         let pw = entry.password.as_deref().unwrap_or_default();
                         match crate::credentials::store_password(&entry.id, pw) {
                             Ok(()) => {
@@ -513,7 +533,27 @@ impl cosmic::Application for AppModel {
                 }
 
                 for entry in &mut config.subsonic_servers {
-                    if entry.password.is_some() && !entry.password_in_keyring {
+                    if entry.password_in_keyring {
+                        // Verify the keyring entry still exists; reset if lost.
+                        match crate::credentials::retrieve_password(&entry.id) {
+                            Ok(None) => {
+                                tracing::warn!(
+                                    "Subsonic password for '{}' was marked as stored in keyring \
+                                     but the entry is missing; resetting so user can re-enter.",
+                                    entry.id
+                                );
+                                entry.password_in_keyring = false;
+                                config_changed = true;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to verify keyring entry for Subsonic '{}': {e}",
+                                    entry.id
+                                );
+                            }
+                            Ok(Some(_)) => {}
+                        }
+                    } else if entry.password.is_some() {
                         let pw = entry.password.as_deref().unwrap_or_default();
                         match crate::credentials::store_password(&entry.id, pw) {
                             Ok(()) => {
@@ -2567,7 +2607,24 @@ impl cosmic::Application for AppModel {
 
             Message::MpdSaveServer(i) => {
                 if let Some(state) = self.mpd_edit_states.get(i) {
-                    let entry = state.to_config();
+                    let mut entry = state.to_config();
+                    // Store password to keyring immediately on save so it is
+                    // never left as plaintext in the config file.
+                    if let Some(pw) = entry.password.as_deref().filter(|p| !p.is_empty()) {
+                        match crate::credentials::store_password(&entry.id, pw) {
+                            Ok(()) => {
+                                entry.password_in_keyring = true;
+                                entry.password = None;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to store MPD password for '{}' in keyring, \
+                                     keeping plaintext in config: {e}",
+                                    entry.id
+                                );
+                            }
+                        }
+                    }
                     // Update or add in the config
                     if i < self.config.mpd_servers.len() {
                         self.config.mpd_servers[i] = entry;
@@ -2719,7 +2776,24 @@ impl cosmic::Application for AppModel {
 
             Message::SubsonicSaveServer(i) => {
                 if let Some(state) = self.subsonic_edit_states.get(i) {
-                    let entry = state.to_config();
+                    let mut entry = state.to_config();
+                    // Store password to keyring immediately on save so it is
+                    // never left as plaintext in the config file.
+                    if let Some(pw) = entry.password.as_deref().filter(|p| !p.is_empty()) {
+                        match crate::credentials::store_password(&entry.id, pw) {
+                            Ok(()) => {
+                                entry.password_in_keyring = true;
+                                entry.password = None;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to store Subsonic password for '{}' in keyring, \
+                                     keeping plaintext in config: {e}",
+                                    entry.id
+                                );
+                            }
+                        }
+                    }
                     if i < self.config.subsonic_servers.len() {
                         self.config.subsonic_servers[i] = entry;
                     } else {

@@ -26,17 +26,32 @@ pub struct MpdEditState {
 
 impl MpdEditState {
     /// Create from a config entry.
+    ///
+    /// When `password_in_keyring` is set the password is fetched from the
+    /// system keyring so the edit form can show (and round-trip) the real value.
     pub fn from_config(entry: &crate::config::MpdConfigEntry) -> Self {
+        let password = if entry.password_in_keyring {
+            crate::credentials::retrieve_password(&entry.id)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        } else {
+            entry.password.clone().unwrap_or_default()
+        };
+
         Self {
             id: entry.id.clone(),
             name: entry.name.clone(),
             host: entry.host.clone(),
             port: entry.port.to_string(),
-            password: entry.password.clone().unwrap_or_default(),
+            password,
         }
     }
 
     /// Convert back to a config entry (port defaults to 6600 on parse failure).
+    ///
+    /// The password is always stored as plaintext here so that the startup
+    /// migration code can move it to the keyring on the next launch.
     pub fn to_config(&self) -> crate::config::MpdConfigEntry {
         crate::config::MpdConfigEntry {
             id: self.id.clone(),
@@ -48,6 +63,8 @@ impl MpdEditState {
             } else {
                 Some(self.password.clone())
             },
+            // Always reset to false so the startup migration path stores it in
+            // the keyring (or the plaintext fallback is used if unavailable).
             password_in_keyring: false,
         }
     }
@@ -83,13 +100,25 @@ pub struct SubsonicEditState {
 
 impl SubsonicEditState {
     /// Create from a config entry.
+    ///
+    /// When `password_in_keyring` is set the password is fetched from the
+    /// system keyring so the edit form can show (and round-trip) the real value.
     pub fn from_config(entry: &crate::config::SubsonicConfigEntry) -> Self {
+        let password = if entry.password_in_keyring {
+            crate::credentials::retrieve_password(&entry.id)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        } else {
+            entry.password.clone().unwrap_or_default()
+        };
+
         Self {
             id: entry.id.clone(),
             name: entry.name.clone(),
             url: entry.url.clone(),
             username: entry.username.clone(),
-            password: entry.password.clone().unwrap_or_default(),
+            password,
             accept_invalid_certs: entry.accept_invalid_certs,
             transcoding_max_bitrate: entry.transcoding_max_bitrate,
             transcoding_format: entry.transcoding_format.clone(),
@@ -97,6 +126,10 @@ impl SubsonicEditState {
     }
 
     /// Convert back to a config entry.
+    ///
+    /// The password is always stored as plaintext here so that the startup
+    /// migration code can move it to the keyring on the next launch (or
+    /// immediately if the keyring is available).
     pub fn to_config(&self) -> crate::config::SubsonicConfigEntry {
         crate::config::SubsonicConfigEntry {
             id: self.id.clone(),
@@ -108,6 +141,8 @@ impl SubsonicEditState {
             } else {
                 Some(self.password.clone())
             },
+            // Always reset to false so the startup migration path stores it in
+            // the keyring (or the plaintext fallback is used if unavailable).
             password_in_keyring: false,
             accept_invalid_certs: self.accept_invalid_certs,
             transcoding_max_bitrate: self.transcoding_max_bitrate,
@@ -329,7 +364,8 @@ fn mpd_server_card<'a>(
         .on_input(move |v| ProvidersMessage::EditPort(index, v));
 
     let password_input = widget::text_input(fl!("mpd-password"), &server.password)
-        .on_input(move |v| ProvidersMessage::EditPassword(index, v));
+        .on_input(move |v| ProvidersMessage::EditPassword(index, v))
+        .password();
 
     let mut buttons = widget::row().spacing(8).align_y(Alignment::Center);
     buttons =
@@ -378,7 +414,8 @@ fn subsonic_server_card<'a>(
         .on_input(move |v| ProvidersMessage::SubsonicEditUsername(index, v));
 
     let password_input = widget::text_input(fl!("subsonic-password"), &server.password)
-        .on_input(move |v| ProvidersMessage::SubsonicEditPassword(index, v));
+        .on_input(move |v| ProvidersMessage::SubsonicEditPassword(index, v))
+        .password();
 
     let tls_toggle = widget::toggler(server.accept_invalid_certs)
         .label(fl!("subsonic-accept-invalid-certs"))
