@@ -141,6 +141,9 @@ pub struct AppModel {
     // ProjectM visualizer (behind feature flag)
     #[cfg(feature = "visualizer")]
     visualizer_active: bool,
+    /// Whether the visualizer is currently fullscreen.
+    #[cfg(feature = "visualizer")]
+    viz_fullscreen: bool,
     /// Shared frame buffer for the shader-based visualizer widget.
     /// The render subscription writes RGBA pixels here; the Shader widget
     /// reads them in its `prepare()` method via `queue.write_texture()`.
@@ -380,6 +383,9 @@ pub enum Message {
     /// This message carries no data — it just triggers a view redraw.
     #[cfg(feature = "visualizer")]
     VisualizerFrameReady,
+    /// Toggle fullscreen mode for the visualizer. True = enter, false = exit.
+    #[cfg(feature = "visualizer")]
+    ToggleVisualizerFullscreen,
 
     // Application lifecycle
     Quit,
@@ -747,6 +753,8 @@ impl cosmic::Application for AppModel {
             expand_anim_from: 0.0,
             #[cfg(feature = "visualizer")]
             visualizer_active: false,
+            #[cfg(feature = "visualizer")]
+            viz_fullscreen: false,
             #[cfg(feature = "visualizer")]
             viz_frame_buf: {
                 let (w, h) = crate::views::now_playing::visualizer::ProjectMRenderer::resolution();
@@ -1159,6 +1167,8 @@ impl cosmic::Application for AppModel {
             now_playing::NowPlayingMessage::ToggleVisualizer => Message::ToggleVisualizer,
             #[cfg(feature = "visualizer")]
             now_playing::NowPlayingMessage::NextPreset => Message::NextVisualizerPreset,
+            #[cfg(feature = "visualizer")]
+            now_playing::NowPlayingMessage::ToggleVizFullscreen => Message::ToggleVisualizerFullscreen,
         };
 
         let bar = now_playing::compact_bar::playback_bar(
@@ -2975,6 +2985,19 @@ impl cosmic::Application for AppModel {
                 // The shared VizFrameBuffer already has the new pixels.
                 // This message just triggers a view redraw so the Shader
                 // widget picks them up in its next prepare() call.
+            }
+
+            #[cfg(feature = "visualizer")]
+            Message::ToggleVisualizerFullscreen => {
+                self.viz_fullscreen = !self.viz_fullscreen;
+                let mode = if self.viz_fullscreen {
+                    cosmic::iced::window::Mode::Fullscreen
+                } else {
+                    cosmic::iced::window::Mode::Windowed
+                };
+                if let Some(id) = self.core.main_window_id() {
+                    return cosmic::iced_runtime::window::change_mode(id, mode);
+                }
             }
 
             // -- Playlists view --

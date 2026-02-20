@@ -43,6 +43,9 @@ pub enum NowPlayingMessage {
     /// Cycle to the next visualizer preset.
     #[cfg(feature = "visualizer")]
     NextPreset,
+    /// Double-click on visualizer background — toggle fullscreen.
+    #[cfg(feature = "visualizer")]
+    ToggleVizFullscreen,
 }
 
 /// Format a duration as M:SS.
