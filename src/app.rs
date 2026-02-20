@@ -383,7 +383,7 @@ pub enum Message {
     /// This message carries no data — it just triggers a view redraw.
     #[cfg(feature = "visualizer")]
     VisualizerFrameReady,
-    /// Toggle fullscreen mode for the visualizer. True = enter, false = exit.
+    /// Toggle fullscreen for the visualizer window (on → off, off → on).
     #[cfg(feature = "visualizer")]
     ToggleVisualizerFullscreen,
 
@@ -2989,13 +2989,15 @@ impl cosmic::Application for AppModel {
 
             #[cfg(feature = "visualizer")]
             Message::ToggleVisualizerFullscreen => {
-                self.viz_fullscreen = !self.viz_fullscreen;
-                let mode = if self.viz_fullscreen {
-                    cosmic::iced::window::Mode::Fullscreen
-                } else {
-                    cosmic::iced::window::Mode::Windowed
-                };
+                // Guard the state toggle: only flip the bool if we can actually
+                // issue the task, so state and window mode stay in sync.
                 if let Some(id) = self.core.main_window_id() {
+                    self.viz_fullscreen = !self.viz_fullscreen;
+                    let mode = if self.viz_fullscreen {
+                        cosmic::iced::window::Mode::Fullscreen
+                    } else {
+                        cosmic::iced::window::Mode::Windowed
+                    };
                     return cosmic::iced_runtime::window::change_mode(id, mode);
                 }
             }
