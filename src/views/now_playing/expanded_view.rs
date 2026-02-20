@@ -241,14 +241,14 @@ pub fn expanded_now_playing<'a>(
     // --- Volume + lyrics + visualizer buttons ---
     #[allow(unused_mut)]
     let mut bottom_controls = widget::row()
-        .push(widget::icon::from_name("audio-volume-high-symbolic").size(20))
+        .push(widget::icon::from_name("audio-volume-high-symbolic").size(24))
         .push(
             widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
                 .step(0.01)
-                .width(150),
+                .width(180),
         )
         .push(
-            widget::button::icon(widget::icon::from_name("view-list-lyrics-symbolic").size(24))
+            widget::button::icon(widget::icon::from_name("view-list-lyrics-symbolic").size(28))
                 .on_press(NowPlayingMessage::ShowLyrics),
         );
 
@@ -257,14 +257,14 @@ pub fn expanded_now_playing<'a>(
     {
         let viz_icon = "applications-multimedia-symbolic";
         bottom_controls = bottom_controls.push(
-            widget::button::icon(widget::icon::from_name(viz_icon).size(24))
+            widget::button::icon(widget::icon::from_name(viz_icon).size(28))
                 .on_press(NowPlayingMessage::ToggleVisualizer),
         );
         // Next preset button (only visible when visualizer is active)
         if visualizer_active {
             bottom_controls = bottom_controls.push(
                 widget::button::icon(
-                    widget::icon::from_name("media-skip-forward-symbolic").size(20),
+                    widget::icon::from_name("media-skip-forward-symbolic").size(24),
                 )
                 .on_press(NowPlayingMessage::NextPreset),
             );
@@ -320,13 +320,16 @@ pub fn expanded_now_playing<'a>(
     // Otherwise fall back to the blurred cover art, or a themed solid.
     #[cfg(feature = "visualizer")]
     let bg_element: Option<cosmic::Element<'_, NowPlayingMessage>> = if visualizer_active {
+        let shader = cosmic::iced::widget::Shader::new(super::viz_shader::VizProgram::new(
+            Arc::clone(&viz_frame_buf),
+        ))
+        .width(Length::Fill)
+        .height(Length::Fixed(800.0));
+
         Some(
-            cosmic::iced::widget::Shader::new(super::viz_shader::VizProgram::new(Arc::clone(
-                &viz_frame_buf,
-            )))
-            .width(Length::Fill)
-            .height(Length::Fixed(800.0))
-            .into(),
+            widget::mouse_area(shader)
+                .on_double_press(NowPlayingMessage::ToggleVizFullscreen)
+                .into(),
         )
     } else {
         blurred_cover.map(|h| {
@@ -367,7 +370,7 @@ pub fn expanded_now_playing<'a>(
         // Dark overlay for text legibility.
         // When the visualizer is the background, use a lighter overlay so
         // the animation is visible; for static blurred art use a heavier one.
-        let overlay_alpha = if viz_is_bg { 0.35 } else { 0.55 };
+        let overlay_alpha = if viz_is_bg { 0.35 } else { 0.65 };
         let overlay: cosmic::Element<'_, NowPlayingMessage> =
             widget::container(widget::Space::new(0, 0))
                 .width(Length::Fill)
