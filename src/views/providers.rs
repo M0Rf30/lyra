@@ -365,19 +365,22 @@ fn mpd_server_card<'a>(
         .on_input(move |v| ProvidersMessage::EditPassword(index, v))
         .password();
 
-    let mut buttons = widget::row().spacing(8).align_y(Alignment::Center);
-    buttons =
-        buttons.push(widget::button::text(fl!("save")).on_press(ProvidersMessage::Save(index)));
-    buttons = buttons.push(
+    let mut action_buttons = widget::row().spacing(8).align_y(Alignment::Center);
+    action_buttons = action_buttons
+        .push(widget::button::standard(fl!("save")).on_press(ProvidersMessage::Save(index)));
+    action_buttons = action_buttons.push(
         widget::button::text(fl!("test-connection"))
             .on_press(ProvidersMessage::TestConnection(index)),
     );
-    buttons = buttons
-        .push(widget::button::destructive(fl!("remove")).on_press(ProvidersMessage::Remove(index)));
-
     if let Some(status) = connection_status {
-        buttons = buttons.push(status_label(status));
+        action_buttons = action_buttons.push(status_label(status));
     }
+
+    let buttons = widget::row()
+        .push(action_buttons)
+        .push(widget::horizontal_space())
+        .push(widget::button::destructive(fl!("remove")).on_press(ProvidersMessage::Remove(index)))
+        .align_y(Alignment::Center);
 
     widget::column()
         .push(widget::text::title4(format!("MPD: {}", &server.name)))
@@ -389,8 +392,8 @@ fn mpd_server_card<'a>(
                 .push(password_input)
                 .spacing(8),
         )
-        .push(buttons)
         .push(widget::divider::horizontal::default())
+        .push(buttons)
         .spacing(8)
         .into()
 }
@@ -419,23 +422,29 @@ fn subsonic_server_card<'a>(
         .label(fl!("subsonic-accept-invalid-certs"))
         .on_toggle(move |v| ProvidersMessage::SubsonicToggleCerts(index, v));
 
-    let mut buttons = widget::row().spacing(8).align_y(Alignment::Center);
-    buttons = buttons
-        .push(widget::button::text(fl!("save")).on_press(ProvidersMessage::SubsonicSave(index)));
-    buttons = buttons.push(
+    // Save + Test Connection on the left, Remove pushed to the right
+    let mut action_buttons = widget::row().spacing(8).align_y(Alignment::Center);
+    action_buttons = action_buttons.push(
+        widget::button::standard(fl!("save")).on_press(ProvidersMessage::SubsonicSave(index)),
+    );
+    action_buttons = action_buttons.push(
         widget::button::text(fl!("test-connection"))
             .on_press(ProvidersMessage::SubsonicTestConnection(index)),
     );
-    buttons = buttons.push(
-        widget::button::destructive(fl!("remove"))
-            .on_press(ProvidersMessage::SubsonicRemove(index)),
-    );
-
     if let Some(status) = connection_status {
-        buttons = buttons.push(status_label(status));
+        action_buttons = action_buttons.push(status_label(status));
     }
 
-    // Task 109: Transcoding controls
+    let buttons = widget::row()
+        .push(action_buttons)
+        .push(widget::horizontal_space())
+        .push(
+            widget::button::destructive(fl!("remove"))
+                .on_press(ProvidersMessage::SubsonicRemove(index)),
+        )
+        .align_y(Alignment::Center);
+
+    // Task 109: Transcoding controls — use a wrapping column layout to avoid overflow
     let bitrate_options: Vec<(Option<u32>, String)> = vec![
         (None, fl!("transcoding-original")),
         (Some(320), "320 kbps".to_string()),
@@ -455,21 +464,24 @@ fn subsonic_server_card<'a>(
     ];
 
     let current_bitrate = server.transcoding_max_bitrate;
-    let mut bitrate_row = widget::row().spacing(8).align_y(Alignment::Center);
-    bitrate_row = bitrate_row.push(widget::text::body(fl!("transcoding-bitrate")));
+    let mut bitrate_children: Vec<cosmic::Element<ProvidersMessage>> =
+        vec![widget::text::body(fl!("transcoding-bitrate")).into()];
     for (bitrate, label) in bitrate_options {
         let btn = if bitrate == current_bitrate {
             widget::button::standard(label)
         } else {
             widget::button::text(label)
         };
-        bitrate_row = bitrate_row
-            .push(btn.on_press(ProvidersMessage::SubsonicTranscodingBitrate(index, bitrate)));
+        bitrate_children.push(
+            btn.on_press(ProvidersMessage::SubsonicTranscodingBitrate(index, bitrate))
+                .into(),
+        );
     }
+    let bitrate_row = widget::flex_row(bitrate_children).spacing(4);
 
     let current_format = server.transcoding_format.clone();
-    let mut format_row = widget::row().spacing(8).align_y(Alignment::Center);
-    format_row = format_row.push(widget::text::body(fl!("transcoding-format")));
+    let mut format_children: Vec<cosmic::Element<ProvidersMessage>> =
+        vec![widget::text::body(fl!("transcoding-format")).into()];
     for (fmt, label) in format_options {
         let btn = if fmt == current_format {
             widget::button::standard(label)
@@ -477,9 +489,12 @@ fn subsonic_server_card<'a>(
             widget::button::text(label)
         };
         let f = fmt;
-        format_row =
-            format_row.push(btn.on_press(ProvidersMessage::SubsonicTranscodingFormat(index, f)));
+        format_children.push(
+            btn.on_press(ProvidersMessage::SubsonicTranscodingFormat(index, f))
+                .into(),
+        );
     }
+    let format_row = widget::flex_row(format_children).spacing(4);
 
     // Task 110: Bandwidth savings estimate
     let mut transcoding_col = widget::column()
@@ -507,10 +522,10 @@ fn subsonic_server_card<'a>(
                 .push(password_input)
                 .spacing(8),
         )
-        .push(tls_toggle)
+        .push(widget::container(tls_toggle).padding([8, 0]))
         .push(transcoding_col)
-        .push(buttons)
         .push(widget::divider::horizontal::default())
+        .push(buttons)
         .spacing(8)
         .into()
 }
