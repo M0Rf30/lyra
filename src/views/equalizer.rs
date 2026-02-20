@@ -87,9 +87,9 @@ pub fn equalizer_view<'a>(
         .unwrap_or(false);
 
     let save_btn = if is_custom_selected && dirty {
-        widget::button::standard("Save").on_press(EqualizerMessage::SavePreset)
+        widget::button::text("Save").on_press(EqualizerMessage::SavePreset)
     } else {
-        widget::button::standard("Save")
+        widget::button::text("Save")
     };
 
     let delete_btn = if is_custom_selected {
@@ -98,7 +98,7 @@ pub fn equalizer_view<'a>(
         widget::button::destructive("Delete")
     };
 
-    let reset_btn = widget::button::standard("Reset").on_press(EqualizerMessage::ResetPreset);
+    let reset_btn = widget::button::text("Reset").on_press(EqualizerMessage::ResetPreset);
 
     let toolbar_row = widget::row()
         .push(save_btn)
@@ -111,9 +111,9 @@ pub fn equalizer_view<'a>(
         .on_input(EqualizerMessage::SaveAsNameChanged);
 
     let save_as_btn = if !save_as_name.trim().is_empty() {
-        widget::button::suggested("Save As").on_press(EqualizerMessage::SavePresetAs)
+        widget::button::standard("Save As").on_press(EqualizerMessage::SavePresetAs)
     } else {
-        widget::button::suggested("Save As")
+        widget::button::standard("Save As")
     };
 
     let save_as_row = widget::row()
@@ -196,9 +196,9 @@ pub fn equalizer_view<'a>(
     } else {
         // Profiles not yet loaded — show fetch button
         let fetch_btn = if autoeq_loading {
-            widget::button::standard("Loading...")
+            widget::button::text("Loading...")
         } else {
-            widget::button::standard("Load AutoEQ Profiles").on_press(EqualizerMessage::FetchAutoEQ)
+            widget::button::text("Load AutoEQ Profiles").on_press(EqualizerMessage::FetchAutoEQ)
         };
         widget::column().push(fetch_btn).spacing(4).into()
     };
