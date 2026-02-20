@@ -273,9 +273,9 @@ pub fn providers_view<'a>(
         mode_row = mode_row.push(widget::text::body(fl!("replay-gain")));
         for (mode, label) in modes {
             let btn = if mode == replay_gain_mode {
-                widget::button::suggested(label)
-            } else {
                 widget::button::standard(label)
+            } else {
+                widget::button::text(label)
             };
             mode_row = mode_row.push(btn.on_press(ProvidersMessage::SetReplayGainMode(mode)));
         }
@@ -307,7 +307,7 @@ pub fn providers_view<'a>(
     }
 
     col = col.push(
-        widget::button::standard(fl!("add-music-folder")).on_press(ProvidersMessage::AddMusicDir),
+        widget::button::text(fl!("add-music-folder")).on_press(ProvidersMessage::AddMusicDir),
     );
 
     col = col.push(widget::divider::horizontal::default());
@@ -334,11 +334,9 @@ pub fn providers_view<'a>(
     // Add buttons
     col = col.push(
         widget::row()
+            .push(widget::button::text(fl!("add-mpd-server")).on_press(ProvidersMessage::AddMpd))
             .push(
-                widget::button::standard(fl!("add-mpd-server")).on_press(ProvidersMessage::AddMpd),
-            )
-            .push(
-                widget::button::standard(fl!("add-subsonic-server"))
+                widget::button::text(fl!("add-subsonic-server"))
                     .on_press(ProvidersMessage::AddSubsonic),
             )
             .spacing(8),
@@ -369,9 +367,9 @@ fn mpd_server_card<'a>(
 
     let mut buttons = widget::row().spacing(8).align_y(Alignment::Center);
     buttons =
-        buttons.push(widget::button::standard(fl!("save")).on_press(ProvidersMessage::Save(index)));
+        buttons.push(widget::button::text(fl!("save")).on_press(ProvidersMessage::Save(index)));
     buttons = buttons.push(
-        widget::button::standard(fl!("test-connection"))
+        widget::button::text(fl!("test-connection"))
             .on_press(ProvidersMessage::TestConnection(index)),
     );
     buttons = buttons
@@ -422,11 +420,10 @@ fn subsonic_server_card<'a>(
         .on_toggle(move |v| ProvidersMessage::SubsonicToggleCerts(index, v));
 
     let mut buttons = widget::row().spacing(8).align_y(Alignment::Center);
+    buttons = buttons
+        .push(widget::button::text(fl!("save")).on_press(ProvidersMessage::SubsonicSave(index)));
     buttons = buttons.push(
-        widget::button::standard(fl!("save")).on_press(ProvidersMessage::SubsonicSave(index)),
-    );
-    buttons = buttons.push(
-        widget::button::standard(fl!("test-connection"))
+        widget::button::text(fl!("test-connection"))
             .on_press(ProvidersMessage::SubsonicTestConnection(index)),
     );
     buttons = buttons.push(
@@ -462,9 +459,9 @@ fn subsonic_server_card<'a>(
     bitrate_row = bitrate_row.push(widget::text::body(fl!("transcoding-bitrate")));
     for (bitrate, label) in bitrate_options {
         let btn = if bitrate == current_bitrate {
-            widget::button::suggested(label)
-        } else {
             widget::button::standard(label)
+        } else {
+            widget::button::text(label)
         };
         bitrate_row = bitrate_row
             .push(btn.on_press(ProvidersMessage::SubsonicTranscodingBitrate(index, bitrate)));
@@ -475,9 +472,9 @@ fn subsonic_server_card<'a>(
     format_row = format_row.push(widget::text::body(fl!("transcoding-format")));
     for (fmt, label) in format_options {
         let btn = if fmt == current_format {
-            widget::button::suggested(label)
-        } else {
             widget::button::standard(label)
+        } else {
+            widget::button::text(label)
         };
         let f = fmt;
         format_row =
