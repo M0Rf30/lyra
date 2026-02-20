@@ -1840,6 +1840,10 @@ impl cosmic::Application for AppModel {
                         if player.play_index(0).is_ok() {
                             self.current_track = self.all_tracks.first().cloned();
                             self.playback_position = Duration::ZERO;
+                            #[cfg(feature = "visualizer")]
+                            {
+                                self.viz_metadata_opacity = 1.0;
+                            }
                             return self.dispatch_mpd_after_play();
                         }
                     } else {
@@ -1866,6 +1870,10 @@ impl cosmic::Application for AppModel {
                             self.current_track = Some(track.clone());
                             self.playback_position = Duration::ZERO;
                             self.lyrics_text = None;
+                            #[cfg(feature = "visualizer")]
+                            {
+                                self.viz_metadata_opacity = 1.0;
+                            }
                             let mpd_task = self.dispatch_mpd_after_play();
                             let blur_task = self.maybe_update_blurred_cover();
                             return Task::batch([mpd_task, blur_task]);
@@ -1883,6 +1891,10 @@ impl cosmic::Application for AppModel {
                             self.current_track = Some(track.clone());
                             self.playback_position = Duration::ZERO;
                             self.lyrics_text = None;
+                            #[cfg(feature = "visualizer")]
+                            {
+                                self.viz_metadata_opacity = 1.0;
+                            }
                             let mpd_task = self.dispatch_mpd_after_play();
                             let blur_task = self.maybe_update_blurred_cover();
                             return Task::batch([mpd_task, blur_task]);
@@ -2014,6 +2026,10 @@ impl cosmic::Application for AppModel {
                         self.lyrics_text = None;
                         self.scrobble_now_playing_sent = false;
                         self.scrobble_sent = false;
+                        #[cfg(feature = "visualizer")]
+                        {
+                            self.viz_metadata_opacity = 1.0;
+                        }
                         // Dispatch the actual async MPD play command.
                         return self.dispatch_mpd_after_play();
                     }
@@ -2052,6 +2068,10 @@ impl cosmic::Application for AppModel {
                         self.lyrics_text = None;
                         self.scrobble_now_playing_sent = false;
                         self.scrobble_sent = false;
+                        #[cfg(feature = "visualizer")]
+                        {
+                            self.viz_metadata_opacity = 1.0;
+                        }
                     }
                 }
 
@@ -3846,6 +3866,10 @@ impl AppModel {
                 self.lyrics_text = None;
                 self.scrobble_now_playing_sent = false;
                 self.scrobble_sent = false;
+                #[cfg(feature = "visualizer")]
+                {
+                    self.viz_metadata_opacity = 1.0;
+                }
                 let mpd_task = self.dispatch_mpd_after_play();
                 let blur_task = self.maybe_update_blurred_cover();
                 return Task::batch([mpd_task, blur_task]);
