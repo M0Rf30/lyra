@@ -310,6 +310,14 @@ pub fn expanded_now_playing<'a>(
                                 )
                                 .into(),
                             ),
+                            // Propagate opacity to all child text so text and
+                            // background fade in lockstep.
+                            text_color: Some(cosmic::iced::Color::from_rgba(
+                                1.0,
+                                1.0,
+                                1.0,
+                                viz_metadata_opacity,
+                            )),
                             border: cosmic::iced::Border {
                                 radius: [8.0; 4].into(),
                                 ..Default::default()
