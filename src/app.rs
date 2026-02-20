@@ -2994,8 +2994,8 @@ impl cosmic::Application for AppModel {
                 // This message just triggers a view redraw so the Shader
                 // widget picks them up in its next prepare() call.
 
-                // Decay metadata overlay (~4 seconds at 30 fps = 120 frames)
-                #[cfg(feature = "visualizer")]
+                // Decay metadata overlay (~4 seconds at 30 fps = 120 frames).
+                // No inner cfg needed — this arm is only reachable with the visualizer feature.
                 if self.viz_metadata_opacity > 0.0 {
                     self.viz_metadata_opacity = (self.viz_metadata_opacity - (1.0 / 120.0)).max(0.0);
                 }
