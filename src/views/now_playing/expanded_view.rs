@@ -44,6 +44,7 @@ pub fn expanded_now_playing<'a>(
     expand_progress: f32,
     #[cfg(feature = "visualizer")] visualizer_active: bool,
     #[cfg(feature = "visualizer")] viz_frame_buf: Arc<Mutex<super::viz_shader::VizFrameBuffer>>,
+    #[cfg(feature = "visualizer")] viz_metadata_opacity: f32,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     // While dragging, show the preview position; otherwise the backend position.
     let (progress, display_position) = if let Some(frac) = seeking_preview {

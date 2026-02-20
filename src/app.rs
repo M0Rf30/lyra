@@ -154,6 +154,10 @@ pub struct AppModel {
     /// Shared flag to signal preset change to the render thread.
     #[cfg(feature = "visualizer")]
     next_preset_signal: Arc<std::sync::atomic::AtomicBool>,
+    /// Opacity of the visualizer metadata overlay (0.0 = hidden, 1.0 = fully visible).
+    /// Decays to 0 over ~4 seconds after a track change.
+    #[cfg(feature = "visualizer")]
+    viz_metadata_opacity: f32,
 }
 
 /// All application messages.
@@ -766,6 +770,8 @@ impl cosmic::Application for AppModel {
             pcm_buffer,
             #[cfg(feature = "visualizer")]
             next_preset_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(feature = "visualizer")]
+            viz_metadata_opacity: 0.0,
         };
 
         app.rebuild_provider_list();
@@ -1205,6 +1211,8 @@ impl cosmic::Application for AppModel {
                 self.visualizer_active,
                 #[cfg(feature = "visualizer")]
                 Arc::clone(&self.viz_frame_buf),
+                #[cfg(feature = "visualizer")]
+                self.viz_metadata_opacity,
             )
             .map(map_now_playing_msg);
 
@@ -2985,6 +2993,12 @@ impl cosmic::Application for AppModel {
                 // The shared VizFrameBuffer already has the new pixels.
                 // This message just triggers a view redraw so the Shader
                 // widget picks them up in its next prepare() call.
+
+                // Decay metadata overlay (~4 seconds at 30 fps = 120 frames)
+                #[cfg(feature = "visualizer")]
+                if self.viz_metadata_opacity > 0.0 {
+                    self.viz_metadata_opacity = (self.viz_metadata_opacity - (1.0 / 120.0)).max(0.0);
+                }
             }
 
             #[cfg(feature = "visualizer")]
