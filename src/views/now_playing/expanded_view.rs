@@ -274,6 +274,64 @@ pub fn expanded_now_playing<'a>(
 
     let bottom_controls = bottom_controls.spacing(12).align_y(Alignment::Center);
 
+    // --- Visualizer metadata overlay (frosted pill, top-left corner) ---
+    #[cfg(feature = "visualizer")]
+    let viz_metadata_overlay: Option<cosmic::Element<'_, NowPlayingMessage>> =
+        if visualizer_active && viz_metadata_opacity > 0.0 {
+            if let Some(track) = current_track {
+                let subtitle = {
+                    let mut parts = vec![track.artist.as_str()];
+                    if !track.album.is_empty() {
+                        parts.push(track.album.as_str());
+                    }
+                    parts.join(" \u{2022} ")
+                };
+
+                let overlay_col = widget::column()
+                    .push(widget::text::title3(truncate_str(&track.title, 40)))
+                    .push(
+                        widget::text::body(subtitle).class(cosmic::theme::Text::Custom(|theme| {
+                            cosmic::iced::widget::text::Style {
+                                color: Some(theme.cosmic().palette.neutral_7.into()),
+                            }
+                        })),
+                    )
+                    .spacing(4);
+
+                let overlay_pill = widget::container(overlay_col).padding([12, 16]).class(
+                    cosmic::theme::Container::custom(move |_theme| {
+                        cosmic::iced::widget::container::Style {
+                            background: Some(
+                                cosmic::iced::Color::from_rgba(
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.65 * viz_metadata_opacity,
+                                )
+                                .into(),
+                            ),
+                            border: cosmic::iced::Border {
+                                radius: [8.0; 4].into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }
+                    }),
+                );
+
+                let positioned = widget::container(overlay_pill)
+                    .padding([24, 0, 0, 24])
+                    .width(Length::Fill)
+                    .height(Length::Fixed(800.0));
+
+                Some(positioned.into())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
     // --- Main content column ---
     let content = widget::column()
         .push(top_bar)
@@ -384,14 +442,20 @@ pub fn expanded_now_playing<'a>(
                 }))
                 .into();
 
-        // Stack: black base → background (shader or blur) → overlay → content
-        let stack: cosmic::Element<'_, NowPlayingMessage> = Stack::new()
+        // Stack: black base → background (shader or blur) → overlay → content → [viz metadata overlay]
+        #[allow(unused_mut)]
+        let mut stack_widget = Stack::new()
             .push(black_base)
             .push(bg_layer)
             .push(overlay)
-            .push(content)
-            .width(Length::Fill)
-            .into();
+            .push(content);
+
+        #[cfg(feature = "visualizer")]
+        if let Some(meta_overlay) = viz_metadata_overlay {
+            stack_widget = stack_widget.push(meta_overlay);
+        }
+
+        let stack: cosmic::Element<'_, NowPlayingMessage> = stack_widget.width(Length::Fill).into();
 
         stack
     } else {
