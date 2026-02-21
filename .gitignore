@@ -10,5 +10,6 @@
 .grepai/
 .claude/
 .opencode/
+docs/
 openspec/
 AGENTS.md

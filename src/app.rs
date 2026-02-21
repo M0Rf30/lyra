@@ -1245,9 +1245,15 @@ impl cosmic::Application for AppModel {
             layout_col.into()
         };
 
+        // WindowBackground pins the app surface to background.base color and
+        // sets icon_color/text_color to background.on so all child widgets
+        // inherit the correct foreground regardless of maximize state or
+        // compositor behavior (which may otherwise paint a transparent/white
+        // surface behind the content area).
         widget::container(layout)
             .width(Length::Fill)
             .height(Length::Fill)
+            .class(cosmic::theme::Container::WindowBackground)
             .into()
     }
 
