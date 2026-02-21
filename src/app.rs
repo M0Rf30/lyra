@@ -2998,14 +2998,39 @@ impl cosmic::Application for AppModel {
             }
 
             Message::BlurReady(key, handle) => {
-                self.blurred_cover = Some(handle);
-                self.blurred_cover_key = Some(key);
+                // Guard against stale results: only apply if this blur is still
+                // for the current track's album. A slow computation may finish
+                // after the user has already moved to a different track.
+                let current_key = self.current_track.as_ref().map(|t| {
+                    let artist = if t.album_artist.is_empty() {
+                        &t.artist
+                    } else {
+                        &t.album_artist
+                    };
+                    crate::library::CoverArt::album_key(artist, &t.album)
+                });
+                if current_key.as_ref() == Some(&key) {
+                    self.blurred_cover = Some(handle);
+                    self.blurred_cover_key = Some(key);
+                }
+                // If stale, discard silently — the correct blur is either already
+                // cached or will be requested by the next maybe_update_blurred_cover call.
             }
 
             // -- Visualizer messages (cfg-gated) --
             #[cfg(feature = "visualizer")]
             Message::ToggleVisualizer => {
                 self.visualizer_active = !self.visualizer_active;
+                // When turning the visualizer off, the blurred cover background
+                // takes over. If it was never computed (e.g. track changed while
+                // viz was active and bytes weren't cached yet), trigger it now.
+                if !self.visualizer_active {
+                    // Force retry even if key matches — blurred_cover may be None.
+                    if self.blurred_cover.is_none() {
+                        self.blurred_cover_key = None;
+                    }
+                    return self.maybe_update_blurred_cover();
+                }
             }
 
             #[cfg(feature = "visualizer")]
@@ -3896,11 +3921,11 @@ impl AppModel {
     /// Checks if the current track's album key differs from the cached blurred
     /// cover key. If so, looks up the raw bytes and spawns a background task
     /// to compute the blur. Returns a Task that sends `Message::BlurReady`.
-    fn maybe_update_blurred_cover(&mut self) -> Task<cosmic::Action<Message>> {
+     fn maybe_update_blurred_cover(&mut self) -> Task<cosmic::Action<Message>> {
         let track = match self.current_track.as_ref() {
             Some(t) => t,
             None => {
-                // No track, clear blurred cover
+                // No track — clear everything.
                 self.blurred_cover = None;
                 self.blurred_cover_key = None;
                 return Task::none();
@@ -3916,25 +3941,34 @@ impl AppModel {
         };
         let key = crate::library::CoverArt::album_key(artist, &track.album);
 
-        // Skip if already computed for this album
+        // Already computed and cached for this album — nothing to do.
         if self.blurred_cover_key.as_ref() == Some(&key) {
             return Task::none();
         }
 
-        // Look up raw bytes
+        // Look up raw bytes. If they are not available yet (still loading),
+        // reset the key so we retry when bytes arrive, but keep the current
+        // blurred_cover showing (previous track's blur) rather than blanking
+        // the background immediately. The blur will update as soon as bytes
+        // are ready and maybe_update_blurred_cover is called again.
         let bytes = match self.cover_art_bytes.get(&key) {
             Some(b) => b.clone(),
             None => {
-                // No cover art bytes available, clear blurred cover
-                self.blurred_cover = None;
-                self.blurred_cover_key = None;
+                self.blurred_cover_key = None; // ensure retry on next bytes-ready event
+                // Do NOT clear blurred_cover — keep the old blur visible.
                 return Task::none();
             }
         };
 
+        // Bytes are available — start the async blur computation.
+        // Clear the key now so a concurrent track change will not skip
+        // the next blur computation (BlurReady carries the key and will
+        // only apply if it still matches the current track).
+        self.blurred_cover_key = None;
+
         let key_clone = key.clone();
         cosmic::task::future(async move {
-            // Compute blur in blocking task to avoid blocking async runtime
+            // Compute blur in a blocking task to avoid stalling the async runtime.
             let blurred = tokio::task::spawn_blocking(move || {
                 crate::views::now_playing::blur::compute_blurred_cover(&bytes)
             })
@@ -3946,7 +3980,7 @@ impl AppModel {
                 let handle = widget::icon::from_raster_bytes(blurred_bytes);
                 cosmic::Action::App(Message::BlurReady(key_clone, handle))
             } else {
-                // Blur computation failed, send a no-op
+                // Blur computation failed — no-op; keep old blur or black base.
                 cosmic::Action::None
             }
         })
