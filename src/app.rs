@@ -3023,16 +3023,12 @@ impl cosmic::Application for AppModel {
 
             #[cfg(feature = "visualizer")]
             Message::ToggleVisualizerFullscreen => {
-                // Guard the state toggle: only flip the bool if we can actually
-                // issue the task, so state and window mode stay in sync.
+                // Hide/show the COSMIC window decorations (titlebar/chrome)
+                // without resizing the OS window. The frosted panel remains
+                // visible so controls are still accessible.
                 if let Some(id) = self.core.main_window_id() {
                     self.viz_fullscreen = !self.viz_fullscreen;
-                    let mode = if self.viz_fullscreen {
-                        cosmic::iced::window::Mode::Fullscreen
-                    } else {
-                        cosmic::iced::window::Mode::Windowed
-                    };
-                    return cosmic::iced_runtime::window::change_mode(id, mode);
+                    return cosmic::iced_runtime::window::toggle_decorations(id);
                 }
             }
 
