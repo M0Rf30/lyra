@@ -153,26 +153,26 @@ pub fn expanded_now_playing<'a>(
 
     let transport = widget::row()
         .push(
-            widget::button::icon(widget::icon::from_name(shuffle_icon).size(32))
+            widget::button::icon(widget::icon::from_name(shuffle_icon).size(24))
                 .on_press(NowPlayingMessage::ToggleShuffle),
         )
         .push(
-            widget::button::icon(widget::icon::from_name("media-skip-backward-symbolic").size(32))
+            widget::button::icon(widget::icon::from_name("media-skip-backward-symbolic").size(28))
                 .on_press(NowPlayingMessage::Previous),
         )
         .push(
-            widget::button::icon(widget::icon::from_name(play_icon).size(36))
+            widget::button::icon(widget::icon::from_name(play_icon).size(32))
                 .on_press(NowPlayingMessage::TogglePlayback),
         )
         .push(
-            widget::button::icon(widget::icon::from_name("media-skip-forward-symbolic").size(32))
+            widget::button::icon(widget::icon::from_name("media-skip-forward-symbolic").size(28))
                 .on_press(NowPlayingMessage::Next),
         )
         .push(
-            widget::button::icon(widget::icon::from_name(repeat_icon).size(32))
+            widget::button::icon(widget::icon::from_name(repeat_icon).size(24))
                 .on_press(NowPlayingMessage::CycleRepeat),
         )
-        .spacing(12)
+        .spacing(8)
         .align_y(Alignment::Center);
 
     // ── Volume + lyrics + visualizer buttons ──────────────────────────────
@@ -222,15 +222,15 @@ pub fn expanded_now_playing<'a>(
         let mut col = widget::column();
 
         if let Some(track) = current_track {
-            // Title row
+            // Title row: title3 (smaller than title2) + Space + collapse btn
             let title_row = widget::row()
-                .push(widget::text::title2(truncate_str(&track.title, 40)))
+                .push(widget::text::title3(truncate_str(&track.title, 45)))
                 .push(widget::Space::new(Length::Fill, Length::Shrink))
                 .push(collapse_btn)
                 .align_y(Alignment::Center);
             col = col.push(title_row);
 
-            // Subtitle: Artist · Album · Year · Genre
+            // Subtitle: Artist · Album · Year (one compact line)
             let mut sub_parts: Vec<String> = Vec::new();
             if !track.artist.is_empty() {
                 sub_parts.push(track.artist.clone());
@@ -241,44 +241,17 @@ pub fn expanded_now_playing<'a>(
             if track.year > 0 {
                 sub_parts.push(track.year.to_string());
             }
-            if !track.genre.is_empty() {
-                sub_parts.push(track.genre.clone());
-            }
             if !sub_parts.is_empty() {
-                col = col.push(widget::text::body(sub_parts.join(" \u{2022} ")).class(
-                    cosmic::theme::Text::Custom(|theme| cosmic::iced::widget::text::Style {
-                        color: Some(theme.cosmic().palette.neutral_7.into()),
-                    }),
-                ));
-            }
-
-            // Technical info caption
-            let mut tech_parts = Vec::new();
-            if track.bitrate > 0 {
-                tech_parts.push(format!("{} kbps", track.bitrate));
-            }
-            if track.sample_rate > 0 {
-                tech_parts.push(format!("{} Hz", track.sample_rate));
-            }
-            if track.disc_number > 0 || track.track_number > 0 {
-                let disc_track = if track.disc_number > 0 {
-                    format!("Disc {} / Track {}", track.disc_number, track.track_number)
-                } else {
-                    format!("Track {}", track.track_number)
-                };
-                tech_parts.push(disc_track);
-            }
-            if !tech_parts.is_empty() {
-                col = col.push(widget::text::caption(tech_parts.join(" \u{2022} ")).class(
-                    cosmic::theme::Text::Custom(|theme| cosmic::iced::widget::text::Style {
-                        color: Some(theme.cosmic().palette.neutral_6.into()),
+                col = col.push(widget::text::caption(sub_parts.join(" \u{2022} ")).class(
+                    cosmic::theme::Text::Custom(|_theme| cosmic::iced::widget::text::Style {
+                        color: Some(cosmic::iced::Color::from_rgba(1.0, 1.0, 1.0, 0.65)),
                     }),
                 ));
             }
         } else {
-            // No track: show placeholder title row with collapse btn
+            // No track: placeholder title row with collapse btn
             let title_row = widget::row()
-                .push(widget::text::title2("No track playing"))
+                .push(widget::text::title3("No track playing"))
                 .push(widget::Space::new(Length::Fill, Length::Shrink))
                 .push(collapse_btn)
                 .align_y(Alignment::Center);
@@ -294,18 +267,21 @@ pub fn expanded_now_playing<'a>(
             )
             .push(bottom_controls);
 
-        col.spacing(16).width(Length::Fill).into()
+        col.spacing(10).width(Length::Fill).into()
     };
 
-    // Frosted container: dark semi-opaque background, top corners rounded
+    // Frosted container: dark semi-opaque, top corners rounded, white text
+    // so icon buttons (which inherit text_color when not disabled) are visible.
     let panel = widget::container(panel_content)
         .width(Length::Fill)
-        .padding([20, 24, 24, 24])
+        .padding([14, 20, 20, 20])
         .class(cosmic::theme::Container::custom(|theme| {
             let cosmic = theme.cosmic();
             let r = cosmic.radius_m();
             cosmic::iced::widget::container::Style {
                 background: Some(cosmic::iced::Color::from_rgba(0.0, 0.0, 0.0, 0.72).into()),
+                // Force white text/icons so everything is legible on the dark panel
+                text_color: Some(cosmic::iced::Color::WHITE),
                 border: cosmic::iced::Border {
                     color: cosmic::iced::Color::from_rgba(1.0, 1.0, 1.0, 0.08),
                     width: 1.0,
@@ -396,6 +372,10 @@ pub fn expanded_now_playing<'a>(
         };
 
     // ── Background element ────────────────────────────────────────────────
+    // NOTE: Do NOT wrap the Shader in mouse_area here — the outer_col layer
+    // sits above it in the Stack and consumes all pointer events, so the
+    // mouse_area would never fire. Instead we push a transparent full-height
+    // mouse_area as the topmost Stack layer (see below).
     #[cfg(feature = "visualizer")]
     let bg_element: Option<cosmic::Element<'_, NowPlayingMessage>> = if visualizer_active {
         let shader = cosmic::iced::widget::Shader::new(super::viz_shader::VizProgram::new(
@@ -403,12 +383,7 @@ pub fn expanded_now_playing<'a>(
         ))
         .width(Length::Fill)
         .height(Length::Fixed(800.0));
-
-        Some(
-            widget::mouse_area(shader)
-                .on_double_press(NowPlayingMessage::ToggleVizFullscreen)
-                .into(),
-        )
+        Some(shader.into())
     } else {
         blurred_cover.map(|h| {
             let el: cosmic::Element<'_, NowPlayingMessage> = widget::icon::icon(h.clone())
@@ -446,12 +421,28 @@ pub fn expanded_now_playing<'a>(
                 .into();
 
         // Stack: black_base → bg_layer → outer_col → [viz_metadata_overlay]
+        //        → [viz_double_click_capture]
         #[allow(unused_mut)]
         let mut stack_widget = Stack::new().push(black_base).push(bg_layer).push(outer_col);
 
         #[cfg(feature = "visualizer")]
         if let Some(meta_overlay) = viz_metadata_overlay {
             stack_widget = stack_widget.push(meta_overlay);
+        }
+
+        // Topmost transparent layer: captures double-click on the visualizer.
+        // Must be the last pushed layer so it sits above all content.
+        // Passthrough for single clicks so panel controls still work.
+        #[cfg(feature = "visualizer")]
+        if visualizer_active {
+            let dbl_click_cap: cosmic::Element<'_, NowPlayingMessage> = widget::mouse_area(
+                widget::container(widget::Space::new(Length::Fill, Length::Fixed(800.0)))
+                    .width(Length::Fill)
+                    .height(Length::Fixed(800.0)),
+            )
+            .on_double_press(NowPlayingMessage::ToggleVizFullscreen)
+            .into();
+            stack_widget = stack_widget.push(dbl_click_cap);
         }
 
         stack_widget.width(Length::Fill).into()

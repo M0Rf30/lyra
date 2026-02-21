@@ -5,7 +5,7 @@
 //! This matches the original playback bar appearance. Clicking the bar
 //! background expands into the full now-playing view.
 
-use super::{format_time, NowPlayingMessage};
+use super::{format_time, truncate_str, NowPlayingMessage};
 use crate::config::RepeatMode;
 use crate::library::Track;
 use crate::player::PlaybackState;
@@ -50,10 +50,10 @@ pub fn playback_bar<'a>(
     // --- Left: cover art + track info + heart icon ---
     let track_info: cosmic::Element<'_, NowPlayingMessage> = if let Some(track) = current_track {
         let art: cosmic::Element<'_, NowPlayingMessage> = if let Some(handle) = cover_art {
-            widget::icon::icon(handle.clone()).size(48).into()
+            widget::icon::icon(handle.clone()).size(56).into()
         } else {
             widget::icon::from_name("media-optical-cd-audio-symbolic")
-                .size(40)
+                .size(48)
                 .into()
         };
 
@@ -63,27 +63,28 @@ pub fn playback_bar<'a>(
         } else {
             "non-starred-symbolic"
         };
-        let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(16))
+        let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(20))
             .on_press(NowPlayingMessage::ToggleFavorite(track.id.to_string()));
 
         widget::row()
             .push(
                 widget::container(art)
-                    .width(48)
-                    .height(48)
+                    .width(56)
+                    .height(56)
                     .align_x(Horizontal::Center)
                     .align_y(Vertical::Center),
             )
             .push(
                 widget::column()
-                    .push(widget::text(track.title.as_str()))
-                    .push(widget::text::caption(track.artist.as_str()))
-                    .spacing(2),
+                    .push(widget::text::body(truncate_str(&track.title, 30)))
+                    .push(widget::text::caption(truncate_str(&track.artist, 30)))
+                    .spacing(2)
+                    .width(Length::Fill),
             )
             .push(heart_btn)
             .spacing(12)
             .align_y(Alignment::Center)
-            .width(Length::Shrink)
+            .width(Length::FillPortion(1))
             .into()
     } else {
         widget::row()
@@ -91,6 +92,7 @@ pub fn playback_bar<'a>(
             .push(widget::text::caption("No track playing"))
             .spacing(12)
             .align_y(Alignment::Center)
+            .width(Length::FillPortion(1))
             .into()
     };
 
@@ -111,23 +113,23 @@ pub fn playback_bar<'a>(
 
     let transport = widget::row()
         .push(
-            widget::button::icon(widget::icon::from_name(shuffle_icon))
+            widget::button::icon(widget::icon::from_name(shuffle_icon).size(24))
                 .on_press(NowPlayingMessage::ToggleShuffle),
         )
         .push(
-            widget::button::icon(widget::icon::from_name("media-skip-backward-symbolic"))
+            widget::button::icon(widget::icon::from_name("media-skip-backward-symbolic").size(24))
                 .on_press(NowPlayingMessage::Previous),
         )
         .push(
-            widget::button::icon(widget::icon::from_name(play_icon))
+            widget::button::icon(widget::icon::from_name(play_icon).size(28))
                 .on_press(NowPlayingMessage::TogglePlayback),
         )
         .push(
-            widget::button::icon(widget::icon::from_name("media-skip-forward-symbolic"))
+            widget::button::icon(widget::icon::from_name("media-skip-forward-symbolic").size(24))
                 .on_press(NowPlayingMessage::Next),
         )
         .push(
-            widget::button::icon(widget::icon::from_name(repeat_icon))
+            widget::button::icon(widget::icon::from_name(repeat_icon).size(24))
                 .on_press(NowPlayingMessage::CycleRepeat),
         )
         .spacing(4)
@@ -148,27 +150,34 @@ pub fn playback_bar<'a>(
         .width(Length::Fill);
 
     // --- Right: volume + lyrics ---
-    let right_section = widget::row()
-        .push(widget::icon::from_name("audio-volume-high-symbolic").size(16))
-        .push(
-            widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
-                .step(0.01)
-                .width(100),
-        )
-        .push(
-            widget::button::icon(widget::icon::from_name("view-list-lyrics-symbolic"))
-                .on_press(NowPlayingMessage::ShowLyrics),
-        )
-        .spacing(8)
-        .align_y(Alignment::Center);
+    // FillPortion(1) matches the left section so center stays truly centered.
+    let right_section = widget::container(
+        widget::row()
+            .push(widget::icon::from_name("audio-volume-high-symbolic").size(20))
+            .push(
+                widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
+                    .step(0.01)
+                    .width(120),
+            )
+            .push(
+                widget::button::icon(widget::icon::from_name("view-list-lyrics-symbolic"))
+                    .on_press(NowPlayingMessage::ShowLyrics),
+            )
+            .spacing(8)
+            .align_y(Alignment::Center),
+    )
+    .align_x(Horizontal::Right)
+    .width(Length::FillPortion(1));
 
-    // --- Compose: left | center+seek | right ---
+    // --- Compose: left(1) | center(2) | right(1) ---
+    // Equal FillPortion on left and right guarantees the center column is always
+    // at the true horizontal midpoint regardless of text length on either side.
     let center_section = widget::column()
         .push(transport)
         .push(seek_bar)
         .spacing(4)
         .align_x(Alignment::Center)
-        .width(Length::Fill);
+        .width(Length::FillPortion(2));
 
     let controls_row = widget::row()
         .push(track_info)
@@ -176,7 +185,7 @@ pub fn playback_bar<'a>(
         .push(right_section)
         .spacing(16)
         .align_y(Alignment::Center)
-        .padding(8);
+        .padding(12);
 
     // Standard Card container — identical to the original bar.
     // Wrapped in mouse_area so clicking the background opens the expanded view.
