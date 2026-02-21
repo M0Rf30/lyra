@@ -117,7 +117,10 @@ pub fn songs_list_view<'a>(
     filter_bar = filter_bar
         .push(widget::text::caption(format!("{} tracks", filtered.len())).width(Length::Fill));
 
-    // Column headers
+    // Column headers — widths must exactly mirror the row widths below.
+    // # and Duration are fixed; Title/Artist/Album use FillPortion so they
+    // scale together at any window width. The trailing Space mirrors the
+    // fixed-width action widgets (heart 18 + padding, 5×stars, genre btn, playlist btn).
     let header = widget::row()
         .push(widget::text("#").width(40))
         .push(
@@ -127,7 +130,7 @@ pub fn songs_list_view<'a>(
                 current_sort,
             )))
             .on_press(SongMessage::SortBy(SortField::Title))
-            .width(Length::Fill)
+            .width(Length::FillPortion(3))
             .class(cosmic::theme::Button::Text),
         )
         .push(
@@ -137,7 +140,7 @@ pub fn songs_list_view<'a>(
                 current_sort,
             )))
             .on_press(SongMessage::SortBy(SortField::Artist))
-            .width(200)
+            .width(Length::FillPortion(2))
             .class(cosmic::theme::Button::Text),
         )
         .push(
@@ -147,7 +150,7 @@ pub fn songs_list_view<'a>(
                 current_sort,
             )))
             .on_press(SongMessage::SortBy(SortField::Album))
-            .width(200)
+            .width(Length::FillPortion(2))
             .class(cosmic::theme::Button::Text),
         )
         .push(
@@ -157,16 +160,18 @@ pub fn songs_list_view<'a>(
                 current_sort,
             )))
             .on_press(SongMessage::SortBy(SortField::Duration))
-            .width(80)
+            .width(64)
             .class(cosmic::theme::Button::Text),
         )
-        // Space for favorite + rating + genre + playlist action columns
-        .push(widget::Space::with_width(180))
+        // Spacer matching the action column widths in each row:
+        // heart(~32) + 5×star(~32each=160) + genre btn(shrink) + playlist btn(~32) ≈ 224
+        // Using Shrink so it only occupies what the row's action widgets actually take.
+        .push(widget::Space::with_width(Length::Shrink))
         .spacing(8)
         .align_y(Alignment::Center)
         .padding([4, 8]);
 
-    let mut track_list = widget::column().spacing(1);
+    let mut track_list = widget::column().spacing(2);
 
     for (original_index, track) in &filtered {
         let track_id = track.id.to_string();
@@ -177,7 +182,7 @@ pub fn songs_list_view<'a>(
         } else {
             "non-starred-symbolic"
         };
-        let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(16))
+        let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(18))
             .on_press(SongMessage::ToggleFavorite(track_id.clone()));
 
         // Task 101: Star rating widget (1-5 stars)
@@ -185,7 +190,7 @@ pub fn songs_list_view<'a>(
 
         // Task 103: Genre chip
         let genre_widget: cosmic::Element<'_, SongMessage> = if !track.genre.is_empty() {
-            widget::button::custom(widget::text::caption(&track.genre))
+            widget::button::custom(widget::text::body(&track.genre))
                 .on_press(SongMessage::FilterByGenre(track.genre.clone()))
                 .class(cosmic::theme::Button::Standard)
                 .into()
@@ -206,17 +211,17 @@ pub fn songs_list_view<'a>(
         let row = widget::button::custom(
             widget::row()
                 .push(widget::text(format!("{}", original_index + 1)).width(40))
-                .push(widget::text(track.title.as_str()).width(Length::Fill))
-                .push(widget::text(track.artist.as_str()).width(200))
-                .push(widget::text(track.album.as_str()).width(200))
-                .push(widget::text(track.duration_string()).width(80))
+                .push(widget::text(track.title.as_str()).width(Length::FillPortion(3)))
+                .push(widget::text(track.artist.as_str()).width(Length::FillPortion(2)))
+                .push(widget::text(track.album.as_str()).width(Length::FillPortion(2)))
+                .push(widget::text(track.duration_string()).width(64))
                 .push(heart_btn)
                 .push(rating_row)
                 .push(genre_widget)
                 .push(playlist_btn)
                 .spacing(8)
                 .align_y(Alignment::Center)
-                .padding([4, 8]),
+                .padding([8, 8]),
         )
         .on_press(SongMessage::PlayTrack(*original_index))
         .width(Length::Fill)
@@ -258,7 +263,7 @@ pub fn star_rating_widget<'a>(
         };
         // Clicking the current rating value clears it (sets to 0).
         let new_rating = if star == rating { 0 } else { star };
-        let btn = widget::button::icon(widget::icon::from_name(icon_name).size(14))
+        let btn = widget::button::icon(widget::icon::from_name(icon_name).size(16))
             .on_press(SongMessage::SetRating(track_id.clone(), new_rating));
         row = row.push(btn);
     }

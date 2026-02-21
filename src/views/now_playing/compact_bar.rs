@@ -187,11 +187,29 @@ pub fn playback_bar<'a>(
         .align_y(Alignment::Center)
         .padding(12);
 
-    // Standard Card container — identical to the original bar.
-    // Wrapped in mouse_area so clicking the background opens the expanded view.
-    let bar = widget::container(controls_row)
-        .width(Length::Fill)
-        .class(cosmic::theme::Container::Card);
+    // Card container with explicit text/icon color so buttons remain readable
+    // at any window size or COSMIC layer (Background/Primary/Secondary).
+    // ButtonClass::Icon inherits icon color from the nearest container's
+    // text_color when its own icon_color is None — pinning it here prevents
+    // the color from shifting when the window layer changes on maximize.
+    let bar = widget::container(controls_row).width(Length::Fill).class(
+        cosmic::theme::Container::custom(|theme| {
+            let cosmic = theme.cosmic();
+            let container = theme.current_container();
+            cosmic::iced::widget::container::Style {
+                icon_color: Some(container.component.on.into()),
+                text_color: Some(container.component.on.into()),
+                background: Some(cosmic::iced::Background::Color(
+                    container.component.base.into(),
+                )),
+                border: cosmic::iced::Border {
+                    radius: cosmic.corner_radii.radius_s.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }),
+    );
 
     widget::mouse_area(bar)
         .on_press(NowPlayingMessage::ExpandToggle)
