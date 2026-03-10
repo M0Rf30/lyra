@@ -50,14 +50,13 @@ pub fn playback_bar<'a>(
     // --- Left: cover art + track info + heart icon ---
     let track_info: cosmic::Element<'_, NowPlayingMessage> = if let Some(track) = current_track {
         let art: cosmic::Element<'_, NowPlayingMessage> = if let Some(handle) = cover_art {
-            widget::icon::icon(handle.clone()).size(56).into()
+            widget::icon::icon(handle.clone()).size(60).into()
         } else {
             widget::icon::from_name("media-optical-cd-audio-symbolic")
                 .size(48)
                 .into()
         };
 
-        // Task 100: Heart icon for favorite toggle
         let fav_icon_name = if track.is_favorite {
             "emblem-favorite-symbolic"
         } else {
@@ -69,8 +68,8 @@ pub fn playback_bar<'a>(
         widget::row()
             .push(
                 widget::container(art)
-                    .width(56)
-                    .height(56)
+                    .width(60)
+                    .height(60)
                     .align_x(Horizontal::Center)
                     .align_y(Vertical::Center),
             )
@@ -121,7 +120,7 @@ pub fn playback_bar<'a>(
                 .on_press(NowPlayingMessage::Previous),
         )
         .push(
-            widget::button::icon(widget::icon::from_name(play_icon).size(28))
+            widget::button::icon(widget::icon::from_name(play_icon).size(32))
                 .on_press(NowPlayingMessage::TogglePlayback),
         )
         .push(
@@ -169,9 +168,6 @@ pub fn playback_bar<'a>(
     .align_x(Horizontal::Right)
     .width(Length::FillPortion(1));
 
-    // --- Compose: left(1) | center(2) | right(1) ---
-    // Equal FillPortion on left and right guarantees the center column is always
-    // at the true horizontal midpoint regardless of text length on either side.
     let center_section = widget::column()
         .push(transport)
         .push(seek_bar)
@@ -179,19 +175,18 @@ pub fn playback_bar<'a>(
         .align_x(Alignment::Center)
         .width(Length::FillPortion(2));
 
+    let expandable_info = widget::mouse_area(track_info).on_press(NowPlayingMessage::ExpandToggle);
+
     let controls_row = widget::row()
-        .push(track_info)
+        .push(expandable_info)
         .push(center_section)
         .push(right_section)
         .spacing(16)
         .align_y(Alignment::Center)
         .padding(12);
 
-    let bar = widget::container(controls_row)
+    widget::container(controls_row)
         .width(Length::Fill)
-        .class(cosmic::theme::Container::Card);
-
-    widget::mouse_area(bar)
-        .on_press(NowPlayingMessage::ExpandToggle)
+        .class(cosmic::theme::Container::Card)
         .into()
 }
