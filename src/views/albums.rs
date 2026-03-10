@@ -3,6 +3,7 @@
 //! Albums grid view - displays album covers in a responsive grid (Lollypop-style).
 
 use crate::library::{Album, CoverArt, Playlist};
+use crate::views::card_button_class;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -59,25 +60,33 @@ pub fn album_grid_view<'a>(
             let key = CoverArt::album_key(&album.artist, &album.name);
             let art_widget: cosmic::Element<'_, AlbumMessage> =
                 if let Some(handle) = cover_images.get(&key) {
-                    widget::icon::icon(handle.clone()).size(150).into()
+                    widget::icon::icon(handle.clone()).size(160).into()
                 } else {
-                    widget::icon::from_name("media-optical-cd-audio-symbolic")
-                        .size(80)
+                    let placeholder_icon: cosmic::Element<'_, AlbumMessage> =
+                        widget::icon::from_name("media-optical-cd-audio-symbolic")
+                            .size(64)
+                            .into();
+                    widget::container(placeholder_icon)
+                        .width(160)
+                        .height(160)
+                        .align_x(Horizontal::Center)
+                        .align_y(Vertical::Center)
+                        .class(cosmic::theme::Container::Card)
                         .into()
                 };
 
             let album_card = widget::column()
                 .push(
                     widget::container(art_widget)
-                        .width(150)
-                        .height(150)
+                        .width(160)
+                        .height(160)
                         .align_x(Horizontal::Center)
                         .align_y(Vertical::Center),
                 )
                 .push(
                     widget::column()
-                        .push(widget::text(truncate_str(&album.name, 20)).width(150))
-                        .push(widget::text::caption(truncate_str(&album.artist, 24)).width(150))
+                        .push(widget::text(truncate_str(&album.name, 22)).width(160))
+                        .push(widget::text::caption(truncate_str(&album.artist, 26)).width(160))
                         .spacing(2),
                 )
                 .spacing(8);
@@ -85,14 +94,14 @@ pub fn album_grid_view<'a>(
             widget::button::custom(album_card)
                 .on_press(AlbumMessage::SelectAlbum(index))
                 .padding(8)
-                .class(cosmic::theme::Button::Text)
+                .class(card_button_class())
                 .into()
         })
         .collect();
 
     let grid = widget::flex_row(cards)
-        .column_spacing(16)
-        .row_spacing(16)
+        .column_spacing(20)
+        .row_spacing(20)
         .width(Length::Fill);
 
     widget::scrollable(widget::container(grid).padding(16).width(Length::Fill))
@@ -100,12 +109,12 @@ pub fn album_grid_view<'a>(
         .into()
 }
 
-/// Render the detail view for a selected album.
 pub fn album_detail_view<'a>(
     album: &'a Album,
     album_index: usize,
     cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
     playlists: &'a [Playlist],
+    current_track_id: Option<i64>,
 ) -> cosmic::Element<'a, AlbumMessage> {
     let key = CoverArt::album_key(&album.artist, &album.name);
     let art_widget: cosmic::Element<'_, AlbumMessage> = if let Some(handle) = cover_images.get(&key)
@@ -178,8 +187,16 @@ pub fn album_detail_view<'a>(
 
     for (track_idx, track) in album.tracks.iter().enumerate() {
         let track_id = track.id.to_string();
+        let is_playing = current_track_id == Some(track.id);
 
-        // Task 99: Heart icon for favorite toggle
+        let num_col: cosmic::Element<'_, AlbumMessage> = if is_playing {
+            widget::icon::from_name("media-playback-start-symbolic")
+                .size(14)
+                .into()
+        } else {
+            widget::text(format!("{}", track.track_number)).into()
+        };
+
         let fav_icon_name = if track.is_favorite {
             "emblem-favorite-symbolic"
         } else {
@@ -216,7 +233,11 @@ pub fn album_detail_view<'a>(
 
         let row = widget::button::custom(
             widget::row()
-                .push(widget::text(format!("{}", track.track_number)).width(40))
+                .push(
+                    widget::container(num_col)
+                        .width(40)
+                        .align_x(Horizontal::Center),
+                )
                 .push(widget::text(track.title.as_str()).width(Length::Fill))
                 .push(widget::text(track.artist.as_str()).width(200))
                 .push(widget::text(track.duration_string()).width(60))

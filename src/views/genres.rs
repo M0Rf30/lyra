@@ -3,6 +3,7 @@
 //! Genres view - grid of all genres; clicking one shows filtered tracks.
 
 use crate::library::Track;
+use crate::views::card_button_class;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -40,38 +41,39 @@ pub fn genre_grid_view(genres: &[String]) -> cosmic::Element<'_, GenreMessage> {
         .iter()
         .enumerate()
         .map(|(index, genre)| {
+            let icon_name = genre_icon_name(genre);
             let genre_icon: cosmic::Element<'_, GenreMessage> =
-                widget::icon::from_name("audio-x-generic-symbolic")
-                    .size(48)
-                    .into();
+                widget::icon::from_name(icon_name).size(48).into();
+
+            let icon_container: cosmic::Element<'_, GenreMessage> = widget::container(genre_icon)
+                .width(140)
+                .height(100)
+                .align_x(Horizontal::Center)
+                .align_y(Vertical::Center)
+                .class(cosmic::theme::Container::Card)
+                .into();
 
             let card = widget::column()
+                .push(icon_container)
                 .push(
-                    widget::container(genre_icon)
-                        .width(120)
-                        .height(80)
-                        .align_x(Horizontal::Center)
-                        .align_y(Vertical::Center),
-                )
-                .push(
-                    widget::text(truncate_str(genre, 18))
-                        .width(120)
+                    widget::text(truncate_str(genre, 22))
+                        .width(140)
                         .align_x(Horizontal::Center),
                 )
-                .spacing(4)
+                .spacing(6)
                 .align_x(Alignment::Center);
 
             widget::button::custom(card)
                 .on_press(GenreMessage::SelectGenre(index))
                 .padding(8)
-                .class(cosmic::theme::Button::Text)
+                .class(card_button_class())
                 .into()
         })
         .collect();
 
     let grid = widget::flex_row(cards)
-        .column_spacing(16)
-        .row_spacing(16)
+        .column_spacing(20)
+        .row_spacing(20)
         .width(Length::Fill);
 
     widget::scrollable(widget::container(grid).padding(16).width(Length::Fill))
@@ -85,7 +87,7 @@ pub fn genre_detail_view<'a>(
     tracks: &'a [Track],
 ) -> cosmic::Element<'a, GenreMessage> {
     let detail_icon: cosmic::Element<'_, GenreMessage> =
-        widget::icon::from_name("audio-x-generic-symbolic")
+        widget::icon::from_name(genre_icon_name(genre_name))
             .size(64)
             .into();
 
@@ -140,6 +142,39 @@ pub fn genre_detail_view<'a>(
     )
     .height(Length::Fill)
     .into()
+}
+
+fn genre_icon_name(genre: &str) -> &'static str {
+    let lower = genre.to_lowercase();
+    if lower.contains("rock") || lower.contains("metal") || lower.contains("punk") {
+        "audio-x-generic-symbolic"
+    } else if lower.contains("classic") || lower.contains("orchestra") || lower.contains("opera") {
+        "media-optical-cd-audio-symbolic"
+    } else if lower.contains("jazz") || lower.contains("blues") || lower.contains("soul") {
+        "audio-card-symbolic"
+    } else if lower.contains("electronic")
+        || lower.contains("techno")
+        || lower.contains("trance")
+        || lower.contains("house")
+        || lower.contains("edm")
+        || lower.contains("synth")
+    {
+        "computer-symbolic"
+    } else if lower.contains("folk") || lower.contains("country") || lower.contains("acoustic") {
+        "emblem-music-symbolic"
+    } else if lower.contains("hip") || lower.contains("rap") || lower.contains("r&b") {
+        "media-record-symbolic"
+    } else if lower.contains("pop") {
+        "starred-symbolic"
+    } else if lower.contains("ambient") || lower.contains("new age") || lower.contains("asmr") {
+        "weather-clear-night-symbolic"
+    } else if lower.contains("soundtrack") || lower.contains("score") || lower.contains("theme") {
+        "applications-multimedia-symbolic"
+    } else if lower.contains("reggae") || lower.contains("ska") {
+        "weather-clear-symbolic"
+    } else {
+        "audio-x-generic-symbolic"
+    }
 }
 
 fn truncate_str(s: &str, max_chars: usize) -> String {
