@@ -9,7 +9,7 @@ use crate::provider::local::LocalProvider;
 use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{MusicProvider, ProviderRegistry};
-use crate::views::{albums, artists, equalizer, genres, lyrics, now_playing, playlists, providers, songs};
+use crate::views::{albums, artists, equalizer, genres, lyrics, now_playing, playlists, providers, songs, tag_editor};
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::{Alignment, Length, Subscription};
@@ -70,6 +70,7 @@ pub struct AppModel {
     selected_album: Option<usize>,
     selected_artist: Option<usize>,
     songs_sort: songs::SortField,
+    songs_sort_descending: bool,
     /// When true, the Songs view shows only favorite tracks.
     favorites_filter: bool,
     /// When set, the Songs view shows only tracks matching this genre.
@@ -80,6 +81,7 @@ pub struct AppModel {
     selected_playlist: Option<usize>,
     /// Text input for new playlist name.
     new_playlist_name: String,
+    playlist_edit_name: String,
     /// All distinct genres from the active provider.
     all_genres: Vec<String>,
     /// Currently selected genre index (for detail view).
@@ -137,6 +139,20 @@ pub struct AppModel {
     expand_anim_start: Option<std::time::Instant>,
     /// Progress value when the current animation started (for reversals).
     expand_anim_from: f32,
+
+    tag_editor_selected: Option<usize>,
+    tag_editor_title: String,
+    tag_editor_artist: String,
+    tag_editor_album: String,
+    tag_editor_album_artist: String,
+    tag_editor_year: String,
+    tag_editor_track_number: String,
+    tag_editor_disc_number: String,
+    tag_editor_genre: String,
+    tag_editor_comment: String,
+    tag_editor_search: String,
+    tag_editor_status: Option<String>,
+    tag_editor_dirty: bool,
 
     // ProjectM visualizer (behind feature flag)
     #[cfg(feature = "visualizer")]
@@ -391,6 +407,12 @@ pub enum Message {
     #[cfg(feature = "visualizer")]
     ToggleVisualizerFullscreen,
 
+    TagEditorSelectTrack(usize),
+    TagEditorFieldChanged(TagEditorField, String),
+    TagEditorSearchChanged(String),
+    TagEditorSave,
+    TagEditorSaveResult(Result<(), String>),
+
     // Application lifecycle
     Quit,
 }
@@ -471,6 +493,11 @@ impl cosmic::Application for AppModel {
             .text(fl!("genres"))
             .data::<Page>(Page::Genres)
             .icon(icon::from_name("audio-x-generic-symbolic"));
+
+        nav.insert()
+            .text(fl!("tag-editor"))
+            .data::<Page>(Page::TagEditor)
+            .icon(icon::from_name("document-edit-symbolic"));
 
         let about = About::default()
             .name(fl!("app-title"))
@@ -713,11 +740,13 @@ impl cosmic::Application for AppModel {
             selected_album: None,
             selected_artist: None,
             songs_sort: songs::SortField::Title,
+            songs_sort_descending: false,
             favorites_filter: false,
             genre_filter: None,
             playlists: Vec::new(),
             selected_playlist: None,
             new_playlist_name: String::new(),
+            playlist_edit_name: String::new(),
             all_genres: Vec::new(),
             selected_genre: None,
             genre_tracks: Vec::new(),
@@ -772,6 +801,19 @@ impl cosmic::Application for AppModel {
             next_preset_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "visualizer")]
             viz_metadata_opacity: 0.0,
+            tag_editor_selected: None,
+            tag_editor_title: String::new(),
+            tag_editor_artist: String::new(),
+            tag_editor_album: String::new(),
+            tag_editor_album_artist: String::new(),
+            tag_editor_year: String::new(),
+            tag_editor_track_number: String::new(),
+            tag_editor_disc_number: String::new(),
+            tag_editor_genre: String::new(),
+            tag_editor_comment: String::new(),
+            tag_editor_search: String::new(),
+            tag_editor_status: None,
+            tag_editor_dirty: false,
         };
 
         app.rebuild_provider_list();
@@ -1019,7 +1061,7 @@ impl cosmic::Application for AppModel {
             Page::Albums => {
                 if let Some(album_idx) = self.selected_album {
                     if let Some(album) = self.all_albums.get(album_idx) {
-                        albums::album_detail_view(album, album_idx, &self.cover_images, &self.playlists)
+                        albums::album_detail_view(album, album_idx, &self.cover_images, &self.playlists, self.current_track.as_ref().map(|t| t.id))
                             .map(Message::from)
                     } else {
                         widget::text("Album not found").into()
@@ -1038,6 +1080,7 @@ impl cosmic::Application for AppModel {
                             artist_idx,
                             &self.artist_avatars,
                             &self.cover_images,
+                            self.current_track.as_ref().map(|t| t.id),
                         )
                         .map(Message::from)
                     } else {
@@ -1053,9 +1096,11 @@ impl cosmic::Application for AppModel {
                 songs::songs_list_view(
                     &self.all_tracks,
                     self.songs_sort,
+                    self.songs_sort_descending,
                     self.favorites_filter,
                     self.genre_filter.as_deref(),
                     &self.playlists,
+                    self.current_track.as_ref().map(|t| t.id),
                 ).map(|msg| match msg {
                     songs::SongMessage::PlayTrack(i) => Message::PlayTrackIndex(i),
                     songs::SongMessage::SortBy(f) => Message::SortSongs(f),
@@ -1071,7 +1116,7 @@ impl cosmic::Application for AppModel {
             Page::Playlists => {
                 if let Some(pl_idx) = self.selected_playlist {
                     if let Some(playlist) = self.playlists.get(pl_idx) {
-                        playlists::playlist_detail_view(playlist, pl_idx)
+                        playlists::playlist_detail_view(playlist, pl_idx, &self.playlist_edit_name)
                             .map(|msg| match msg {
                                 playlists::PlaylistMessage::BackToList => Message::BackToPlaylistList,
                                 playlists::PlaylistMessage::PlayPlaylist(i) => Message::PlayPlaylist(i),
@@ -1124,6 +1169,39 @@ impl cosmic::Application for AppModel {
                             genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
                         })
                 }
+            }
+
+            Page::TagEditor => {
+                tag_editor::tag_editor_view(
+                    &self.all_tracks,
+                    self.tag_editor_selected,
+                    &self.tag_editor_title,
+                    &self.tag_editor_artist,
+                    &self.tag_editor_album,
+                    &self.tag_editor_album_artist,
+                    &self.tag_editor_year,
+                    &self.tag_editor_track_number,
+                    &self.tag_editor_disc_number,
+                    &self.tag_editor_genre,
+                    &self.tag_editor_comment,
+                    &self.tag_editor_search,
+                    self.tag_editor_status.as_deref(),
+                    self.tag_editor_dirty,
+                )
+                .map(|msg| match msg {
+                    tag_editor::TagEditorMessage::SelectTrack(i) => Message::TagEditorSelectTrack(i),
+                    tag_editor::TagEditorMessage::TitleChanged(s) => Message::TagEditorFieldChanged(TagEditorField::Title, s),
+                    tag_editor::TagEditorMessage::ArtistChanged(s) => Message::TagEditorFieldChanged(TagEditorField::Artist, s),
+                    tag_editor::TagEditorMessage::AlbumChanged(s) => Message::TagEditorFieldChanged(TagEditorField::Album, s),
+                    tag_editor::TagEditorMessage::AlbumArtistChanged(s) => Message::TagEditorFieldChanged(TagEditorField::AlbumArtist, s),
+                    tag_editor::TagEditorMessage::YearChanged(s) => Message::TagEditorFieldChanged(TagEditorField::Year, s),
+                    tag_editor::TagEditorMessage::TrackNumberChanged(s) => Message::TagEditorFieldChanged(TagEditorField::TrackNumber, s),
+                    tag_editor::TagEditorMessage::DiscNumberChanged(s) => Message::TagEditorFieldChanged(TagEditorField::DiscNumber, s),
+                    tag_editor::TagEditorMessage::GenreChanged(s) => Message::TagEditorFieldChanged(TagEditorField::Genre, s),
+                    tag_editor::TagEditorMessage::CommentChanged(s) => Message::TagEditorFieldChanged(TagEditorField::Comment, s),
+                    tag_editor::TagEditorMessage::SearchChanged(s) => Message::TagEditorSearchChanged(s),
+                    tag_editor::TagEditorMessage::Save => Message::TagEditorSave,
+                })
             }
         };
 
@@ -1231,6 +1309,7 @@ impl cosmic::Application for AppModel {
                 layout_col = layout_col.push(
                     widget::container(
                         widget::row()
+                            .push(widget::icon::from_name("emblem-synchronizing-symbolic").size(16))
                             .push(widget::text::caption(fl!("scanning-library")))
                             .spacing(8)
                             .align_y(Alignment::Center),
@@ -2137,8 +2216,13 @@ impl cosmic::Application for AppModel {
             }
 
             Message::SortSongs(field) => {
-                self.songs_sort = field;
-                self.sort_tracks(field);
+                if field == self.songs_sort {
+                    self.songs_sort_descending = !self.songs_sort_descending;
+                } else {
+                    self.songs_sort = field;
+                    self.songs_sort_descending = false;
+                }
+                self.sort_tracks(self.songs_sort);
             }
 
             Message::ToggleFavoritesFilter => {
@@ -3066,6 +3150,9 @@ impl cosmic::Application for AppModel {
             // -- Playlists view --
             Message::SelectPlaylist(idx) => {
                 self.selected_playlist = Some(idx);
+                if let Some(pl) = self.playlists.get(idx) {
+                    self.playlist_edit_name = pl.name.clone();
+                }
             }
 
             Message::BackToPlaylistList => {
@@ -3144,8 +3231,8 @@ impl cosmic::Application for AppModel {
                 self.new_playlist_name = name;
             }
 
-            Message::RenamePlaylistInput(_idx, _text) => {
-                // Rename input state is handled locally in the view for now.
+            Message::RenamePlaylistInput(_idx, text) => {
+                self.playlist_edit_name = text;
             }
 
             Message::PlaylistsLoaded(playlists) => {
@@ -3192,6 +3279,136 @@ impl cosmic::Application for AppModel {
 
             Message::GenreTracksLoaded(tracks) => {
                 self.genre_tracks = tracks;
+            }
+
+            Message::TagEditorSelectTrack(idx) => {
+                let local_tracks: Vec<&Track> = self
+                    .all_tracks
+                    .iter()
+                    .filter(|t| t.provider_id.as_ref() == "local")
+                    .collect();
+                if let Some(track) = local_tracks.get(idx) {
+                    self.tag_editor_selected = Some(idx);
+                    self.tag_editor_title = track.title.clone();
+                    self.tag_editor_artist = track.artist.clone();
+                    self.tag_editor_album = track.album.clone();
+                    self.tag_editor_album_artist = track.album_artist.clone();
+                    self.tag_editor_year = if track.year > 0 { track.year.to_string() } else { String::new() };
+                    self.tag_editor_track_number = if track.track_number > 0 { track.track_number.to_string() } else { String::new() };
+                    self.tag_editor_disc_number = if track.disc_number > 0 { track.disc_number.to_string() } else { String::new() };
+                    self.tag_editor_genre = track.genre.clone();
+                    self.tag_editor_comment = String::new();
+                    self.tag_editor_status = None;
+                    self.tag_editor_dirty = false;
+                }
+            }
+
+            Message::TagEditorFieldChanged(field, value) => {
+                match field {
+                    TagEditorField::Title => self.tag_editor_title = value,
+                    TagEditorField::Artist => self.tag_editor_artist = value,
+                    TagEditorField::Album => self.tag_editor_album = value,
+                    TagEditorField::AlbumArtist => self.tag_editor_album_artist = value,
+                    TagEditorField::Year => self.tag_editor_year = value,
+                    TagEditorField::TrackNumber => self.tag_editor_track_number = value,
+                    TagEditorField::DiscNumber => self.tag_editor_disc_number = value,
+                    TagEditorField::Genre => self.tag_editor_genre = value,
+                    TagEditorField::Comment => self.tag_editor_comment = value,
+                }
+                self.tag_editor_dirty = true;
+                self.tag_editor_status = None;
+            }
+
+            Message::TagEditorSearchChanged(query) => {
+                self.tag_editor_search = query;
+            }
+
+            Message::TagEditorSave => {
+                let Some(idx) = self.tag_editor_selected else {
+                    return Task::none();
+                };
+                let local_tracks: Vec<Track> = self
+                    .all_tracks
+                    .iter()
+                    .filter(|t| t.provider_id.as_ref() == "local")
+                    .cloned()
+                    .collect();
+                let Some(track) = local_tracks.into_iter().nth(idx) else {
+                    return Task::none();
+                };
+                let path = track.path.clone();
+                let title = self.tag_editor_title.clone();
+                let artist = self.tag_editor_artist.clone();
+                let album = self.tag_editor_album.clone();
+                let album_artist = self.tag_editor_album_artist.clone();
+                let year = self.tag_editor_year.clone();
+                let track_number = self.tag_editor_track_number.clone();
+                let disc_number = self.tag_editor_disc_number.clone();
+                let genre = self.tag_editor_genre.clone();
+                let comment = self.tag_editor_comment.clone();
+                return cosmic::task::future(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        use lofty::config::{ParseOptions, WriteOptions};
+                        use lofty::file::{BoundTaggedFile, TaggedFileExt};
+                        use lofty::prelude::*;
+                        use lofty::tag::ItemKey;
+                        let file = std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(&path)
+                            .map_err(|e| format!("Cannot open file: {e}"))?;
+                        let mut bound = BoundTaggedFile::read_from(file, ParseOptions::new())
+                            .map_err(|e| format!("Cannot read tags: {e}"))?;
+                        if bound.primary_tag_mut().is_none() && bound.first_tag_mut().is_none() {
+                            return Err("No writable tag found".to_string());
+                        }
+                        let tag = if bound.primary_tag_mut().is_some() {
+                            bound.primary_tag_mut().unwrap()
+                        } else {
+                            bound.first_tag_mut().unwrap()
+                        };
+                        tag.set_title(title);
+                        tag.set_artist(artist);
+                        tag.set_album(album);
+                        tag.insert_text(ItemKey::AlbumArtist, album_artist);
+                        if let Ok(y) = year.parse::<u32>() {
+                            tag.insert_text(ItemKey::Year, y.to_string());
+                        } else if year.is_empty() {
+                            tag.remove_key(ItemKey::Year);
+                        }
+                        if let Ok(n) = track_number.parse::<u32>() {
+                            tag.set_track(n);
+                        }
+                        if let Ok(d) = disc_number.parse::<u32>() {
+                            tag.set_disk(d);
+                        }
+                        tag.set_genre(genre);
+                        if comment.is_empty() {
+                            tag.remove_key(ItemKey::Comment);
+                        } else {
+                            tag.insert_text(ItemKey::Comment, comment);
+                        }
+                        bound
+                            .save(WriteOptions::default())
+                            .map_err(|e| format!("Failed to save tags: {e}"))
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(format!("Task error: {e}")));
+                    cosmic::Action::App(Message::TagEditorSaveResult(result))
+                });
+            }
+
+            Message::TagEditorSaveResult(result) => {
+                match result {
+                    Ok(()) => {
+                        self.tag_editor_dirty = false;
+                        self.tag_editor_status = Some(fl!("tag-editor-saved"));
+                        return cosmic::task::message(cosmic::Action::App(Message::ScanLibrary));
+                    }
+                    Err(e) => {
+                        self.tag_editor_status = Some(format!("{}: {e}", fl!("tag-editor-error")));
+                    }
+                }
             }
 
             Message::Quit => {
@@ -3906,13 +4123,24 @@ impl AppModel {
     }
 
     fn sort_tracks(&mut self, field: songs::SortField) {
+        let desc = self.songs_sort_descending;
         match field {
-            songs::SortField::Title => self.all_tracks.sort_by(|a, b| a.title.cmp(&b.title)),
-            songs::SortField::Artist => self.all_tracks.sort_by(|a, b| a.artist.cmp(&b.artist)),
-            songs::SortField::Album => self.all_tracks.sort_by(|a, b| a.album.cmp(&b.album)),
-            songs::SortField::Duration => {
-                self.all_tracks.sort_by(|a, b| a.duration.cmp(&b.duration))
-            }
+            songs::SortField::Title => self.all_tracks.sort_by(|a, b| {
+                let ord = a.title.to_lowercase().cmp(&b.title.to_lowercase());
+                if desc { ord.reverse() } else { ord }
+            }),
+            songs::SortField::Artist => self.all_tracks.sort_by(|a, b| {
+                let ord = a.artist.to_lowercase().cmp(&b.artist.to_lowercase());
+                if desc { ord.reverse() } else { ord }
+            }),
+            songs::SortField::Album => self.all_tracks.sort_by(|a, b| {
+                let ord = a.album.to_lowercase().cmp(&b.album.to_lowercase());
+                if desc { ord.reverse() } else { ord }
+            }),
+            songs::SortField::Duration => self.all_tracks.sort_by(|a, b| {
+                let ord = a.duration.cmp(&b.duration);
+                if desc { ord.reverse() } else { ord }
+            }),
         }
     }
 
@@ -4008,12 +4236,26 @@ impl AppModel {
 
 /// Navigation pages.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TagEditorField {
+    Title,
+    Artist,
+    Album,
+    AlbumArtist,
+    Year,
+    TrackNumber,
+    DiscNumber,
+    Genre,
+    Comment,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Page {
     Albums,
     Artists,
     Songs,
     Playlists,
     Genres,
+    TagEditor,
 }
 
 /// Context drawer pages.
