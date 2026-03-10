@@ -1,29 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0
 
-//! Songs list view - flat track listing with sorting options.
-
 use crate::library::{Playlist, Track};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
 
-/// Messages from the songs view.
 #[derive(Debug, Clone)]
 pub enum SongMessage {
     PlayTrack(usize),
     SortBy(SortField),
-    /// Toggle favorite status for a track (track ID as string).
     ToggleFavorite(String),
-    /// Set rating (1-5) for a track. 0 clears the rating.
     SetRating(String, u8),
-    /// Add track to playlist (track source_uri, playlist ID).
     AddToPlaylist(String, String),
-    /// Toggle the favorites-only filter.
     ToggleFavoritesFilter,
-    /// Filter by genre.
     FilterByGenre(String),
-    /// Clear the active genre filter.
     ClearGenreFilter,
 }
 
@@ -35,15 +26,15 @@ pub enum SortField {
     Duration,
 }
 
-/// Render the songs list view with column headers.
 pub fn songs_list_view<'a>(
     tracks: &'a [Track],
     current_sort: SortField,
+    sort_descending: bool,
     favorites_filter: bool,
     genre_filter: Option<&'a str>,
     playlists: &'a [Playlist],
+    current_track_id: Option<i64>,
 ) -> cosmic::Element<'a, SongMessage> {
-    // Apply filters
     let filtered: Vec<(usize, &Track)> = tracks
         .iter()
         .enumerate()
@@ -78,7 +69,6 @@ pub fn songs_list_view<'a>(
     // Filter bar: Favorites toggle + genre filter indicator
     let mut filter_bar = widget::row().spacing(8).align_y(Alignment::Center);
 
-    // Task 106: Favorites toggle button
     let fav_icon = if favorites_filter {
         "emblem-favorite-symbolic"
     } else {
@@ -99,7 +89,6 @@ pub fn songs_list_view<'a>(
     });
     filter_bar = filter_bar.push(fav_button);
 
-    // Genre filter chip (shown when active)
     if let Some(genre) = genre_filter {
         let genre_chip = widget::button::custom(
             widget::row()
@@ -113,21 +102,18 @@ pub fn songs_list_view<'a>(
         filter_bar = filter_bar.push(genre_chip);
     }
 
-    // Show count
     filter_bar = filter_bar
         .push(widget::text::caption(format!("{} tracks", filtered.len())).width(Length::Fill));
 
-    // Column headers — widths must exactly mirror the row widths below.
-    // # and Duration are fixed; Title/Artist/Album use FillPortion so they
-    // scale together at any window width. The trailing Space mirrors the
-    // fixed-width action widgets (heart 18 + padding, 5×stars, genre btn, playlist btn).
+    // Column headers — the leading 40px column mirrors the track number / play icon column.
     let header = widget::row()
-        .push(widget::text("#").width(40))
+        .push(widget::Space::with_width(40))
         .push(
             widget::button::custom(widget::text(sort_label(
                 "Title",
                 SortField::Title,
                 current_sort,
+                sort_descending,
             )))
             .on_press(SongMessage::SortBy(SortField::Title))
             .width(Length::FillPortion(3))
@@ -138,6 +124,7 @@ pub fn songs_list_view<'a>(
                 "Artist",
                 SortField::Artist,
                 current_sort,
+                sort_descending,
             )))
             .on_press(SongMessage::SortBy(SortField::Artist))
             .width(Length::FillPortion(2))
@@ -148,6 +135,7 @@ pub fn songs_list_view<'a>(
                 "Album",
                 SortField::Album,
                 current_sort,
+                sort_descending,
             )))
             .on_press(SongMessage::SortBy(SortField::Album))
             .width(Length::FillPortion(2))
@@ -158,39 +146,71 @@ pub fn songs_list_view<'a>(
                 "Duration",
                 SortField::Duration,
                 current_sort,
+                sort_descending,
             )))
             .on_press(SongMessage::SortBy(SortField::Duration))
             .width(64)
             .class(cosmic::theme::Button::Text),
         )
-        // Spacer matching the action column widths in each row:
-        // heart(~32) + 5×star(~32each=160) + genre btn(shrink) + playlist btn(~32) ≈ 224
-        // Using Shrink so it only occupies what the row's action widgets actually take.
         .push(widget::Space::with_width(Length::Shrink))
         .spacing(8)
         .align_y(Alignment::Center)
         .padding([4, 8]);
 
+    if filtered.is_empty() {
+        let message = if favorites_filter {
+            "No favorites yet — click the heart on any track to add one"
+        } else {
+            "No tracks match the current filter"
+        };
+        return widget::column()
+            .push(filter_bar)
+            .push(header)
+            .push(widget::divider::horizontal::default())
+            .push(
+                widget::container(
+                    widget::column()
+                        .push(widget::icon::from_name("edit-find-symbolic").size(48))
+                        .push(widget::text::title3(message))
+                        .spacing(12)
+                        .align_x(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Horizontal::Center)
+                .align_y(Vertical::Center),
+            )
+            .padding(16)
+            .spacing(4)
+            .into();
+    }
+
     let mut track_list = widget::column().spacing(2);
 
     for (original_index, track) in &filtered {
         let track_id = track.id.to_string();
+        let is_playing = current_track_id == Some(track.id);
 
-        // Task 99: Heart icon toggle
+        let num_col: cosmic::Element<'_, SongMessage> = if is_playing {
+            widget::icon::from_name("media-playback-start-symbolic")
+                .size(14)
+                .into()
+        } else {
+            widget::text(format!("{}", original_index + 1)).into()
+        };
+
         let fav_icon_name = if track.is_favorite {
             "emblem-favorite-symbolic"
         } else {
             "non-starred-symbolic"
         };
-        let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(18))
+        let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(16))
             .on_press(SongMessage::ToggleFavorite(track_id.clone()));
 
-        // Task 101: Star rating widget (1-5 stars)
         let rating_row = star_rating_widget(track_id.clone(), track.rating);
 
-        // Task 103: Genre chip
         let genre_widget: cosmic::Element<'_, SongMessage> = if !track.genre.is_empty() {
-            widget::button::custom(widget::text::body(&track.genre))
+            widget::button::custom(widget::text::caption(&track.genre))
                 .on_press(SongMessage::FilterByGenre(track.genre.clone()))
                 .class(cosmic::theme::Button::Standard)
                 .into()
@@ -198,19 +218,17 @@ pub fn songs_list_view<'a>(
             widget::Space::with_width(0).into()
         };
 
-        // Task 98: Add to playlist button
         let playlist_btn: cosmic::Element<'_, SongMessage> = if !playlists.is_empty() {
             let source_uri = track.source_uri.clone();
-            let items: Vec<String> = playlists.iter().map(|p| p.name.clone()).collect();
             let pl_ids: Vec<String> = playlists.iter().map(|p| p.id.clone()).collect();
-            playlist_dropdown_button(source_uri, &items, &pl_ids)
+            playlist_dropdown_button(source_uri, &pl_ids)
         } else {
             widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16)).into()
         };
 
         let row = widget::button::custom(
             widget::row()
-                .push(widget::text(format!("{}", original_index + 1)).width(40))
+                .push(widget::container(num_col).width(40).align_x(Horizontal::Center))
                 .push(widget::text(track.title.as_str()).width(Length::FillPortion(3)))
                 .push(widget::text(track.artist.as_str()).width(Length::FillPortion(2)))
                 .push(widget::text(track.album.as_str()).width(Length::FillPortion(2)))
@@ -221,7 +239,7 @@ pub fn songs_list_view<'a>(
                 .push(playlist_btn)
                 .spacing(8)
                 .align_y(Alignment::Center)
-                .padding([8, 8]),
+                .padding([6, 8]),
         )
         .on_press(SongMessage::PlayTrack(*original_index))
         .width(Length::Fill)
@@ -243,45 +261,30 @@ pub fn songs_list_view<'a>(
         .into()
 }
 
-/// Render a 1-5 star rating widget.
-///
-/// Shows 5 star icons: filled for rated stars, outlined for unrated.
-/// Clicking a star sets the rating; clicking the current rating clears it.
 pub fn star_rating_widget<'a>(
     track_id: String,
     current_rating: Option<u8>,
 ) -> cosmic::Element<'a, SongMessage> {
     let rating = current_rating.unwrap_or(0);
-
     let mut row = widget::row().spacing(0).align_y(Alignment::Center);
-
     for star in 1u8..=5 {
         let icon_name = if star <= rating {
             "starred-symbolic"
         } else {
             "non-starred-symbolic"
         };
-        // Clicking the current rating value clears it (sets to 0).
         let new_rating = if star == rating { 0 } else { star };
-        let btn = widget::button::icon(widget::icon::from_name(icon_name).size(16))
+        let btn = widget::button::icon(widget::icon::from_name(icon_name).size(14))
             .on_press(SongMessage::SetRating(track_id.clone(), new_rating));
         row = row.push(btn);
     }
-
     row.into()
 }
 
-/// Simple "Add to Playlist" button.
-///
-/// Since cosmic doesn't have a simple dropdown/popover from a button, we
-/// use the first playlist as a quick-add action. For a full picker, a context
-/// drawer or separate dialog would be needed.
 fn playlist_dropdown_button<'a>(
     source_uri: String,
-    _names: &[String],
     ids: &[String],
 ) -> cosmic::Element<'a, SongMessage> {
-    // Simplified approach: icon button that adds to the first playlist
     if let Some(first_id) = ids.first() {
         widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16))
             .on_press(SongMessage::AddToPlaylist(source_uri, first_id.clone()))
@@ -291,9 +294,10 @@ fn playlist_dropdown_button<'a>(
     }
 }
 
-fn sort_label(name: &str, field: SortField, current: SortField) -> String {
+fn sort_label(name: &str, field: SortField, current: SortField, descending: bool) -> String {
     if field == current {
-        format!("{name} ^")
+        let arrow = if descending { "▼" } else { "▲" };
+        format!("{name} {arrow}")
     } else {
         name.to_string()
     }

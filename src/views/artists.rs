@@ -48,10 +48,10 @@ pub fn artist_list_view<'a>(
     for (index, artist) in artists.iter().enumerate() {
         let avatar: cosmic::Element<'_, ArtistMessage> =
             if let Some(handle) = artist_avatars.get(&artist.name) {
-                widget::icon::icon(handle.clone()).size(40).into()
+                widget::icon::icon(handle.clone()).size(48).into()
             } else {
                 widget::icon::from_name("avatar-default-symbolic")
-                    .size(40)
+                    .size(48)
                     .into()
             };
 
@@ -68,9 +68,9 @@ pub fn artist_list_view<'a>(
                         )))
                         .spacing(2),
                 )
-                .spacing(12)
+                .spacing(14)
                 .align_y(Alignment::Center)
-                .padding(8),
+                .padding([10, 8]),
         )
         .on_press(ArtistMessage::SelectArtist(index))
         .width(Length::Fill)
@@ -90,6 +90,7 @@ pub fn artist_detail_view<'a>(
     artist_index: usize,
     artist_avatars: &'a std::collections::HashMap<String, widget::icon::Handle>,
     cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
+    current_track_id: Option<i64>,
 ) -> cosmic::Element<'a, ArtistMessage> {
     let avatar: cosmic::Element<'_, ArtistMessage> =
         if let Some(handle) = artist_avatars.get(&artist.name) {
@@ -166,8 +167,16 @@ pub fn artist_detail_view<'a>(
         let mut track_list = widget::column().spacing(1);
         for (track_idx, track) in album.tracks.iter().enumerate() {
             let track_id = track.id.to_string();
+            let is_playing = current_track_id == Some(track.id);
 
-            // Task 99: Heart icon for favorite toggle
+            let num_col: cosmic::Element<'_, ArtistMessage> = if is_playing {
+                widget::icon::from_name("media-playback-start-symbolic")
+                    .size(14)
+                    .into()
+            } else {
+                widget::text(format!("{}", track.track_number)).into()
+            };
+
             let fav_icon_name = if track.is_favorite {
                 "emblem-favorite-symbolic"
             } else {
@@ -176,10 +185,8 @@ pub fn artist_detail_view<'a>(
             let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(16))
                 .on_press(ArtistMessage::ToggleFavorite(track_id.clone()));
 
-            // Task 101: Star rating widget
             let rating_row = artist_star_rating(track_id, track.rating);
 
-            // Task 103: Genre chip
             let genre_widget: cosmic::Element<'_, ArtistMessage> = if !track.genre.is_empty() {
                 widget::button::custom(widget::text::caption(&track.genre))
                     .on_press(ArtistMessage::FilterByGenre(track.genre.clone()))
@@ -191,7 +198,11 @@ pub fn artist_detail_view<'a>(
 
             let row = widget::button::custom(
                 widget::row()
-                    .push(widget::text(format!("{}", track.track_number)).width(32))
+                    .push(
+                        widget::container(num_col)
+                            .width(32)
+                            .align_x(Horizontal::Center),
+                    )
                     .push(widget::text(track.title.as_str()).width(Length::Fill))
                     .push(widget::text(track.duration_string()).width(60))
                     .push(heart_btn)

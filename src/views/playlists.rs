@@ -122,13 +122,32 @@ pub fn playlist_list_view<'a>(
     col.into()
 }
 
-/// Render the detail view for a selected playlist (Task 97).
 pub fn playlist_detail_view<'a>(
     playlist: &'a Playlist,
     playlist_index: usize,
+    edit_name: &'a str,
 ) -> cosmic::Element<'a, PlaylistMessage> {
     let detail_icon: cosmic::Element<'_, PlaylistMessage> =
         widget::icon::from_name("playlist-symbolic").size(80).into();
+
+    let rename_row = widget::row()
+        .push(
+            widget::text_input("Playlist name...", edit_name)
+                .on_input(move |text| PlaylistMessage::RenameInputChanged(playlist_index, text))
+                .width(Length::Fill),
+        )
+        .push(widget::button::standard("Rename").on_press_maybe(
+            if !edit_name.trim().is_empty() && edit_name != playlist.name.as_str() {
+                Some(PlaylistMessage::RenamePlaylist(
+                    playlist_index,
+                    edit_name.to_string(),
+                ))
+            } else {
+                None
+            },
+        ))
+        .spacing(8)
+        .align_y(Alignment::Center);
 
     let header = widget::row()
         .push(
@@ -144,6 +163,7 @@ pub fn playlist_detail_view<'a>(
                     playlist.track_count,
                     format_duration(playlist.total_duration)
                 )))
+                .push(rename_row)
                 .push(
                     widget::button::suggested("Play All")
                         .on_press(PlaylistMessage::PlayPlaylist(playlist_index)),

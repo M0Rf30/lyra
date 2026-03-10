@@ -67,12 +67,12 @@ pub fn lyrics_view<'a>(
                     col = col.push(synced_line_widget(line, is_current));
                 }
                 widget::scrollable(widget::container(col).padding(8))
-                    .height(Length::Shrink)
+                    .height(Length::Fill)
                     .into()
             }
             Lyrics::Unsynced(text) => {
                 widget::scrollable(widget::container(widget::text(text.as_str())).padding(8))
-                    .height(Length::Shrink)
+                    .height(Length::Fill)
                     .into()
             }
         }

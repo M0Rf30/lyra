@@ -86,17 +86,17 @@ pub fn equalizer_view<'a>(
         })
         .unwrap_or(false);
 
-    let save_btn = if is_custom_selected && dirty {
-        widget::button::text("Save").on_press(EqualizerMessage::SavePreset)
+    let save_btn = widget::button::text("Save").on_press_maybe(if is_custom_selected && dirty {
+        Some(EqualizerMessage::SavePreset)
     } else {
-        widget::button::text("Save")
-    };
+        None
+    });
 
-    let delete_btn = if is_custom_selected {
-        widget::button::destructive("Delete").on_press(EqualizerMessage::DeletePreset)
+    let delete_btn = widget::button::destructive("Delete").on_press_maybe(if is_custom_selected {
+        Some(EqualizerMessage::DeletePreset)
     } else {
-        widget::button::destructive("Delete")
-    };
+        None
+    });
 
     let reset_btn = widget::button::text("Reset").on_press(EqualizerMessage::ResetPreset);
 
