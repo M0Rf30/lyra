@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0
 
+//! Expanded now-playing view — full-screen overlay with centered cover art,
+//! blurred background, and transparent controls overlay.
+
 use super::{NowPlayingMessage, format_time, truncate_str};
 use crate::config::RepeatMode;
 use crate::library::Track;
@@ -14,6 +17,11 @@ use std::time::Duration;
 
 #[cfg(feature = "visualizer")]
 use std::sync::{Arc, Mutex};
+
+/// Maximum width for the centered content column (cover + controls).
+const CONTENT_MAX_WIDTH: f32 = 480.0;
+/// Cover art display size.
+const COVER_ART_SIZE: f32 = 320.0;
 
 #[allow(clippy::too_many_arguments)]
 pub fn expanded_now_playing<'a>(
@@ -46,12 +54,44 @@ pub fn expanded_now_playing<'a>(
         (p, position)
     };
 
-    let cover_col: cosmic::Element<'_, NowPlayingMessage> = if let Some(handle) = cover_art {
+    // ── Icons ─────────────────────────────────────────────────────────────
+    let play_icon = if state == PlaybackState::Playing {
+        "media-playback-pause-symbolic"
+    } else {
+        "media-playback-start-symbolic"
+    };
+    let shuffle_icon = if shuffle {
+        "media-playlist-shuffle-symbolic"
+    } else {
+        "media-playlist-consecutive-symbolic"
+    };
+    let repeat_icon = repeat_mode.icon_name();
+
+    // ── Build centered content column ─────────────────────────────────────
+    let mut content_col = widget::column()
+        .align_x(Alignment::Center)
+        .width(Length::Fill);
+
+    // Top bar: collapse button right-aligned
+    let collapse_btn = widget::button::icon(widget::icon::from_name("go-down-symbolic").size(24))
+        .on_press(NowPlayingMessage::Collapse);
+
+    let top_bar = widget::row()
+        .push(widget::Space::new(Length::Fill, Length::Shrink))
+        .push(collapse_btn)
+        .align_y(Alignment::Center);
+    content_col = content_col.push(top_bar);
+
+    // Flex spacer (pushes cover art toward center)
+    content_col = content_col.push(widget::Space::new(Length::Shrink, Length::Fill));
+
+    // ── Cover art (centered, with shadow) ─────────────────────────────────
+    let cover_widget: cosmic::Element<'_, NowPlayingMessage> = if let Some(handle) = cover_art {
         widget::container(
             widget::icon::icon(handle.clone())
-                .content_fit(cosmic::iced::ContentFit::Cover)
-                .width(Length::Fill)
-                .height(Length::Fill),
+                .content_fit(cosmic::iced::ContentFit::ScaleDown)
+                .width(Length::Fixed(COVER_ART_SIZE))
+                .height(Length::Fixed(COVER_ART_SIZE)),
         )
         .class(cosmic::theme::Container::custom(|theme| {
             let cosmic = theme.cosmic();
@@ -59,154 +99,200 @@ pub fn expanded_now_playing<'a>(
                 border: cosmic::iced::Border {
                     color: Color::TRANSPARENT,
                     width: 0.0,
-                    radius: cosmic.radius_l().into(),
+                    radius: cosmic.corner_radii.radius_m.into(),
                 },
                 shadow: cosmic::iced::Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
-                    offset: cosmic::iced::Vector::new(0.0, 8.0),
-                    blur_radius: 24.0,
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+                    offset: cosmic::iced::Vector::new(0.0, 12.0),
+                    blur_radius: 32.0,
                 },
                 ..Default::default()
             }
         }))
-        .width(Length::Fill)
-        .height(Length::Fill)
         .into()
     } else {
-        widget::container(widget::icon::from_name("media-optical-cd-audio-symbolic").size(160))
-            .width(Length::Fill)
-            .height(Length::Fill)
+        widget::container(widget::icon::from_name("media-optical-cd-audio-symbolic").size(120))
+            .width(Length::Fixed(COVER_ART_SIZE))
+            .height(Length::Fixed(COVER_ART_SIZE))
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center)
-            .class(cosmic::theme::Container::custom(|theme| {
-                let cosmic = theme.cosmic();
-                let mut bg: Color = cosmic.background.base.into();
-                bg.a = 0.25;
-                cosmic::iced::widget::container::Style {
-                    background: Some(bg.into()),
-                    ..Default::default()
-                }
-            }))
             .into()
     };
 
-    let play_icon = if state == PlaybackState::Playing {
-        "media-playback-pause-symbolic"
-    } else {
-        "media-playback-start-symbolic"
-    };
+    content_col = content_col.push(
+        widget::container(cover_widget)
+            .width(Length::Fill)
+            .align_x(Horizontal::Center),
+    );
 
-    let shuffle_icon = if shuffle {
-        "media-playlist-shuffle-symbolic"
-    } else {
-        "media-playlist-consecutive-symbolic"
-    };
-
-    let repeat_icon = repeat_mode.icon_name();
-
-    let collapse_btn = widget::button::icon(widget::icon::from_name("go-down-symbolic").size(24))
-        .on_press(NowPlayingMessage::Collapse);
-
-    let mut right_col = widget::column().spacing(0);
-
-    let top_bar = widget::row()
-        .push(widget::Space::new(Length::Fill, Length::Shrink))
-        .push(collapse_btn)
-        .align_y(Alignment::Center);
-    right_col = right_col.push(top_bar);
-
-    right_col = right_col.push(widget::Space::new(Length::Shrink, Length::Fill));
-
-    if let Some(track) = current_track {
-        right_col = right_col
-            .push(widget::text::title4(truncate_str(&track.title, 40)))
-            .push(widget::Space::new(
-                Length::Shrink,
-                Length::Fixed(spacing::XXXS as f32),
-            ));
-
-        let mut sub_parts: Vec<String> = Vec::new();
-        if !track.artist.is_empty() {
-            sub_parts.push(track.artist.clone());
-        }
-        if !track.album.is_empty() {
-            sub_parts.push(track.album.clone());
-        }
-        if track.year > 0 {
-            sub_parts.push(track.year.to_string());
-        }
-        if !sub_parts.is_empty() {
-            right_col = right_col.push(widget::text::body(sub_parts.join(" \u{2022} ")).class(
-                cosmic::theme::Text::Custom(|theme| {
-                    let neutral = theme.cosmic().palette.neutral_7;
-                    cosmic::iced::widget::text::Style {
-                        color: Some(neutral.into()),
-                    }
-                }),
-            ));
-        }
-    } else {
-        right_col = right_col.push(widget::text::title4("No track playing"));
-    }
-
-    right_col = right_col.push(widget::Space::new(
+    // Gap between cover and metadata
+    content_col = content_col.push(widget::Space::new(
         Length::Shrink,
         Length::Fixed(spacing::M as f32),
     ));
 
+    // ── Track metadata (centered) ─────────────────────────────────────────
+    // White text style helpers (fn pointers, no captures)
+    fn white_text(_: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
+        cosmic::iced::widget::text::Style {
+            color: Some(Color::WHITE),
+        }
+    }
+    fn dim_white_text(_: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
+        cosmic::iced::widget::text::Style {
+            color: Some(Color::from_rgba(1.0, 1.0, 1.0, 0.6)),
+        }
+    }
+
+    if let Some(track) = current_track {
+        // Track title — large, white, centered
+        content_col = content_col.push(
+            widget::container(
+                widget::text::title3(truncate_str(&track.title, 50))
+                    .class(cosmic::theme::Text::Custom(white_text)),
+            )
+            .width(Length::Fill)
+            .align_x(Horizontal::Center),
+        );
+
+        // Artist — medium, white, centered
+        if !track.artist.is_empty() {
+            content_col = content_col.push(
+                widget::container(
+                    widget::text::body(&track.artist)
+                        .class(cosmic::theme::Text::Custom(white_text)),
+                )
+                .width(Length::Fill)
+                .align_x(Horizontal::Center),
+            );
+        }
+
+        // Album + year — smaller, dimmed, centered
+        if !track.album.is_empty() {
+            let album_text = if track.year > 0 {
+                format!("{} \u{2022} {}", track.album, track.year)
+            } else {
+                track.album.clone()
+            };
+            content_col = content_col.push(
+                widget::container(
+                    widget::text::caption(album_text)
+                        .class(cosmic::theme::Text::Custom(dim_white_text)),
+                )
+                .width(Length::Fill)
+                .align_x(Horizontal::Center),
+            );
+        } else if track.year > 0 {
+            content_col = content_col.push(
+                widget::container(
+                    widget::text::caption(track.year.to_string())
+                        .class(cosmic::theme::Text::Custom(dim_white_text)),
+                )
+                .width(Length::Fill)
+                .align_x(Horizontal::Center),
+            );
+        }
+
+        // Favorite button
+        let fav_icon_name = if track.is_favorite {
+            "emblem-favorite-symbolic"
+        } else {
+            "non-starred-symbolic"
+        };
+        content_col = content_col.push(
+            widget::container(
+                widget::button::icon(widget::icon::from_name(fav_icon_name).size(24))
+                    .on_press(NowPlayingMessage::ToggleFavorite(track.id.to_string())),
+            )
+            .width(Length::Fill)
+            .align_x(Horizontal::Center),
+        );
+    } else {
+        content_col = content_col.push(
+            widget::container(
+                widget::text::title3("No track playing")
+                    .class(cosmic::theme::Text::Custom(white_text)),
+            )
+            .width(Length::Fill)
+            .align_x(Horizontal::Center),
+        );
+    }
+
+    // Gap between metadata and seek bar
+    content_col = content_col.push(widget::Space::new(
+        Length::Shrink,
+        Length::Fixed(spacing::M as f32),
+    ));
+
+    // ── Seek bar ──────────────────────────────────────────────────────────
     let seek_bar = widget::row()
-        .push(widget::text::body(format_time(display_position)))
+        .push(
+            widget::text::caption(format_time(display_position))
+                .class(cosmic::theme::Text::Custom(dim_white_text)),
+        )
         .push(
             widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
                 .step(0.001)
                 .on_release(NowPlayingMessage::SeekCommit)
                 .width(Length::Fill),
         )
-        .push(widget::text::body(format_time(duration)))
+        .push(
+            widget::text::caption(format_time(duration))
+                .class(cosmic::theme::Text::Custom(dim_white_text)),
+        )
         .spacing(spacing::XS)
         .align_y(Alignment::Center);
-    right_col = right_col.push(seek_bar);
+    content_col = content_col.push(seek_bar);
 
-    right_col = right_col.push(widget::Space::new(
+    // Gap
+    content_col = content_col.push(widget::Space::new(
         Length::Shrink,
-        Length::Fixed(spacing::S as f32),
+        Length::Fixed(spacing::XS as f32),
     ));
 
+    // ── Transport controls (centered, large) ───────────────────────────────
     let transport = widget::row()
         .push(
-            widget::button::icon(widget::icon::from_name(shuffle_icon).size(24))
+            widget::button::icon(widget::icon::from_name(shuffle_icon))
+                .medium()
                 .on_press(NowPlayingMessage::ToggleShuffle),
         )
         .push(
-            widget::button::icon(widget::icon::from_name("media-skip-backward-symbolic").size(28))
+            widget::button::icon(widget::icon::from_name("media-skip-backward-symbolic"))
+                .large()
                 .on_press(NowPlayingMessage::Previous),
         )
         .push(
-            widget::button::icon(widget::icon::from_name(play_icon).size(36))
+            widget::button::icon(widget::icon::from_name(play_icon))
+                .extra_large()
                 .on_press(NowPlayingMessage::TogglePlayback),
         )
         .push(
-            widget::button::icon(widget::icon::from_name("media-skip-forward-symbolic").size(28))
+            widget::button::icon(widget::icon::from_name("media-skip-forward-symbolic"))
+                .large()
                 .on_press(NowPlayingMessage::Next),
         )
         .push(
-            widget::button::icon(widget::icon::from_name(repeat_icon).size(24))
+            widget::button::icon(widget::icon::from_name(repeat_icon))
+                .medium()
                 .on_press(NowPlayingMessage::CycleRepeat),
         )
-        .spacing(spacing::XXS)
+        .spacing(spacing::M)
         .align_y(Alignment::Center);
 
-    right_col = right_col.push(
+    content_col = content_col.push(
         widget::container(transport)
-            .align_x(Horizontal::Center)
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .align_x(Horizontal::Center),
     );
 
-    right_col = right_col.push(widget::Space::new(
+    // Gap
+    content_col = content_col.push(widget::Space::new(
         Length::Shrink,
         Length::Fixed(spacing::S as f32),
     ));
 
+    // ── Volume + extras row ───────────────────────────────────────────────
     #[allow(unused_mut)]
     let mut bottom_row = widget::row()
         .push(widget::icon::from_name("audio-volume-high-symbolic").size(20))
@@ -237,35 +323,38 @@ pub fn expanded_now_playing<'a>(
         }
     }
 
-    right_col = right_col.push(bottom_row.spacing(spacing::XXS).align_y(Alignment::Center));
+    content_col = content_col.push(bottom_row.spacing(spacing::XXS).align_y(Alignment::Center));
 
-    right_col = right_col.push(widget::Space::new(Length::Shrink, Length::Fill));
+    // Bottom flex spacer
+    content_col = content_col.push(widget::Space::new(Length::Shrink, Length::Fill));
 
-    let right_panel = widget::container(right_col.width(Length::Fill))
-        .padding([spacing::S, spacing::M, spacing::M, spacing::M])
-        .width(Length::FillPortion(1))
+    // ── Constrain content width and center ────────────────────────────────
+    let centered_content = widget::container(content_col)
+        .max_width(CONTENT_MAX_WIDTH)
         .height(Length::Fill)
-        .class(cosmic::theme::Container::custom(|theme| {
-            let cosmic = theme.cosmic();
-            let mut bg: Color = cosmic.bg_component_color().into();
-            bg.a = 0.72;
-            cosmic::iced::widget::container::Style {
-                background: Some(bg.into()),
-                text_color: Some(cosmic.on_bg_component_color().into()),
-                ..Default::default()
-            }
-        }));
+        .padding([spacing::S, spacing::M, spacing::M, spacing::M]);
 
-    let left_panel = widget::container(cover_col)
-        .width(Length::FillPortion(1))
-        .height(Length::Fill);
-
-    let two_col = widget::row()
-        .push(left_panel)
-        .push(right_panel)
+    let centered_row = widget::row()
+        .push(widget::Space::new(Length::Fill, Length::Shrink))
+        .push(centered_content)
+        .push(widget::Space::new(Length::Fill, Length::Shrink))
         .height(Length::Fill)
         .width(Length::Fill);
 
+    // ── Semi-transparent dark overlay for readability ─────────────────────
+    let overlay_container: cosmic::Element<'_, NowPlayingMessage> = widget::container(centered_row)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .class(cosmic::theme::Container::custom(|_| {
+            cosmic::iced::widget::container::Style {
+                background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+                text_color: Some(Color::WHITE),
+                ..Default::default()
+            }
+        }))
+        .into();
+
+    // ── Visualizer overlay (when active) ──────────────────────────────────
     #[cfg(feature = "visualizer")]
     let viz_metadata_overlay: Option<cosmic::Element<'_, NowPlayingMessage>> =
         if visualizer_active && viz_metadata_opacity > 0.0 {
@@ -321,6 +410,7 @@ pub fn expanded_now_playing<'a>(
             None
         };
 
+    // ── Background layer ──────────────────────────────────────────────────
     #[cfg(feature = "visualizer")]
     let bg_element: Option<cosmic::Element<'_, NowPlayingMessage>> = if visualizer_active {
         let shader = cosmic::iced::widget::Shader::new(super::viz_shader::VizProgram::new(
@@ -331,25 +421,24 @@ pub fn expanded_now_playing<'a>(
         Some(shader.into())
     } else {
         blurred_cover.map(|h| {
-            let el: cosmic::Element<'_, NowPlayingMessage> = widget::icon::icon(h.clone())
+            widget::icon::icon(h.clone())
                 .content_fit(cosmic::iced::ContentFit::Cover)
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .into();
-            el
+                .into()
         })
     };
 
     #[cfg(not(feature = "visualizer"))]
     let bg_element: Option<cosmic::Element<'_, NowPlayingMessage>> = blurred_cover.map(|h| {
-        let el: cosmic::Element<'_, NowPlayingMessage> = widget::icon::icon(h.clone())
+        widget::icon::icon(h.clone())
             .content_fit(cosmic::iced::ContentFit::Cover)
             .width(Length::Fill)
             .height(Length::Fill)
-            .into();
-        el
+            .into()
     });
 
+    // ── Assemble stack: base → blur → dark overlay → content ──────────────
     if let Some(bg_layer) = bg_element {
         let black_base: cosmic::Element<'_, NowPlayingMessage> =
             widget::container(widget::Space::new(0, 0))
@@ -366,7 +455,10 @@ pub fn expanded_now_playing<'a>(
                 .into();
 
         #[allow(unused_mut)]
-        let mut stack_widget = Stack::new().push(black_base).push(bg_layer).push(two_col);
+        let mut stack_widget = Stack::new()
+            .push(black_base)
+            .push(bg_layer)
+            .push(overlay_container);
 
         #[cfg(feature = "visualizer")]
         if let Some(meta_overlay) = viz_metadata_overlay {
@@ -387,7 +479,8 @@ pub fn expanded_now_playing<'a>(
 
         stack_widget.width(Length::Fill).into()
     } else {
-        widget::container(two_col)
+        // No blurred cover — just dark background + content
+        widget::container(overlay_container)
             .width(Length::Fill)
             .align_x(Horizontal::Center)
             .class(cosmic::theme::Container::custom(|theme| {
