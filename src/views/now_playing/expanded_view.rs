@@ -85,14 +85,16 @@ pub fn expanded_now_playing<'a>(
     // Flex spacer (pushes cover art toward center)
     content_col = content_col.push(widget::Space::new(Length::Shrink, Length::Fill));
 
-    // ── Cover art (centered, with shadow) ─────────────────────────────────
+    // ── Cover art (centered, with rounded corners + shadow) ─────────────────
     let cover_widget: cosmic::Element<'_, NowPlayingMessage> = if let Some(handle) = cover_art {
         widget::container(
             widget::icon::icon(handle.clone())
-                .content_fit(cosmic::iced::ContentFit::ScaleDown)
+                .content_fit(cosmic::iced::ContentFit::Cover)
                 .width(Length::Fixed(COVER_ART_SIZE))
                 .height(Length::Fixed(COVER_ART_SIZE)),
         )
+        .width(Length::Fixed(COVER_ART_SIZE))
+        .height(Length::Fixed(COVER_ART_SIZE))
         .class(cosmic::theme::Container::custom(|theme| {
             let cosmic = theme.cosmic();
             cosmic::iced::widget::container::Style {

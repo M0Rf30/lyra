@@ -220,121 +220,116 @@ pub fn providers_view<'a>(
     replay_gain_mode: crate::config::ReplayGainMode,
     active_provider_type: Option<ProviderType>,
 ) -> cosmic::Element<'a, ProvidersMessage> {
-    let mut col = widget::column().spacing(spacing::S).padding(spacing::S);
+    let mut col = widget::column().spacing(spacing::XXS).padding(spacing::S);
 
-    // ── Playback settings (Task 107, 108) ──────────────────────────────────
-    col = col.push(widget::text::title4(fl!("playback-settings")));
-
-    // Task 107: Crossfade duration slider (0-12s)
-    // Task 122: Only show for Local and MPD providers (not Subsonic)
+    // ── Playback settings section ──────────────────────────────────────────
     let show_crossfade = active_provider_type
         .map(|pt| matches!(pt, ProviderType::Local | ProviderType::Mpd))
         .unwrap_or(true);
-
-    if show_crossfade {
-        let crossfade_label = if crossfade_secs < 0.1 {
-            fl!("crossfade-disabled")
-        } else {
-            fl!("crossfade-seconds", secs = format!("{:.0}", crossfade_secs))
-        };
-
-        col = col.push(
-            widget::column()
-                .push(
-                    widget::row()
-                        .push(widget::text::body(fl!("crossfade-duration")))
-                        .push(widget::horizontal_space())
-                        .push(widget::text::caption(crossfade_label)),
-                )
-                .push(
-                    widget::slider(0.0..=12.0, crossfade_secs, ProvidersMessage::SetCrossfade)
-                        .step(0.5),
-                )
-                .spacing(spacing::XXXS),
-        );
-    }
-
-    // Task 108: Replay gain mode selector
-    // Task 122: Only show for Local and MPD providers
     let show_replay_gain = active_provider_type
         .map(|pt| matches!(pt, ProviderType::Local | ProviderType::Mpd))
         .unwrap_or(true);
 
-    if show_replay_gain {
-        use crate::config::ReplayGainMode;
+    if show_crossfade || show_replay_gain {
+        let mut playback_section =
+            cosmic::widget::settings::section().title(fl!("playback-settings"));
 
-        let modes = [
-            (ReplayGainMode::Off, fl!("replay-gain-off")),
-            (ReplayGainMode::Track, fl!("replay-gain-track")),
-            (ReplayGainMode::Album, fl!("replay-gain-album")),
-            (ReplayGainMode::Auto, fl!("replay-gain-auto")),
-        ];
-
-        let mut mode_row = widget::row()
-            .spacing(spacing::XXS)
-            .align_y(Alignment::Center);
-        mode_row = mode_row.push(widget::text::body(fl!("replay-gain")));
-        for (mode, label) in modes {
-            let btn = if mode == replay_gain_mode {
-                widget::button::standard(label)
+        if show_crossfade {
+            let crossfade_label = if crossfade_secs < 0.1 {
+                fl!("crossfade-disabled")
             } else {
-                widget::button::text(label)
+                fl!("crossfade-seconds", secs = format!("{:.0}", crossfade_secs))
             };
-            mode_row = mode_row.push(btn.on_press(ProvidersMessage::SetReplayGainMode(mode)));
+
+            let crossfade_control = widget::column()
+                .push(widget::text::caption(crossfade_label))
+                .push(
+                    widget::slider(0.0..=12.0, crossfade_secs, ProvidersMessage::SetCrossfade)
+                        .step(0.5),
+                )
+                .spacing(spacing::XXXS);
+
+            playback_section = playback_section.add(cosmic::widget::settings::flex_item(
+                fl!("crossfade-duration"),
+                crossfade_control,
+            ));
         }
-        col = col.push(mode_row);
-    }
 
-    col = col.push(widget::divider::horizontal::default());
+        if show_replay_gain {
+            use crate::config::ReplayGainMode;
 
-    // ── Local music directories ────────────────────────────────────────────
-    col = col.push(widget::text::title4(fl!("local-music-dirs")));
+            let modes = [
+                (ReplayGainMode::Off, fl!("replay-gain-off")),
+                (ReplayGainMode::Track, fl!("replay-gain-track")),
+                (ReplayGainMode::Album, fl!("replay-gain-album")),
+                (ReplayGainMode::Auto, fl!("replay-gain-auto")),
+            ];
 
-    if music_dirs.is_empty() {
-        col = col.push(widget::text::body(fl!("no-music-dirs")));
-    } else {
-        for (i, dir) in music_dirs.iter().enumerate() {
-            col = col.push(
-                widget::row()
-                    .push(
-                        widget::text::body(dir.to_string_lossy()).width(cosmic::iced::Length::Fill),
-                    )
-                    .push(
-                        widget::button::destructive(fl!("remove"))
-                            .on_press(ProvidersMessage::RemoveMusicDir(i)),
-                    )
-                    .spacing(spacing::XXS)
-                    .align_y(Alignment::Center),
-            );
+            let mut mode_row = widget::row()
+                .spacing(spacing::XXXS)
+                .align_y(Alignment::Center);
+            for (mode, label) in modes {
+                let btn = if mode == replay_gain_mode {
+                    widget::button::standard(label)
+                } else {
+                    widget::button::text(label)
+                };
+                mode_row = mode_row.push(btn.on_press(ProvidersMessage::SetReplayGainMode(mode)));
+            }
+
+            playback_section = playback_section.add(cosmic::widget::settings::flex_item(
+                fl!("replay-gain"),
+                mode_row,
+            ));
         }
+
+        col = col.push(playback_section);
     }
 
-    col = col.push(
-        widget::button::text(fl!("add-music-folder")).on_press(ProvidersMessage::AddMusicDir),
-    );
+    // ── Local music directories section ────────────────────────────────────
+    {
+        let mut dirs_section = cosmic::widget::settings::section().title(fl!("local-music-dirs"));
 
-    col = col.push(widget::divider::horizontal::default());
+        if music_dirs.is_empty() {
+            dirs_section = dirs_section.add(widget::text::body(fl!("no-music-dirs")));
+        } else {
+            for (i, dir) in music_dirs.iter().enumerate() {
+                dirs_section = dirs_section.add(
+                    widget::row()
+                        .push(
+                            widget::text::body(dir.to_string_lossy())
+                                .width(cosmic::iced::Length::Fill),
+                        )
+                        .push(
+                            widget::button::destructive(fl!("remove"))
+                                .on_press(ProvidersMessage::RemoveMusicDir(i)),
+                        )
+                        .spacing(spacing::XXS)
+                        .align_y(Alignment::Center),
+                );
+            }
+        }
 
-    // Remote providers section
-    let has_any = !mpd_servers.is_empty() || !subsonic_servers.is_empty();
+        dirs_section = dirs_section.add(
+            widget::button::text(fl!("add-music-folder")).on_press(ProvidersMessage::AddMusicDir),
+        );
 
-    if !has_any {
-        col = col.push(widget::text::body(fl!("no-providers")));
+        col = col.push(dirs_section);
     }
 
-    // MPD servers
+    // ── MPD servers ────────────────────────────────────────────────────────
     for (i, server) in mpd_servers.iter().enumerate() {
         let status = mpd_connection_status.get(i).and_then(|s| s.as_deref());
-        col = col.push(mpd_server_card(i, server, status));
+        col = col.push(mpd_server_section(i, server, status));
     }
 
-    // Subsonic servers
+    // ── Subsonic servers ───────────────────────────────────────────────────
     for (i, server) in subsonic_servers.iter().enumerate() {
         let status = subsonic_connection_status.get(i).and_then(|s| s.as_deref());
-        col = col.push(subsonic_server_card(i, server, status));
+        col = col.push(subsonic_server_section(i, server, status));
     }
 
-    // Add buttons
+    // ── Add server buttons ─────────────────────────────────────────────────
     col = col.push(
         widget::row()
             .push(widget::button::text(fl!("add-mpd-server")).on_press(ProvidersMessage::AddMpd))
@@ -348,110 +343,114 @@ pub fn providers_view<'a>(
     col.into()
 }
 
-// ── MPD card ───────────────────────────────────────────────────────────────
+// ── MPD server section ──────────────────────────────────────────────────────
 
-fn mpd_server_card<'a>(
+fn mpd_server_section<'a>(
     index: usize,
     server: &'a MpdEditState,
     connection_status: Option<&'a str>,
 ) -> cosmic::Element<'a, ProvidersMessage> {
-    let name_input = widget::text_input(fl!("mpd-name"), &server.name)
-        .on_input(move |v| ProvidersMessage::EditName(index, v));
+    let mut section = cosmic::widget::settings::section().title(format!("MPD: {}", &server.name));
 
-    let host_input = widget::text_input(fl!("mpd-host"), &server.host)
-        .on_input(move |v| ProvidersMessage::EditHost(index, v));
+    // Name
+    section = section.add(cosmic::widget::settings::flex_item(
+        fl!("mpd-name"),
+        widget::text_input(fl!("mpd-name"), &server.name)
+            .on_input(move |v| ProvidersMessage::EditName(index, v)),
+    ));
 
-    let port_input = widget::text_input(fl!("mpd-port"), &server.port)
-        .on_input(move |v| ProvidersMessage::EditPort(index, v));
+    // Host
+    section = section.add(cosmic::widget::settings::flex_item(
+        fl!("mpd-host"),
+        widget::text_input(fl!("mpd-host"), &server.host)
+            .on_input(move |v| ProvidersMessage::EditHost(index, v)),
+    ));
 
-    let password_input = widget::text_input(fl!("mpd-password"), &server.password)
-        .on_input(move |v| ProvidersMessage::EditPassword(index, v))
-        .password();
+    // Port + Password
+    section = section.add(
+        widget::row()
+            .push(
+                widget::text_input(fl!("mpd-port"), &server.port)
+                    .on_input(move |v| ProvidersMessage::EditPort(index, v)),
+            )
+            .push(
+                widget::text_input(fl!("mpd-password"), &server.password)
+                    .on_input(move |v| ProvidersMessage::EditPassword(index, v))
+                    .password(),
+            )
+            .spacing(spacing::XXS),
+    );
 
-    let mut action_buttons = widget::row()
+    // Action buttons
+    let mut action_row = widget::row()
         .spacing(spacing::XXS)
         .align_y(Alignment::Center);
-    action_buttons = action_buttons
+    action_row = action_row
         .push(widget::button::standard(fl!("save")).on_press(ProvidersMessage::Save(index)));
-    action_buttons = action_buttons.push(
+    action_row = action_row.push(
         widget::button::text(fl!("test-connection"))
             .on_press(ProvidersMessage::TestConnection(index)),
     );
     if let Some(status) = connection_status {
-        action_buttons = action_buttons.push(status_label(status));
+        action_row = action_row.push(status_label(status));
     }
+    action_row = action_row.push(widget::horizontal_space());
+    action_row = action_row
+        .push(widget::button::destructive(fl!("remove")).on_press(ProvidersMessage::Remove(index)));
 
-    let buttons = widget::row()
-        .push(action_buttons)
-        .push(widget::horizontal_space())
-        .push(widget::button::destructive(fl!("remove")).on_press(ProvidersMessage::Remove(index)))
-        .align_y(Alignment::Center);
+    section = section.add(action_row);
 
-    widget::column()
-        .push(widget::text::title4(format!("MPD: {}", &server.name)))
-        .push(name_input)
-        .push(host_input)
-        .push(
-            widget::row()
-                .push(port_input)
-                .push(password_input)
-                .spacing(spacing::XXS),
-        )
-        .push(widget::divider::horizontal::default())
-        .push(buttons)
-        .spacing(spacing::XXS)
-        .into()
+    section.into()
 }
 
-// ── Subsonic card ──────────────────────────────────────────────────────────
+// ── Subsonic server section ─────────────────────────────────────────────────
 
-fn subsonic_server_card<'a>(
+fn subsonic_server_section<'a>(
     index: usize,
     server: &'a SubsonicEditState,
     connection_status: Option<&'a str>,
 ) -> cosmic::Element<'a, ProvidersMessage> {
-    let name_input = widget::text_input(fl!("subsonic-name"), &server.name)
-        .on_input(move |v| ProvidersMessage::SubsonicEditName(index, v));
+    let mut section =
+        cosmic::widget::settings::section().title(format!("Subsonic: {}", &server.name));
 
-    let url_input = widget::text_input(fl!("subsonic-url"), &server.url)
-        .on_input(move |v| ProvidersMessage::SubsonicEditUrl(index, v));
+    // Name
+    section = section.add(cosmic::widget::settings::flex_item(
+        fl!("subsonic-name"),
+        widget::text_input(fl!("subsonic-name"), &server.name)
+            .on_input(move |v| ProvidersMessage::SubsonicEditName(index, v)),
+    ));
 
-    let username_input = widget::text_input(fl!("subsonic-username"), &server.username)
-        .on_input(move |v| ProvidersMessage::SubsonicEditUsername(index, v));
+    // URL
+    section = section.add(cosmic::widget::settings::flex_item(
+        fl!("subsonic-url"),
+        widget::text_input(fl!("subsonic-url"), &server.url)
+            .on_input(move |v| ProvidersMessage::SubsonicEditUrl(index, v)),
+    ));
 
-    let password_input = widget::text_input(fl!("subsonic-password"), &server.password)
-        .on_input(move |v| ProvidersMessage::SubsonicEditPassword(index, v))
-        .password();
-
-    let tls_toggle = widget::toggler(server.accept_invalid_certs)
-        .label(fl!("subsonic-accept-invalid-certs"))
-        .on_toggle(move |v| ProvidersMessage::SubsonicToggleCerts(index, v));
-
-    // Save + Test Connection on the left, Remove pushed to the right
-    let mut action_buttons = widget::row()
-        .spacing(spacing::XXS)
-        .align_y(Alignment::Center);
-    action_buttons = action_buttons.push(
-        widget::button::standard(fl!("save")).on_press(ProvidersMessage::SubsonicSave(index)),
+    // Username + Password
+    section = section.add(
+        widget::row()
+            .push(
+                widget::text_input(fl!("subsonic-username"), &server.username)
+                    .on_input(move |v| ProvidersMessage::SubsonicEditUsername(index, v)),
+            )
+            .push(
+                widget::text_input(fl!("subsonic-password"), &server.password)
+                    .on_input(move |v| ProvidersMessage::SubsonicEditPassword(index, v))
+                    .password(),
+            )
+            .spacing(spacing::XXS),
     );
-    action_buttons = action_buttons.push(
-        widget::button::text(fl!("test-connection"))
-            .on_press(ProvidersMessage::SubsonicTestConnection(index)),
+
+    // TLS toggle
+    section = section.add(
+        cosmic::widget::settings::item::builder(fl!("subsonic-accept-invalid-certs")).control(
+            widget::toggler(server.accept_invalid_certs)
+                .on_toggle(move |v| ProvidersMessage::SubsonicToggleCerts(index, v)),
+        ),
     );
-    if let Some(status) = connection_status {
-        action_buttons = action_buttons.push(status_label(status));
-    }
 
-    let buttons = widget::row()
-        .push(action_buttons)
-        .push(widget::horizontal_space())
-        .push(
-            widget::button::destructive(fl!("remove"))
-                .on_press(ProvidersMessage::SubsonicRemove(index)),
-        )
-        .align_y(Alignment::Center);
-
-    // Task 109: Transcoding controls — use a wrapping column layout to avoid overflow
+    // Transcoding controls
     let bitrate_options: Vec<(Option<u32>, String)> = vec![
         (None, fl!("transcoding-original")),
         (Some(320), "320 kbps".to_string()),
@@ -471,8 +470,7 @@ fn subsonic_server_card<'a>(
     ];
 
     let current_bitrate = server.transcoding_max_bitrate;
-    let mut bitrate_children: Vec<cosmic::Element<ProvidersMessage>> =
-        vec![widget::text::body(fl!("transcoding-bitrate")).into()];
+    let mut bitrate_children: Vec<cosmic::Element<ProvidersMessage>> = Vec::new();
     for (bitrate, label) in bitrate_options {
         let btn = if bitrate == current_bitrate {
             widget::button::standard(label)
@@ -487,8 +485,7 @@ fn subsonic_server_card<'a>(
     let bitrate_row = widget::flex_row(bitrate_children).spacing(spacing::XXXS);
 
     let current_format = server.transcoding_format.clone();
-    let mut format_children: Vec<cosmic::Element<ProvidersMessage>> =
-        vec![widget::text::body(fl!("transcoding-format")).into()];
+    let mut format_children: Vec<cosmic::Element<ProvidersMessage>> = Vec::new();
     for (fmt, label) in format_options {
         let btn = if fmt == current_format {
             widget::button::standard(label)
@@ -503,15 +500,18 @@ fn subsonic_server_card<'a>(
     }
     let format_row = widget::flex_row(format_children).spacing(spacing::XXXS);
 
-    // Task 110: Bandwidth savings estimate
     let mut transcoding_col = widget::column()
-        .push(widget::text::title4(fl!("transcoding")))
-        .push(bitrate_row)
-        .push(format_row)
+        .push(
+            cosmic::widget::settings::flex_item(fl!("transcoding-bitrate"), bitrate_row)
+                .apply(cosmic::Element::from),
+        )
+        .push(
+            cosmic::widget::settings::flex_item(fl!("transcoding-format"), format_row)
+                .apply(cosmic::Element::from),
+        )
         .spacing(spacing::XXS);
 
     if let Some(bitrate) = current_bitrate {
-        // Rough estimate: typical FLAC ~1000 kbps, so savings ≈ (1 - bitrate/1000) * 100
         let savings_pct = ((1.0 - (bitrate as f32 / 1000.0)) * 100.0).max(0.0) as u32;
         transcoding_col = transcoding_col.push(widget::text::caption(fl!(
             "transcoding-bandwidth-estimate",
@@ -519,22 +519,31 @@ fn subsonic_server_card<'a>(
         )));
     }
 
-    widget::column()
-        .push(widget::text::title4(format!("Subsonic: {}", &server.name)))
-        .push(name_input)
-        .push(url_input)
-        .push(
-            widget::row()
-                .push(username_input)
-                .push(password_input)
-                .spacing(spacing::XXS),
-        )
-        .push(widget::container(tls_toggle).padding([spacing::XXS, 0]))
-        .push(transcoding_col)
-        .push(widget::divider::horizontal::default())
-        .push(buttons)
+    section = section.add(transcoding_col);
+
+    // Action buttons
+    let mut action_row = widget::row()
         .spacing(spacing::XXS)
-        .into()
+        .align_y(Alignment::Center);
+    action_row = action_row.push(
+        widget::button::standard(fl!("save")).on_press(ProvidersMessage::SubsonicSave(index)),
+    );
+    action_row = action_row.push(
+        widget::button::text(fl!("test-connection"))
+            .on_press(ProvidersMessage::SubsonicTestConnection(index)),
+    );
+    if let Some(status) = connection_status {
+        action_row = action_row.push(status_label(status));
+    }
+    action_row = action_row.push(widget::horizontal_space());
+    action_row = action_row.push(
+        widget::button::destructive(fl!("remove"))
+            .on_press(ProvidersMessage::SubsonicRemove(index)),
+    );
+
+    section = section.add(action_row);
+
+    section.into()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

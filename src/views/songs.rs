@@ -151,7 +151,7 @@ pub fn songs_list_view<'a>(
         .push(widget::Space::with_width(Length::Shrink))
         .spacing(spacing::XXS)
         .align_y(Alignment::Center)
-        .padding([spacing::XXXS, spacing::XXS]);
+        .padding([spacing::XXXS, spacing::M]);
 
     if filtered.is_empty() {
         let message = if favorites_filter {
@@ -181,7 +181,7 @@ pub fn songs_list_view<'a>(
             .into();
     }
 
-    let mut track_list = widget::column().spacing(spacing::XXXS);
+    let mut track_list = cosmic::widget::list_column();
 
     for (original_index, track) in &filtered {
         let track_id = track.id.to_string();
@@ -222,40 +222,36 @@ pub fn songs_list_view<'a>(
             widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16)).into()
         };
 
-        let row = widget::button::custom(
-            widget::row()
-                .push(
-                    widget::container(num_col)
-                        .width(40)
-                        .align_x(Horizontal::Center),
-                )
-                .push(widget::text(track.title.as_str()).width(Length::FillPortion(3)))
-                .push(widget::text(track.artist.as_str()).width(Length::FillPortion(2)))
-                .push(widget::text(track.album.as_str()).width(Length::FillPortion(2)))
-                .push(widget::text(track.duration_string()).width(64))
-                .push(heart_btn)
-                .push(rating_row)
-                .push(genre_widget)
-                .push(playlist_btn)
-                .spacing(spacing::XXS)
-                .align_y(Alignment::Center)
-                .padding([spacing::XXXS + 2, spacing::XXS]),
-        )
-        .on_press(SongMessage::PlayTrack(*original_index))
-        .width(Length::Fill)
-        .class(cosmic::theme::Button::Text);
+        let row_content = widget::row()
+            .push(
+                widget::container(num_col)
+                    .width(40)
+                    .align_x(Horizontal::Center),
+            )
+            .push(widget::text(track.title.as_str()).width(Length::FillPortion(3)))
+            .push(widget::text(track.artist.as_str()).width(Length::FillPortion(2)))
+            .push(widget::text(track.album.as_str()).width(Length::FillPortion(2)))
+            .push(widget::text(track.duration_string()).width(64))
+            .push(heart_btn)
+            .push(rating_row)
+            .push(genre_widget)
+            .push(playlist_btn)
+            .spacing(spacing::XXS)
+            .align_y(Alignment::Center);
 
-        track_list = track_list.push(row);
+        let row_btn = widget::button::custom(row_content)
+            .on_press(SongMessage::PlayTrack(*original_index))
+            .width(Length::Fill)
+            .class(crate::views::card_button_class());
+
+        track_list = track_list.add(row_btn);
     }
 
     widget::column()
         .push(filter_bar)
         .push(header)
         .push(widget::divider::horizontal::default())
-        .push(
-            widget::scrollable(widget::container(track_list).width(Length::Fill))
-                .height(Length::Fill),
-        )
+        .push(widget::scrollable(track_list).height(Length::Fill))
         .padding(spacing::S)
         .spacing(spacing::XXXS)
         .into()

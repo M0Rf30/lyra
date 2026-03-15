@@ -113,23 +113,24 @@ pub fn playback_bar<'a>(
 
     let transport = widget::row()
         .push(
-            widget::button::icon(widget::icon::from_name(shuffle_icon).size(24))
+            widget::button::icon(widget::icon::from_name(shuffle_icon))
                 .on_press(NowPlayingMessage::ToggleShuffle),
         )
         .push(
-            widget::button::icon(widget::icon::from_name("media-skip-backward-symbolic").size(24))
+            widget::button::icon(widget::icon::from_name("media-skip-backward-symbolic"))
                 .on_press(NowPlayingMessage::Previous),
         )
         .push(
-            widget::button::icon(widget::icon::from_name(play_icon).size(32))
+            widget::button::icon(widget::icon::from_name(play_icon))
+                .medium()
                 .on_press(NowPlayingMessage::TogglePlayback),
         )
         .push(
-            widget::button::icon(widget::icon::from_name("media-skip-forward-symbolic").size(24))
+            widget::button::icon(widget::icon::from_name("media-skip-forward-symbolic"))
                 .on_press(NowPlayingMessage::Next),
         )
         .push(
-            widget::button::icon(widget::icon::from_name(repeat_icon).size(24))
+            widget::button::icon(widget::icon::from_name(repeat_icon))
                 .on_press(NowPlayingMessage::CycleRepeat),
         )
         .spacing(spacing::XXXS)
