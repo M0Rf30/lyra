@@ -140,8 +140,5 @@ pub fn settings_view<'a>(
         col = col.push(playback_section);
     }
 
-    widget::scrollable(col)
-        .width(cosmic::iced::Length::Fill)
-        .height(cosmic::iced::Length::Fill)
-        .into()
+    col.into()
 }
