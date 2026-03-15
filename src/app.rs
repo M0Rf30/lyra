@@ -476,11 +476,6 @@ impl cosmic::Application for AppModel {
             .data::<Page>(Page::Genres)
             .icon(icon::from_name("audio-x-generic-symbolic"));
 
-        nav.insert()
-            .text(fl!("settings"))
-            .data::<Page>(Page::Settings)
-            .icon(icon::from_name("preferences-system-symbolic"));
-
         let about = About::default()
             .name(fl!("app-title"))
             .icon(widget::icon::from_svg_bytes(APP_ICON))
@@ -819,6 +814,7 @@ impl cosmic::Application for AppModel {
                     vec![
                         menu::Item::Button(fl!("equalizer"), None, MenuAction::Equalizer),
                         menu::Item::Button(fl!("providers"), None, MenuAction::Providers),
+                        menu::Item::Button(fl!("settings"), None, MenuAction::Settings),
                         menu::Item::Divider,
                         menu::Item::Button(fl!("about"), None, MenuAction::About),
                     ],
@@ -1003,6 +999,26 @@ impl cosmic::Application for AppModel {
                 )
                 .title(fl!("lyrics"))
             }
+            ContextPage::Settings => {
+                let active_provider_type = self.registry.active().map(|p| p.provider_type());
+                let settings_content = settings::settings_view(
+                    self.config.crossfade_duration_secs,
+                    self.config.replay_gain_mode,
+                    active_provider_type,
+                )
+                .map(|msg| match msg {
+                    settings::SettingsMessage::SetCrossfade(v) => Message::SetCrossfade(v),
+                    settings::SettingsMessage::SetReplayGainMode(m) => {
+                        Message::SetReplayGainMode(m)
+                    }
+                });
+
+                context_drawer::context_drawer(
+                    settings_content,
+                    Message::ToggleContextPage(ContextPage::Settings),
+                )
+                .title(fl!("settings"))
+            }
         })
     }
 
@@ -1169,21 +1185,6 @@ impl cosmic::Application for AppModel {
                         genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
                     })
                 }
-            }
-
-            Page::Settings => {
-                let active_provider_type = self.registry.active().map(|p| p.provider_type());
-                settings::settings_view(
-                    self.config.crossfade_duration_secs,
-                    self.config.replay_gain_mode,
-                    active_provider_type,
-                )
-                .map(|msg| match msg {
-                    settings::SettingsMessage::SetCrossfade(v) => Message::SetCrossfade(v),
-                    settings::SettingsMessage::SetReplayGainMode(m) => {
-                        Message::SetReplayGainMode(m)
-                    }
-                })
             }
         };
 
@@ -4034,7 +4035,6 @@ pub enum Page {
     Songs,
     Playlists,
     Genres,
-    Settings,
 }
 
 /// Context drawer pages.
@@ -4045,6 +4045,7 @@ pub enum ContextPage {
     Equalizer,
     Lyrics,
     Providers,
+    Settings,
 }
 
 /// Menu bar actions.
@@ -4053,6 +4054,7 @@ pub enum MenuAction {
     About,
     Equalizer,
     Providers,
+    Settings,
     ScanLibrary,
     AddMusicDir,
     Quit,
@@ -4066,6 +4068,7 @@ impl menu::action::MenuAction for MenuAction {
             MenuAction::About => Message::ToggleContextPage(ContextPage::About),
             MenuAction::Equalizer => Message::ToggleContextPage(ContextPage::Equalizer),
             MenuAction::Providers => Message::ToggleContextPage(ContextPage::Providers),
+            MenuAction::Settings => Message::ToggleContextPage(ContextPage::Settings),
             MenuAction::ScanLibrary => Message::ScanLibrary,
             MenuAction::AddMusicDir => Message::AddMusicDir,
             MenuAction::Quit => Message::Quit,
