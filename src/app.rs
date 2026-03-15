@@ -9,7 +9,11 @@ use crate::provider::local::LocalProvider;
 use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{MusicProvider, ProviderRegistry};
-use crate::views::{albums, artists, equalizer, genres, lyrics, now_playing, playlists, providers, songs, tag_editor};
+use crate::services::{self, LookupRelease, LookupSource};
+use crate::views::{
+    albums, artists, equalizer, genres, lyrics, now_playing, playlists, providers, songs,
+    tag_editor,
+};
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::{Alignment, Length, Subscription};
@@ -153,6 +157,26 @@ pub struct AppModel {
     tag_editor_search: String,
     tag_editor_status: Option<String>,
     tag_editor_dirty: bool,
+
+    // Advanced tag editor state
+    tag_editor_tab: tag_editor::TagEditorTab,
+    tag_editor_album_mode: bool,
+    tag_editor_selected_album: Option<String>,
+
+    // Lookup state
+    tag_editor_lookup_query: String,
+    tag_editor_lookup_source: LookupSource,
+    tag_editor_lookup_loading: bool,
+    tag_editor_lookup_results: Vec<LookupRelease>,
+    tag_editor_selected_result: Option<usize>,
+    tag_editor_fingerprinting: bool,
+
+    // API keys
+    tag_editor_acoustid_key: String,
+    tag_editor_discogs_token: String,
+
+    /// Shared HTTP client for external API requests (MusicBrainz, AcoustID, Discogs).
+    http_client: Arc<reqwest::blocking::Client>,
 
     // ProjectM visualizer (behind feature flag)
     #[cfg(feature = "visualizer")]
@@ -413,6 +437,31 @@ pub enum Message {
     TagEditorSave,
     TagEditorSaveResult(Result<(), String>),
 
+    // Advanced tag editor messages
+    TagEditorSwitchTab(tag_editor::TagEditorTab),
+    TagEditorToggleAlbumMode,
+    TagEditorSelectAlbum(String),
+
+    // Lookup messages
+    TagEditorLookupQueryChanged(String),
+    TagEditorLookupSourceChanged(LookupSource),
+    TagEditorLookupSearch,
+    TagEditorScanFingerprint,
+    TagEditorFingerprintResult(Result<services::FingerprintResult, String>),
+    TagEditorLookupResult(Result<Vec<LookupRelease>, String>),
+    TagEditorSelectResult(usize),
+    TagEditorFetchReleaseTracks(String),
+    TagEditorFetchReleaseResult(Result<LookupRelease, String>),
+    TagEditorApplyResult,
+
+    // API key messages
+    TagEditorAcoustIdKeyChanged(String),
+    TagEditorDiscogsTokenChanged(String),
+
+    // Batch save (album mode)
+    TagEditorBatchSave,
+    TagEditorBatchSaveResult(Result<usize, String>),
+
     // Application lifecycle
     Quit,
 }
@@ -436,9 +485,7 @@ impl From<artists::ArtistMessage> for Message {
     fn from(msg: artists::ArtistMessage) -> Self {
         match msg {
             artists::ArtistMessage::PlayArtistAlbum(ai, ali) => Message::PlayArtistAlbum(ai, ali),
-            artists::ArtistMessage::PlayTrack(ai, ali, ti) => {
-                Message::PlayArtistTrack(ai, ali, ti)
-            }
+            artists::ArtistMessage::PlayTrack(ai, ali, ti) => Message::PlayArtistTrack(ai, ali, ti),
             artists::ArtistMessage::SelectArtist(i) => Message::SelectArtist(i),
             artists::ArtistMessage::BackToList => Message::BackToArtistList,
             artists::ArtistMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
@@ -510,9 +557,9 @@ impl cosmic::Application for AppModel {
         let config_context = cosmic_config::Config::new(Self::APP_ID, Config::VERSION).ok();
         let mut config = config_context
             .as_ref()
-            .and_then(|context| match Config::get_entry(context) {
-                Ok(config) => Some(config),
-                Err((_errors, config)) => Some(config),
+            .map(|context| match Config::get_entry(context) {
+                Ok(config) => config,
+                Err((_errors, config)) => config,
             })
             .unwrap_or_default();
 
@@ -619,12 +666,11 @@ impl cosmic::Application for AppModel {
             }
 
             // Persist config if any passwords were migrated.
-            if config_changed {
-                if let Some(ref context) = config_context
-                    && let Err(e) = config.write_entry(context)
-                {
-                    tracing::error!("Failed to save config after keyring migration: {e:?}");
-                }
+            if config_changed
+                && let Some(ref context) = config_context
+                && let Err(e) = config.write_entry(context)
+            {
+                tracing::error!("Failed to save config after keyring migration: {e:?}");
             }
         }
 
@@ -681,8 +727,7 @@ impl cosmic::Application for AppModel {
             .iter()
             .map(providers::MpdEditState::from_config)
             .collect();
-        let mpd_connection_status: Vec<Option<String>> =
-            vec![None; mpd_edit_states.len()];
+        let mpd_connection_status: Vec<Option<String>> = vec![None; mpd_edit_states.len()];
 
         // Build editing state for Subsonic servers
         let subsonic_edit_states: Vec<providers::SubsonicEditState> = config
@@ -814,6 +859,29 @@ impl cosmic::Application for AppModel {
             tag_editor_search: String::new(),
             tag_editor_status: None,
             tag_editor_dirty: false,
+
+            tag_editor_tab: tag_editor::TagEditorTab::Tags,
+            tag_editor_album_mode: false,
+            tag_editor_selected_album: None,
+
+            tag_editor_lookup_query: String::new(),
+            tag_editor_lookup_source: LookupSource::MusicBrainz,
+            tag_editor_lookup_loading: false,
+            tag_editor_lookup_results: Vec::new(),
+            tag_editor_selected_result: None,
+            tag_editor_fingerprinting: false,
+
+            tag_editor_acoustid_key: String::new(),
+            tag_editor_discogs_token: String::new(),
+
+            http_client: Arc::new(
+                reqwest::blocking::Client::builder()
+                    .connect_timeout(Duration::from_secs(10))
+                    .timeout(Duration::from_secs(30))
+                    .user_agent("Lyra/0.1.0 (https://github.com/M0Rf30/lyra)")
+                    .build()
+                    .unwrap_or_else(|_| reqwest::blocking::Client::new()),
+            ),
         };
 
         app.rebuild_provider_list();
@@ -873,8 +941,11 @@ impl cosmic::Application for AppModel {
             return vec![];
         }
 
-        let provider_names: Vec<String> =
-            self.provider_list.iter().map(|(_, name)| name.clone()).collect();
+        let provider_names: Vec<String> = self
+            .provider_list
+            .iter()
+            .map(|(_, name)| name.clone())
+            .collect();
 
         let dropdown = widget::dropdown(
             provider_names,
@@ -947,8 +1018,7 @@ impl cosmic::Application for AppModel {
                 .title(fl!("equalizer"))
             }
             ContextPage::Providers => {
-                let active_provider_type =
-                    self.registry.active().map(|p| p.provider_type());
+                let active_provider_type = self.registry.active().map(|p| p.provider_type());
                 let providers_content = providers::providers_view(
                     &self.config.music_dirs,
                     &self.mpd_edit_states,
@@ -962,9 +1032,7 @@ impl cosmic::Application for AppModel {
                 .map(|msg| match msg {
                     // Local music directories
                     providers::ProvidersMessage::AddMusicDir => Message::AddMusicDir,
-                    providers::ProvidersMessage::RemoveMusicDir(i) => {
-                        Message::RemoveMusicDir(i)
-                    }
+                    providers::ProvidersMessage::RemoveMusicDir(i) => Message::RemoveMusicDir(i),
                     // MPD
                     providers::ProvidersMessage::AddMpd => Message::MpdAddServer,
                     providers::ProvidersMessage::EditName(i, v) => Message::MpdEditName(i, v),
@@ -975,9 +1043,7 @@ impl cosmic::Application for AppModel {
                     }
                     providers::ProvidersMessage::Save(i) => Message::MpdSaveServer(i),
                     providers::ProvidersMessage::Remove(i) => Message::MpdRemoveServer(i),
-                    providers::ProvidersMessage::TestConnection(i) => {
-                        Message::MpdTestConnection(i)
-                    }
+                    providers::ProvidersMessage::TestConnection(i) => Message::MpdTestConnection(i),
                     // Subsonic
                     providers::ProvidersMessage::AddSubsonic => Message::SubsonicAddServer,
                     providers::ProvidersMessage::SubsonicEditName(i, v) => {
@@ -995,9 +1061,7 @@ impl cosmic::Application for AppModel {
                     providers::ProvidersMessage::SubsonicToggleCerts(i, v) => {
                         Message::SubsonicToggleCerts(i, v)
                     }
-                    providers::ProvidersMessage::SubsonicSave(i) => {
-                        Message::SubsonicSaveServer(i)
-                    }
+                    providers::ProvidersMessage::SubsonicSave(i) => Message::SubsonicSaveServer(i),
                     providers::ProvidersMessage::SubsonicRemove(i) => {
                         Message::SubsonicRemoveServer(i)
                     }
@@ -1040,9 +1104,7 @@ impl cosmic::Application for AppModel {
                 )
                 .map(|msg| match msg {
                     lyrics::LyricsMessage::FetchLyrics => Message::FetchLyricsOnline,
-                    lyrics::LyricsMessage::Close => {
-                        Message::ToggleContextPage(ContextPage::Lyrics)
-                    }
+                    lyrics::LyricsMessage::Close => Message::ToggleContextPage(ContextPage::Lyrics),
                 });
 
                 context_drawer::context_drawer(
@@ -1055,20 +1117,29 @@ impl cosmic::Application for AppModel {
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
-        let page = self.nav.active_data::<Page>().cloned().unwrap_or(Page::Albums);
+        let page = self
+            .nav
+            .active_data::<Page>()
+            .cloned()
+            .unwrap_or(Page::Albums);
 
         let content: Element<'_, Self::Message> = match page {
             Page::Albums => {
                 if let Some(album_idx) = self.selected_album {
                     if let Some(album) = self.all_albums.get(album_idx) {
-                        albums::album_detail_view(album, album_idx, &self.cover_images, &self.playlists, self.current_track.as_ref().map(|t| t.id))
-                            .map(Message::from)
+                        albums::album_detail_view(
+                            album,
+                            album_idx,
+                            &self.cover_images,
+                            &self.playlists,
+                            self.current_track.as_ref().map(|t| t.id),
+                        )
+                        .map(Message::from)
                     } else {
                         widget::text("Album not found").into()
                     }
                 } else {
-                    albums::album_grid_view(&self.all_albums, &self.cover_images)
-                        .map(Message::from)
+                    albums::album_grid_view(&self.all_albums, &self.cover_images).map(Message::from)
                 }
             }
 
@@ -1092,115 +1163,215 @@ impl cosmic::Application for AppModel {
                 }
             }
 
-            Page::Songs => {
-                songs::songs_list_view(
-                    &self.all_tracks,
-                    self.songs_sort,
-                    self.songs_sort_descending,
-                    self.favorites_filter,
-                    self.genre_filter.as_deref(),
-                    &self.playlists,
-                    self.current_track.as_ref().map(|t| t.id),
-                ).map(|msg| match msg {
-                    songs::SongMessage::PlayTrack(i) => Message::PlayTrackIndex(i),
-                    songs::SongMessage::SortBy(f) => Message::SortSongs(f),
-                    songs::SongMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
-                    songs::SongMessage::SetRating(id, r) => Message::SetRating(id, r),
-                    songs::SongMessage::AddToPlaylist(uri, pid) => Message::AddToPlaylist(uri, pid),
-                    songs::SongMessage::ToggleFavoritesFilter => Message::ToggleFavoritesFilter,
-                    songs::SongMessage::FilterByGenre(g) => Message::FilterByGenre(g),
-                    songs::SongMessage::ClearGenreFilter => Message::FilterByGenre(String::new()),
-                })
-            }
+            Page::Songs => songs::songs_list_view(
+                &self.all_tracks,
+                self.songs_sort,
+                self.songs_sort_descending,
+                self.favorites_filter,
+                self.genre_filter.as_deref(),
+                &self.playlists,
+                self.current_track.as_ref().map(|t| t.id),
+            )
+            .map(|msg| match msg {
+                songs::SongMessage::PlayTrack(i) => Message::PlayTrackIndex(i),
+                songs::SongMessage::SortBy(f) => Message::SortSongs(f),
+                songs::SongMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
+                songs::SongMessage::SetRating(id, r) => Message::SetRating(id, r),
+                songs::SongMessage::AddToPlaylist(uri, pid) => Message::AddToPlaylist(uri, pid),
+                songs::SongMessage::ToggleFavoritesFilter => Message::ToggleFavoritesFilter,
+                songs::SongMessage::FilterByGenre(g) => Message::FilterByGenre(g),
+                songs::SongMessage::ClearGenreFilter => Message::FilterByGenre(String::new()),
+            }),
 
             Page::Playlists => {
                 if let Some(pl_idx) = self.selected_playlist {
                     if let Some(playlist) = self.playlists.get(pl_idx) {
                         playlists::playlist_detail_view(playlist, pl_idx, &self.playlist_edit_name)
                             .map(|msg| match msg {
-                                playlists::PlaylistMessage::BackToList => Message::BackToPlaylistList,
-                                playlists::PlaylistMessage::PlayPlaylist(i) => Message::PlayPlaylist(i),
-                                playlists::PlaylistMessage::PlayTrack(pi, ti) => Message::PlayPlaylistTrack(pi, ti),
-                                playlists::PlaylistMessage::RemoveTrack(pi, ti) => Message::RemovePlaylistTrack(pi, ti),
-                                playlists::PlaylistMessage::SelectPlaylist(i) => Message::SelectPlaylist(i),
-                                playlists::PlaylistMessage::CreatePlaylist(n) => Message::CreatePlaylist(n),
-                                playlists::PlaylistMessage::DeletePlaylist(i) => Message::DeletePlaylist(i),
-                                playlists::PlaylistMessage::RenamePlaylist(i, n) => Message::RenamePlaylist(i, n),
-                                playlists::PlaylistMessage::NewPlaylistNameChanged(n) => Message::NewPlaylistNameChanged(n),
-                                playlists::PlaylistMessage::RenameInputChanged(i, n) => Message::RenamePlaylistInput(i, n),
+                                playlists::PlaylistMessage::BackToList => {
+                                    Message::BackToPlaylistList
+                                }
+                                playlists::PlaylistMessage::PlayPlaylist(i) => {
+                                    Message::PlayPlaylist(i)
+                                }
+                                playlists::PlaylistMessage::PlayTrack(pi, ti) => {
+                                    Message::PlayPlaylistTrack(pi, ti)
+                                }
+                                playlists::PlaylistMessage::RemoveTrack(pi, ti) => {
+                                    Message::RemovePlaylistTrack(pi, ti)
+                                }
+                                playlists::PlaylistMessage::SelectPlaylist(i) => {
+                                    Message::SelectPlaylist(i)
+                                }
+                                playlists::PlaylistMessage::CreatePlaylist(n) => {
+                                    Message::CreatePlaylist(n)
+                                }
+                                playlists::PlaylistMessage::DeletePlaylist(i) => {
+                                    Message::DeletePlaylist(i)
+                                }
+                                playlists::PlaylistMessage::RenamePlaylist(i, n) => {
+                                    Message::RenamePlaylist(i, n)
+                                }
+                                playlists::PlaylistMessage::NewPlaylistNameChanged(n) => {
+                                    Message::NewPlaylistNameChanged(n)
+                                }
+                                playlists::PlaylistMessage::RenameInputChanged(i, n) => {
+                                    Message::RenamePlaylistInput(i, n)
+                                }
                             })
                     } else {
                         widget::text("Playlist not found").into()
                     }
                 } else {
-                    playlists::playlist_list_view(&self.playlists, &self.new_playlist_name)
-                        .map(|msg| match msg {
-                            playlists::PlaylistMessage::SelectPlaylist(i) => Message::SelectPlaylist(i),
-                            playlists::PlaylistMessage::CreatePlaylist(n) => Message::CreatePlaylist(n),
-                            playlists::PlaylistMessage::DeletePlaylist(i) => Message::DeletePlaylist(i),
-                            playlists::PlaylistMessage::RenamePlaylist(i, n) => Message::RenamePlaylist(i, n),
-                            playlists::PlaylistMessage::NewPlaylistNameChanged(n) => Message::NewPlaylistNameChanged(n),
-                            playlists::PlaylistMessage::RenameInputChanged(i, n) => Message::RenamePlaylistInput(i, n),
+                    playlists::playlist_list_view(&self.playlists, &self.new_playlist_name).map(
+                        |msg| match msg {
+                            playlists::PlaylistMessage::SelectPlaylist(i) => {
+                                Message::SelectPlaylist(i)
+                            }
+                            playlists::PlaylistMessage::CreatePlaylist(n) => {
+                                Message::CreatePlaylist(n)
+                            }
+                            playlists::PlaylistMessage::DeletePlaylist(i) => {
+                                Message::DeletePlaylist(i)
+                            }
+                            playlists::PlaylistMessage::RenamePlaylist(i, n) => {
+                                Message::RenamePlaylist(i, n)
+                            }
+                            playlists::PlaylistMessage::NewPlaylistNameChanged(n) => {
+                                Message::NewPlaylistNameChanged(n)
+                            }
+                            playlists::PlaylistMessage::RenameInputChanged(i, n) => {
+                                Message::RenamePlaylistInput(i, n)
+                            }
                             playlists::PlaylistMessage::BackToList => Message::BackToPlaylistList,
                             playlists::PlaylistMessage::PlayPlaylist(i) => Message::PlayPlaylist(i),
-                            playlists::PlaylistMessage::PlayTrack(pi, ti) => Message::PlayPlaylistTrack(pi, ti),
-                            playlists::PlaylistMessage::RemoveTrack(pi, ti) => Message::RemovePlaylistTrack(pi, ti),
-                        })
+                            playlists::PlaylistMessage::PlayTrack(pi, ti) => {
+                                Message::PlayPlaylistTrack(pi, ti)
+                            }
+                            playlists::PlaylistMessage::RemoveTrack(pi, ti) => {
+                                Message::RemovePlaylistTrack(pi, ti)
+                            }
+                        },
+                    )
                 }
             }
 
             Page::Genres => {
                 if let Some(genre_idx) = self.selected_genre {
                     if let Some(genre_name) = self.all_genres.get(genre_idx) {
-                        genres::genre_detail_view(genre_name, &self.genre_tracks)
-                            .map(|msg| match msg {
+                        genres::genre_detail_view(genre_name, &self.genre_tracks).map(|msg| {
+                            match msg {
                                 genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
                                 genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
                                 genres::GenreMessage::SelectGenre(i) => Message::SelectGenre(i),
-                            })
+                            }
+                        })
                     } else {
                         widget::text("Genre not found").into()
                     }
                 } else {
-                    genres::genre_grid_view(&self.all_genres)
-                        .map(|msg| match msg {
-                            genres::GenreMessage::SelectGenre(i) => Message::SelectGenre(i),
-                            genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
-                            genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
-                        })
+                    genres::genre_grid_view(&self.all_genres).map(|msg| match msg {
+                        genres::GenreMessage::SelectGenre(i) => Message::SelectGenre(i),
+                        genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
+                        genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
+                    })
                 }
             }
 
             Page::TagEditor => {
-                tag_editor::tag_editor_view(
-                    &self.all_tracks,
-                    self.tag_editor_selected,
-                    &self.tag_editor_title,
-                    &self.tag_editor_artist,
-                    &self.tag_editor_album,
-                    &self.tag_editor_album_artist,
-                    &self.tag_editor_year,
-                    &self.tag_editor_track_number,
-                    &self.tag_editor_disc_number,
-                    &self.tag_editor_genre,
-                    &self.tag_editor_comment,
-                    &self.tag_editor_search,
-                    self.tag_editor_status.as_deref(),
-                    self.tag_editor_dirty,
-                )
-                .map(|msg| match msg {
-                    tag_editor::TagEditorMessage::SelectTrack(i) => Message::TagEditorSelectTrack(i),
-                    tag_editor::TagEditorMessage::TitleChanged(s) => Message::TagEditorFieldChanged(TagEditorField::Title, s),
-                    tag_editor::TagEditorMessage::ArtistChanged(s) => Message::TagEditorFieldChanged(TagEditorField::Artist, s),
-                    tag_editor::TagEditorMessage::AlbumChanged(s) => Message::TagEditorFieldChanged(TagEditorField::Album, s),
-                    tag_editor::TagEditorMessage::AlbumArtistChanged(s) => Message::TagEditorFieldChanged(TagEditorField::AlbumArtist, s),
-                    tag_editor::TagEditorMessage::YearChanged(s) => Message::TagEditorFieldChanged(TagEditorField::Year, s),
-                    tag_editor::TagEditorMessage::TrackNumberChanged(s) => Message::TagEditorFieldChanged(TagEditorField::TrackNumber, s),
-                    tag_editor::TagEditorMessage::DiscNumberChanged(s) => Message::TagEditorFieldChanged(TagEditorField::DiscNumber, s),
-                    tag_editor::TagEditorMessage::GenreChanged(s) => Message::TagEditorFieldChanged(TagEditorField::Genre, s),
-                    tag_editor::TagEditorMessage::CommentChanged(s) => Message::TagEditorFieldChanged(TagEditorField::Comment, s),
-                    tag_editor::TagEditorMessage::SearchChanged(s) => Message::TagEditorSearchChanged(s),
+                let te_state = tag_editor::TagEditorState {
+                    all_tracks: &self.all_tracks,
+                    selected_index: self.tag_editor_selected,
+                    selected_album_name: self.tag_editor_selected_album.as_deref(),
+                    album_mode: self.tag_editor_album_mode,
+                    active_tab: self.tag_editor_tab,
+                    edit_title: &self.tag_editor_title,
+                    edit_artist: &self.tag_editor_artist,
+                    edit_album: &self.tag_editor_album,
+                    edit_album_artist: &self.tag_editor_album_artist,
+                    edit_year: &self.tag_editor_year,
+                    edit_track_number: &self.tag_editor_track_number,
+                    edit_disc_number: &self.tag_editor_disc_number,
+                    edit_genre: &self.tag_editor_genre,
+                    edit_comment: &self.tag_editor_comment,
+                    search_query: &self.tag_editor_search,
+                    save_status: self.tag_editor_status.as_deref(),
+                    dirty: self.tag_editor_dirty,
+                    lookup_query: &self.tag_editor_lookup_query,
+                    lookup_source: self.tag_editor_lookup_source,
+                    lookup_loading: self.tag_editor_lookup_loading,
+                    lookup_results: &self.tag_editor_lookup_results,
+                    selected_result: self.tag_editor_selected_result,
+                    fingerprinting: self.tag_editor_fingerprinting,
+                    acoustid_api_key: &self.tag_editor_acoustid_key,
+                    discogs_token: &self.tag_editor_discogs_token,
+                };
+                tag_editor::tag_editor_view(&te_state).map(|msg| match msg {
+                    tag_editor::TagEditorMessage::SelectTrack(i) => {
+                        Message::TagEditorSelectTrack(i)
+                    }
+                    tag_editor::TagEditorMessage::SelectAlbum(s) => {
+                        Message::TagEditorSelectAlbum(s)
+                    }
+                    tag_editor::TagEditorMessage::SearchChanged(s) => {
+                        Message::TagEditorSearchChanged(s)
+                    }
+                    tag_editor::TagEditorMessage::ToggleAlbumMode => {
+                        Message::TagEditorToggleAlbumMode
+                    }
+                    tag_editor::TagEditorMessage::SwitchTab(t) => Message::TagEditorSwitchTab(t),
+                    tag_editor::TagEditorMessage::TitleChanged(s) => {
+                        Message::TagEditorFieldChanged(TagEditorField::Title, s)
+                    }
+                    tag_editor::TagEditorMessage::ArtistChanged(s) => {
+                        Message::TagEditorFieldChanged(TagEditorField::Artist, s)
+                    }
+                    tag_editor::TagEditorMessage::AlbumChanged(s) => {
+                        Message::TagEditorFieldChanged(TagEditorField::Album, s)
+                    }
+                    tag_editor::TagEditorMessage::AlbumArtistChanged(s) => {
+                        Message::TagEditorFieldChanged(TagEditorField::AlbumArtist, s)
+                    }
+                    tag_editor::TagEditorMessage::YearChanged(s) => {
+                        Message::TagEditorFieldChanged(TagEditorField::Year, s)
+                    }
+                    tag_editor::TagEditorMessage::TrackNumberChanged(s) => {
+                        Message::TagEditorFieldChanged(TagEditorField::TrackNumber, s)
+                    }
+                    tag_editor::TagEditorMessage::DiscNumberChanged(s) => {
+                        Message::TagEditorFieldChanged(TagEditorField::DiscNumber, s)
+                    }
+                    tag_editor::TagEditorMessage::GenreChanged(s) => {
+                        Message::TagEditorFieldChanged(TagEditorField::Genre, s)
+                    }
+                    tag_editor::TagEditorMessage::CommentChanged(s) => {
+                        Message::TagEditorFieldChanged(TagEditorField::Comment, s)
+                    }
                     tag_editor::TagEditorMessage::Save => Message::TagEditorSave,
+                    tag_editor::TagEditorMessage::LookupQueryChanged(s) => {
+                        Message::TagEditorLookupQueryChanged(s)
+                    }
+                    tag_editor::TagEditorMessage::LookupSourceChanged(src) => {
+                        Message::TagEditorLookupSourceChanged(src)
+                    }
+                    tag_editor::TagEditorMessage::LookupSearch => Message::TagEditorLookupSearch,
+                    tag_editor::TagEditorMessage::ScanFingerprint => {
+                        Message::TagEditorScanFingerprint
+                    }
+                    tag_editor::TagEditorMessage::SelectResult(i) => {
+                        Message::TagEditorSelectResult(i)
+                    }
+                    tag_editor::TagEditorMessage::FetchReleaseTracks(id) => {
+                        Message::TagEditorFetchReleaseTracks(id)
+                    }
+                    tag_editor::TagEditorMessage::ApplyResult => Message::TagEditorApplyResult,
+                    tag_editor::TagEditorMessage::AcoustIdKeyChanged(s) => {
+                        Message::TagEditorAcoustIdKeyChanged(s)
+                    }
+                    tag_editor::TagEditorMessage::DiscogsTokenChanged(s) => {
+                        Message::TagEditorDiscogsTokenChanged(s)
+                    }
+                    tag_editor::TagEditorMessage::BatchSave => Message::TagEditorBatchSave,
                 })
             }
         };
@@ -1252,7 +1423,9 @@ impl cosmic::Application for AppModel {
             #[cfg(feature = "visualizer")]
             now_playing::NowPlayingMessage::NextPreset => Message::NextVisualizerPreset,
             #[cfg(feature = "visualizer")]
-            now_playing::NowPlayingMessage::ToggleVizFullscreen => Message::ToggleVisualizerFullscreen,
+            now_playing::NowPlayingMessage::ToggleVizFullscreen => {
+                Message::ToggleVisualizerFullscreen
+            }
         };
 
         let bar = now_playing::compact_bar::playback_bar(
@@ -1294,9 +1467,7 @@ impl cosmic::Application for AppModel {
             )
             .map(map_now_playing_msg);
 
-            widget::container(expanded)
-                .width(Length::Fill)
-                .into()
+            widget::container(expanded).width(Length::Fill).into()
         } else {
             // Collapsed state: normal layout
             let mut layout_col = widget::column().push(
@@ -1367,8 +1538,7 @@ impl cosmic::Application for AppModel {
                     subs.push(Subscription::run_with_id(
                         "mpd-status-poll",
                         iced_futures::stream::channel(1, |mut emitter| async move {
-                            let mut interval =
-                                tokio::time::interval(Duration::from_millis(300));
+                            let mut interval = tokio::time::interval(Duration::from_millis(300));
                             loop {
                                 interval.tick().await;
                                 match client.command(mpd_client::commands::Status).await {
@@ -1386,12 +1556,8 @@ impl cosmic::Application for AppModel {
                                         };
                                         _ = emitter
                                             .send(Message::MpdStatusUpdate {
-                                                position: status
-                                                    .elapsed
-                                                    .unwrap_or(Duration::ZERO),
-                                                duration: status
-                                                    .duration
-                                                    .unwrap_or(Duration::ZERO),
+                                                position: status.elapsed.unwrap_or(Duration::ZERO),
+                                                duration: status.duration.unwrap_or(Duration::ZERO),
                                                 state,
                                                 volume: status.volume as f32 / 100.0,
                                             })
@@ -1410,8 +1576,7 @@ impl cosmic::Application for AppModel {
                 subs.push(Subscription::run_with_id(
                     "playback-tick",
                     iced_futures::stream::channel(1, |mut emitter| async move {
-                        let mut interval =
-                            tokio::time::interval(Duration::from_millis(500));
+                        let mut interval = tokio::time::interval(Duration::from_millis(500));
                         loop {
                             interval.tick().await;
                             _ = emitter.send(Message::PlaybackTick).await;
@@ -1451,9 +1616,7 @@ impl cosmic::Application for AppModel {
 
                     // Step 2: Establish the command connection
                     if let Err(e) = provider.connect_command().await {
-                        tracing::error!(
-                            "MPD provider '{pid}' command connection failed: {e}"
-                        );
+                        tracing::error!("MPD provider '{pid}' command connection failed: {e}");
                         _ = emitter
                             .send(Message::MpdConnectionFailed(pid, e.to_string()))
                             .await;
@@ -1512,8 +1675,7 @@ impl cosmic::Application for AppModel {
                 iced_futures::stream::channel(2, move |mut emitter| async move {
                     // Use a one-shot channel to know when the render thread
                     // has produced a new frame so we can notify the UI.
-                    let (frame_tx, mut frame_rx) =
-                        tokio::sync::mpsc::channel::<()>(2);
+                    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<()>(2);
 
                     // Spawn a dedicated OS thread for the GL render loop.
                     // The EGL context created inside `ProjectMRenderer::new`
@@ -1529,9 +1691,7 @@ impl cosmic::Application for AppModel {
                                 ) {
                                     Ok(r) => r,
                                     Err(e) => {
-                                        tracing::error!(
-                                            "Failed to create projectM renderer: {e}"
-                                        );
+                                        tracing::error!("Failed to create projectM renderer: {e}");
                                         return;
                                     }
                                 };
@@ -1541,9 +1701,7 @@ impl cosmic::Application for AppModel {
                                 std::thread::sleep(Duration::from_millis(33));
 
                                 // Check if a preset change was requested
-                                if preset_signal
-                                    .swap(false, std::sync::atomic::Ordering::AcqRel)
-                                {
+                                if preset_signal.swap(false, std::sync::atomic::Ordering::AcqRel) {
                                     renderer.next_preset();
                                 }
 
@@ -1679,9 +1837,7 @@ impl cosmic::Application for AppModel {
                                 changed_paths.len()
                             );
 
-                            _ = emitter
-                                .send(Message::FilesChanged(changed_paths))
-                                .await;
+                            _ = emitter.send(Message::FilesChanged(changed_paths)).await;
                         }
                     }),
                 ));
@@ -1711,29 +1867,23 @@ impl cosmic::Application for AppModel {
         }
 
         // Space bar to toggle playback (unless captured by a text input widget)
-        subs.push(cosmic::iced::event::listen_with(
-            |event, status, _id| {
-                if let cosmic::iced::Event::Keyboard(
-                    cosmic::iced::keyboard::Event::KeyPressed {
-                        key: cosmic::iced::keyboard::Key::Named(
-                            cosmic::iced::keyboard::key::Named::Space,
-                        ),
-                        modifiers,
-                        ..
-                    },
-                ) = event
-                {
-                    // Only toggle playback if:
-                    // 1. Space key pressed
-                    // 2. No modifier keys (Ctrl, Shift, Alt, etc.)
-                    // 3. Event not captured by a widget (e.g., text input)
-                    if modifiers.is_empty() && status != cosmic::iced::event::Status::Captured {
-                        return Some(Message::TogglePlayback);
-                    }
+        subs.push(cosmic::iced::event::listen_with(|event, status, _id| {
+            if let cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
+                key: cosmic::iced::keyboard::Key::Named(cosmic::iced::keyboard::key::Named::Space),
+                modifiers,
+                ..
+            }) = event
+            {
+                // Only toggle playback if:
+                // 1. Space key pressed
+                // 2. No modifier keys (Ctrl, Shift, Alt, etc.)
+                // 3. Event not captured by a widget (e.g., text input)
+                if modifiers.is_empty() && status != cosmic::iced::event::Status::Captured {
+                    return Some(Message::TogglePlayback);
                 }
-                None
-            },
-        ));
+            }
+            None
+        }));
 
         Subscription::batch(subs)
     }
@@ -1873,10 +2023,7 @@ impl cosmic::Application for AppModel {
                     return Task::none();
                 }
 
-                tracing::info!(
-                    "Filesystem watcher detected {} changed paths",
-                    paths.len()
-                );
+                tracing::info!("Filesystem watcher detected {} changed paths", paths.len());
 
                 // Run incremental scan on the changed paths in a background task.
                 if let Some(provider) = self.registry.active_shared()
@@ -2004,8 +2151,7 @@ impl cosmic::Application for AppModel {
                     && let Some(ref mut player) = self.player
                     && let Some(ref track) = self.current_track
                 {
-                    let target =
-                        Duration::from_secs_f32(fraction * track.duration.as_secs_f32());
+                    let target = Duration::from_secs_f32(fraction * track.duration.as_secs_f32());
                     match player.seek(target) {
                         Ok(()) => {
                             self.playback_position = target;
@@ -2260,10 +2406,10 @@ impl cosmic::Application for AppModel {
                                 }
                             }
                             // Also update the current playing track if it matches.
-                            if let Some(ref mut ct) = self.current_track {
-                                if ct.id.to_string() == track_id {
-                                    ct.is_favorite = new_state;
-                                }
+                            if let Some(ref mut ct) = self.current_track
+                                && ct.id.to_string() == track_id
+                            {
+                                ct.is_favorite = new_state;
                             }
                         }
                         Err(e) => {
@@ -2299,10 +2445,10 @@ impl cosmic::Application for AppModel {
                                     }
                                 }
                             }
-                            if let Some(ref mut ct) = self.current_track {
-                                if ct.id.to_string() == track_id {
-                                    ct.rating = new_rating;
-                                }
+                            if let Some(ref mut ct) = self.current_track
+                                && ct.id.to_string() == track_id
+                            {
+                                ct.rating = new_rating;
                             }
                         }
                         Err(e) => {
@@ -2313,10 +2459,10 @@ impl cosmic::Application for AppModel {
             }
 
             Message::AddToPlaylist(track_source_uri, playlist_id) => {
-                if let Some(provider) = self.registry.active_shared() {
-                    if let Err(e) = provider.add_to_playlist(&playlist_id, &[track_source_uri]) {
-                        tracing::warn!("add_to_playlist failed: {e}");
-                    }
+                if let Some(provider) = self.registry.active_shared()
+                    && let Err(e) = provider.add_to_playlist(&playlist_id, &[track_source_uri])
+                {
+                    tracing::warn!("add_to_playlist failed: {e}");
                 }
             }
 
@@ -2330,7 +2476,11 @@ impl cosmic::Application for AppModel {
                     // Collect entity IDs first to avoid borrow conflict.
                     let entities: Vec<_> = self.nav.iter().collect();
                     for entity in entities {
-                        if self.nav.data::<Page>(entity).is_some_and(|p| *p == Page::Songs) {
+                        if self
+                            .nav
+                            .data::<Page>(entity)
+                            .is_some_and(|p| *p == Page::Songs)
+                        {
                             self.nav.activate(entity);
                             break;
                         }
@@ -2431,7 +2581,9 @@ impl cosmic::Application for AppModel {
                             name: name.clone(),
                             bands: {
                                 let mut b = [0.0_f32; 10];
-                                for (i, v) in self.config.equalizer_bands.iter().enumerate().take(10) {
+                                for (i, v) in
+                                    self.config.equalizer_bands.iter().enumerate().take(10)
+                                {
                                     b[i] = *v;
                                 }
                                 b
@@ -2528,10 +2680,7 @@ impl cosmic::Application for AppModel {
 
                 return cosmic::task::future(async move {
                     let result = match crate::autoeq::AutoEQManager::new(cache_dir, timeout) {
-                        Ok(mut manager) => manager
-                            .fetch_index()
-                            .await
-                            .map_err(|e| e.to_string()),
+                        Ok(mut manager) => manager.fetch_index().await.map_err(|e| e.to_string()),
                         Err(e) => Err(e.to_string()),
                     };
                     cosmic::Action::App(Message::AutoEQIndexLoaded(result))
@@ -2642,10 +2791,7 @@ impl cosmic::Application for AppModel {
                     Ok(path) => {
                         // Deduplicate: check if the path is already in music_dirs.
                         if self.config.music_dirs.contains(&path) {
-                            tracing::info!(
-                                "Directory already in music_dirs: {}",
-                                path.display()
-                            );
+                            tracing::info!("Directory already in music_dirs: {}", path.display());
                         } else {
                             tracing::info!("Adding music directory: {}", path.display());
                             self.config.music_dirs.push(path);
@@ -2653,9 +2799,9 @@ impl cosmic::Application for AppModel {
                             // Re-register the Local provider with updated scan dirs.
                             self.reinit_local_provider();
                             // Trigger a library rescan.
-                            return cosmic::task::message(
-                                cosmic::Action::App(Message::ScanLibrary),
-                            );
+                            return cosmic::task::message(cosmic::Action::App(
+                                Message::ScanLibrary,
+                            ));
                         }
                     }
                     Err(e) => {
@@ -2963,10 +3109,7 @@ impl cosmic::Application for AppModel {
                                     .with_danger_accept_invalid_certs()
                                     .map_err(|e| format!("TLS: {e}"))?;
                             }
-                            client
-                                .ping()
-                                .await
-                                .map_err(|e| format!("Ping: {e}"))?;
+                            client.ping().await.map_err(|e| format!("Ping: {e}"))?;
                             Ok(())
                         }
                         .await;
@@ -3056,9 +3199,7 @@ impl cosmic::Application for AppModel {
             Message::ExpandAnimTick => {
                 use crate::views::now_playing::animation;
 
-                if let (Some(target), Some(start)) =
-                    (self.expand_target, self.expand_anim_start)
-                {
+                if let (Some(target), Some(start)) = (self.expand_target, self.expand_anim_start) {
                     let elapsed = start.elapsed().as_secs_f32() * 1000.0;
                     let t = (elapsed / animation::ANIMATION_DURATION_MS).min(1.0);
 
@@ -3069,8 +3210,7 @@ impl cosmic::Application for AppModel {
                         animation::ease_in(t)
                     };
 
-                    self.expand_progress =
-                        animation::lerp(self.expand_anim_from, target, eased);
+                    self.expand_progress = animation::lerp(self.expand_anim_from, target, eased);
 
                     // Check if animation is complete
                     if t >= 1.0 {
@@ -3132,7 +3272,8 @@ impl cosmic::Application for AppModel {
                 // Decay metadata overlay (~4 seconds at 30 fps = 120 frames).
                 // No inner cfg needed — this arm is only reachable with the visualizer feature.
                 if self.viz_metadata_opacity > 0.0 {
-                    self.viz_metadata_opacity = (self.viz_metadata_opacity - (1.0 / 120.0)).max(0.0);
+                    self.viz_metadata_opacity =
+                        (self.viz_metadata_opacity - (1.0 / 120.0)).max(0.0);
                 }
             }
 
@@ -3207,10 +3348,10 @@ impl cosmic::Application for AppModel {
             }
 
             Message::PlayPlaylist(idx) => {
-                if let Some(playlist) = self.playlists.get(idx) {
-                    if !playlist.tracks.is_empty() {
-                        return self.play_track_list(playlist.tracks.clone(), 0);
-                    }
+                if let Some(playlist) = self.playlists.get(idx)
+                    && !playlist.tracks.is_empty()
+                {
+                    return self.play_track_list(playlist.tracks.clone(), 0);
                 }
             }
 
@@ -3246,9 +3387,7 @@ impl cosmic::Application for AppModel {
                 if let Some(genre_name) = self.all_genres.get(idx) {
                     let genre = genre_name.clone();
                     if let Some(provider) = self.registry.active_shared() {
-                        let tracks = provider
-                            .get_tracks_by_genre(&genre)
-                            .unwrap_or_default();
+                        let tracks = provider.get_tracks_by_genre(&genre).unwrap_or_default();
                         self.genre_tracks = tracks;
                     } else {
                         // Fall back to filtering local tracks
@@ -3293,9 +3432,21 @@ impl cosmic::Application for AppModel {
                     self.tag_editor_artist = track.artist.clone();
                     self.tag_editor_album = track.album.clone();
                     self.tag_editor_album_artist = track.album_artist.clone();
-                    self.tag_editor_year = if track.year > 0 { track.year.to_string() } else { String::new() };
-                    self.tag_editor_track_number = if track.track_number > 0 { track.track_number.to_string() } else { String::new() };
-                    self.tag_editor_disc_number = if track.disc_number > 0 { track.disc_number.to_string() } else { String::new() };
+                    self.tag_editor_year = if track.year > 0 {
+                        track.year.to_string()
+                    } else {
+                        String::new()
+                    };
+                    self.tag_editor_track_number = if track.track_number > 0 {
+                        track.track_number.to_string()
+                    } else {
+                        String::new()
+                    };
+                    self.tag_editor_disc_number = if track.disc_number > 0 {
+                        track.disc_number.to_string()
+                    } else {
+                        String::new()
+                    };
                     self.tag_editor_genre = track.genre.clone();
                     self.tag_editor_comment = String::new();
                     self.tag_editor_status = None;
@@ -3398,18 +3549,395 @@ impl cosmic::Application for AppModel {
                 });
             }
 
-            Message::TagEditorSaveResult(result) => {
+            Message::TagEditorSaveResult(result) => match result {
+                Ok(()) => {
+                    self.tag_editor_dirty = false;
+                    self.tag_editor_status = Some(fl!("tag-editor-saved"));
+                    return cosmic::task::message(cosmic::Action::App(Message::ScanLibrary));
+                }
+                Err(e) => {
+                    self.tag_editor_status = Some(format!("{}: {e}", fl!("tag-editor-error")));
+                }
+            },
+
+            // ── Advanced tag editor handlers ────────────────────────────
+            Message::TagEditorSwitchTab(tab) => {
+                self.tag_editor_tab = tab;
+            }
+
+            Message::TagEditorToggleAlbumMode => {
+                self.tag_editor_album_mode = !self.tag_editor_album_mode;
+                self.tag_editor_selected = None;
+                self.tag_editor_selected_album = None;
+                self.tag_editor_dirty = false;
+                self.tag_editor_status = None;
+            }
+
+            Message::TagEditorSelectAlbum(album_name) => {
+                self.tag_editor_selected_album = Some(album_name.clone());
+                // When selecting an album, pre-fill form with the first track's data
+                let first_track = self
+                    .all_tracks
+                    .iter()
+                    .filter(|t| t.provider_id.as_ref() == "local")
+                    .find(|t| t.album == album_name);
+                if let Some(track) = first_track {
+                    self.tag_editor_album = track.album.clone();
+                    self.tag_editor_album_artist = track.album_artist.clone();
+                    self.tag_editor_artist = track.artist.clone();
+                    self.tag_editor_year = if track.year > 0 {
+                        track.year.to_string()
+                    } else {
+                        String::new()
+                    };
+                    self.tag_editor_genre = track.genre.clone();
+                    self.tag_editor_title = String::new(); // Album mode: title varies per track
+                    self.tag_editor_track_number = String::new();
+                    self.tag_editor_disc_number = String::new();
+                    self.tag_editor_comment = String::new();
+                    self.tag_editor_dirty = false;
+                    self.tag_editor_status = None;
+                }
+            }
+
+            Message::TagEditorLookupQueryChanged(query) => {
+                self.tag_editor_lookup_query = query;
+            }
+
+            Message::TagEditorLookupSourceChanged(source) => {
+                self.tag_editor_lookup_source = source;
+                self.tag_editor_lookup_results.clear();
+                self.tag_editor_selected_result = None;
+            }
+
+            Message::TagEditorLookupSearch => {
+                let query = self.tag_editor_lookup_query.clone();
+                if query.is_empty() {
+                    return Task::none();
+                }
+                self.tag_editor_lookup_loading = true;
+                self.tag_editor_lookup_results.clear();
+                self.tag_editor_selected_result = None;
+
+                let client = self.http_client.clone();
+                let source = self.tag_editor_lookup_source;
+                let discogs_token = self.tag_editor_discogs_token.clone();
+
+                // Guard: Discogs requires a token
+                if source == LookupSource::Discogs && discogs_token.is_empty() {
+                    self.tag_editor_lookup_loading = false;
+                    self.tag_editor_status =
+                        Some("Please configure your Discogs token in the Lookup tab".to_string());
+                    return Task::none();
+                }
+
+                return cosmic::task::future(async move {
+                    let result = tokio::task::spawn_blocking(move || match source {
+                        LookupSource::MusicBrainz => {
+                            services::musicbrainz::search_releases(&client, &query)
+                        }
+                        LookupSource::Discogs => {
+                            services::discogs::search_releases(&client, &query, &discogs_token)
+                        }
+                        LookupSource::AcoustId => Ok(Vec::new()),
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(format!("Task error: {e}")));
+                    cosmic::Action::App(Message::TagEditorLookupResult(result))
+                });
+            }
+
+            Message::TagEditorScanFingerprint => {
+                let Some(idx) = self.tag_editor_selected else {
+                    return Task::none();
+                };
+                let local_tracks: Vec<&Track> = self
+                    .all_tracks
+                    .iter()
+                    .filter(|t| t.provider_id.as_ref() == "local")
+                    .collect();
+                let Some(track) = local_tracks.get(idx) else {
+                    return Task::none();
+                };
+                let path = track.path.clone();
+                self.tag_editor_fingerprinting = true;
+
+                return cosmic::task::future(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        services::acoustid::fingerprint_file(&path)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(format!("Task error: {e}")));
+                    cosmic::Action::App(Message::TagEditorFingerprintResult(result))
+                });
+            }
+
+            Message::TagEditorFingerprintResult(result) => {
+                self.tag_editor_fingerprinting = false;
                 match result {
-                    Ok(()) => {
-                        self.tag_editor_dirty = false;
-                        self.tag_editor_status = Some(fl!("tag-editor-saved"));
-                        return cosmic::task::message(cosmic::Action::App(Message::ScanLibrary));
+                    Ok(fp_result) => {
+                        if self.tag_editor_acoustid_key.is_empty() {
+                            self.tag_editor_status = Some(
+                                "Please configure your AcoustID API key in the Lookup tab"
+                                    .to_string(),
+                            );
+                            self.tag_editor_tab = tag_editor::TagEditorTab::Lookup;
+                            return Task::none();
+                        }
+                        // Auto-lookup on AcoustID with the fingerprint
+                        let client = self.http_client.clone();
+                        let api_key = self.tag_editor_acoustid_key.clone();
+                        let fingerprint = fp_result.fingerprint;
+                        let duration = fp_result.duration;
+                        self.tag_editor_lookup_loading = true;
+                        self.tag_editor_lookup_source = LookupSource::AcoustId;
+
+                        return cosmic::task::future(async move {
+                            let result = tokio::task::spawn_blocking(move || {
+                                services::acoustid::lookup(
+                                    &client,
+                                    &api_key,
+                                    &fingerprint,
+                                    duration,
+                                )
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(format!("Task error: {e}")));
+                            cosmic::Action::App(Message::TagEditorLookupResult(result))
+                        });
                     }
                     Err(e) => {
-                        self.tag_editor_status = Some(format!("{}: {e}", fl!("tag-editor-error")));
+                        self.tag_editor_status = Some(format!("Fingerprint error: {e}"));
                     }
                 }
             }
+
+            Message::TagEditorLookupResult(result) => {
+                self.tag_editor_lookup_loading = false;
+                match result {
+                    Ok(results) => {
+                        self.tag_editor_lookup_results = results;
+                        self.tag_editor_selected_result = None;
+                        if self.tag_editor_lookup_results.is_empty() {
+                            self.tag_editor_status = Some(fl!("tag-editor-lookup-no-results"));
+                        }
+                    }
+                    Err(e) => {
+                        self.tag_editor_status = Some(format!("Lookup error: {e}"));
+                    }
+                }
+            }
+
+            Message::TagEditorSelectResult(idx) => {
+                self.tag_editor_selected_result = Some(idx);
+            }
+
+            Message::TagEditorFetchReleaseTracks(release_id) => {
+                let client = self.http_client.clone();
+                let source = self
+                    .tag_editor_selected_result
+                    .and_then(|i| self.tag_editor_lookup_results.get(i))
+                    .map(|r| r.source)
+                    .unwrap_or(LookupSource::MusicBrainz);
+                let discogs_token = self.tag_editor_discogs_token.clone();
+                self.tag_editor_lookup_loading = true;
+
+                return cosmic::task::future(async move {
+                    let result = tokio::task::spawn_blocking(move || match source {
+                        LookupSource::MusicBrainz | LookupSource::AcoustId => {
+                            services::musicbrainz::fetch_release(&client, &release_id)
+                        }
+                        LookupSource::Discogs => {
+                            if let Ok(id) = release_id.parse::<u64>() {
+                                services::discogs::fetch_release(&client, id, &discogs_token)
+                            } else {
+                                Err("Invalid Discogs release ID".to_string())
+                            }
+                        }
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(format!("Task error: {e}")));
+                    cosmic::Action::App(Message::TagEditorFetchReleaseResult(result))
+                });
+            }
+
+            Message::TagEditorFetchReleaseResult(result) => {
+                self.tag_editor_lookup_loading = false;
+                match result {
+                    Ok(release) => {
+                        // Replace the selected result with the full release (with tracks)
+                        if let Some(idx) = self.tag_editor_selected_result
+                            && idx < self.tag_editor_lookup_results.len()
+                        {
+                            self.tag_editor_lookup_results[idx] = release;
+                        }
+                    }
+                    Err(e) => {
+                        self.tag_editor_status = Some(format!("Fetch error: {e}"));
+                    }
+                }
+            }
+
+            Message::TagEditorApplyResult => {
+                let Some(idx) = self.tag_editor_selected_result else {
+                    return Task::none();
+                };
+                let Some(release) = self.tag_editor_lookup_results.get(idx) else {
+                    return Task::none();
+                };
+
+                // Apply release-level metadata to the form fields
+                self.tag_editor_album = release.title.clone();
+                self.tag_editor_album_artist = release.artist.clone();
+                self.tag_editor_artist = release.artist.clone();
+                if let Some(year) = &release.year {
+                    self.tag_editor_year = year.clone();
+                }
+                if !release.genres.is_empty() {
+                    self.tag_editor_genre = release.genres.join("; ");
+                }
+
+                // If we have tracks and a specific track is selected, match by position
+                if let Some(selected_idx) = self.tag_editor_selected {
+                    let local_tracks: Vec<&Track> = self
+                        .all_tracks
+                        .iter()
+                        .filter(|t| t.provider_id.as_ref() == "local")
+                        .collect();
+                    if let Some(track) = local_tracks.get(selected_idx) {
+                        // Try to match by track number
+                        let matched = release
+                            .tracks
+                            .iter()
+                            .find(|t| t.position == track.track_number);
+                        if let Some(matched_track) = matched {
+                            self.tag_editor_title = matched_track.title.clone();
+                            if !matched_track.artist.is_empty() {
+                                self.tag_editor_artist = matched_track.artist.clone();
+                            }
+                        } else if let Some(first) = release.tracks.first() {
+                            // Fall back to first track if no position match
+                            self.tag_editor_title = first.title.clone();
+                        }
+                    }
+                }
+
+                self.tag_editor_dirty = true;
+                self.tag_editor_status = None;
+                self.tag_editor_tab = tag_editor::TagEditorTab::Tags;
+            }
+
+            Message::TagEditorAcoustIdKeyChanged(key) => {
+                self.tag_editor_acoustid_key = key;
+            }
+
+            Message::TagEditorDiscogsTokenChanged(token) => {
+                self.tag_editor_discogs_token = token;
+            }
+
+            Message::TagEditorBatchSave => {
+                let Some(album_name) = self.tag_editor_selected_album.clone() else {
+                    return Task::none();
+                };
+                let album_tracks: Vec<Track> = self
+                    .all_tracks
+                    .iter()
+                    .filter(|t| t.provider_id.as_ref() == "local" && t.album == album_name)
+                    .cloned()
+                    .collect();
+
+                if album_tracks.is_empty() {
+                    return Task::none();
+                }
+
+                let album = self.tag_editor_album.clone();
+                let album_artist = self.tag_editor_album_artist.clone();
+                let year = self.tag_editor_year.clone();
+                let genre = self.tag_editor_genre.clone();
+                let comment = self.tag_editor_comment.clone();
+
+                // If we have lookup results with track listings, use them for per-track data
+                let lookup_tracks: Vec<services::LookupTrack> = self
+                    .tag_editor_selected_result
+                    .and_then(|i| self.tag_editor_lookup_results.get(i))
+                    .map(|r| r.tracks.clone())
+                    .unwrap_or_default();
+
+                return cosmic::task::future(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        use lofty::config::{ParseOptions, WriteOptions};
+                        use lofty::file::{BoundTaggedFile, TaggedFileExt};
+                        use lofty::prelude::*;
+                        use lofty::tag::ItemKey;
+
+                        let mut saved = 0usize;
+                        for track in &album_tracks {
+                            let file = std::fs::OpenOptions::new()
+                                .read(true)
+                                .write(true)
+                                .open(&track.path)
+                                .map_err(|e| {
+                                    format!("Cannot open {}: {e}", track.path.display())
+                                })?;
+                            let mut bound = BoundTaggedFile::read_from(file, ParseOptions::new())
+                                .map_err(|e| {
+                                format!("Cannot read tags for {}: {e}", track.path.display())
+                            })?;
+
+                            let tag = if bound.primary_tag_mut().is_some() {
+                                bound.primary_tag_mut().unwrap()
+                            } else if bound.first_tag_mut().is_some() {
+                                bound.first_tag_mut().unwrap()
+                            } else {
+                                continue;
+                            };
+
+                            // Apply album-level fields
+                            tag.set_album(album.clone());
+                            tag.insert_text(ItemKey::AlbumArtist, album_artist.clone());
+                            if let Ok(y) = year.parse::<u32>() {
+                                tag.insert_text(ItemKey::Year, y.to_string());
+                            }
+                            tag.set_genre(genre.clone());
+                            if !comment.is_empty() {
+                                tag.insert_text(ItemKey::Comment, comment.clone());
+                            }
+
+                            // Apply per-track data from lookup results if available
+                            if let Some(lt) = lookup_tracks
+                                .iter()
+                                .find(|lt| lt.position == track.track_number)
+                            {
+                                tag.set_title(lt.title.clone());
+                                if !lt.artist.is_empty() {
+                                    tag.set_artist(lt.artist.clone());
+                                }
+                            }
+
+                            bound.save(WriteOptions::default()).map_err(|e| {
+                                format!("Failed to save {}: {e}", track.path.display())
+                            })?;
+                            saved += 1;
+                        }
+                        Ok(saved)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(format!("Task error: {e}")));
+                    cosmic::Action::App(Message::TagEditorBatchSaveResult(result))
+                });
+            }
+
+            Message::TagEditorBatchSaveResult(result) => match result {
+                Ok(count) => {
+                    self.tag_editor_dirty = false;
+                    self.tag_editor_status =
+                        Some(fl!("tag-editor-batch-saved", count = count.to_string()));
+                    return cosmic::task::message(cosmic::Action::App(Message::ScanLibrary));
+                }
+                Err(e) => {
+                    self.tag_editor_status = Some(format!("{}: {e}", fl!("tag-editor-error")));
+                }
+            },
 
             Message::Quit => {
                 return cosmic::iced::exit();
@@ -3625,8 +4153,7 @@ impl AppModel {
                 })
                 .map(|(key, path)| {
                     tokio::task::spawn_blocking(move || {
-                        crate::library::CoverArt::get_cover_art(&path)
-                            .map(|bytes| (key, bytes))
+                        crate::library::CoverArt::get_cover_art(&path).map(|bytes| (key, bytes))
                     })
                 })
                 .collect();
@@ -3719,10 +4246,8 @@ impl AppModel {
                         let cover_tasks: Vec<_> = albums
                             .iter()
                             .map(|album| {
-                                let key = crate::library::CoverArt::album_key(
-                                    &album.artist,
-                                    &album.name,
-                                );
+                                let key =
+                                    crate::library::CoverArt::album_key(&album.artist, &album.name);
                                 let prov2 = Arc::clone(&prov);
                                 let hint = album.cover_hint();
                                 tokio::task::spawn_blocking(move || {
@@ -3754,11 +4279,10 @@ impl AppModel {
 
                 crate::provider::ProviderType::Subsonic => {
                     // Find the matching SubsonicProvider by id.
-                    let subsonic =
-                        match subsonic_providers.iter().find(|p| p.id() == active_id) {
-                            Some(p) => Arc::clone(p),
-                            None => return,
-                        };
+                    let subsonic = match subsonic_providers.iter().find(|p| p.id() == active_id) {
+                        Some(p) => Arc::clone(p),
+                        None => return,
+                    };
 
                     tracing::info!("Subsonic incremental load: batches of {BATCH_SIZE}");
 
@@ -3786,10 +4310,8 @@ impl AppModel {
                         let cover_tasks: Vec<_> = albums
                             .iter()
                             .map(|album| {
-                                let key = crate::library::CoverArt::album_key(
-                                    &album.artist,
-                                    &album.name,
-                                );
+                                let key =
+                                    crate::library::CoverArt::album_key(&album.artist, &album.name);
                                 let prov2 = Arc::clone(&prov);
                                 let hint = album.cover_hint();
                                 tokio::task::spawn_blocking(move || {
@@ -3809,9 +4331,7 @@ impl AppModel {
                             }
                         }
 
-                        tracing::debug!(
-                            "Subsonic batch: offset={offset}, albums={batch_count}"
-                        );
+                        tracing::debug!("Subsonic batch: offset={offset}, albums={batch_count}");
 
                         _ = emitter
                             .send(cosmic::Action::App(Message::LibraryBatch {
@@ -3857,7 +4377,8 @@ impl AppModel {
     /// and rebuilds the provider list for the header dropdown.
     fn reinit_mpd_providers(&mut self) -> Task<cosmic::Action<Message>> {
         // Remove existing MPD providers from registry
-        self.registry.remove_by_type(crate::provider::ProviderType::Mpd);
+        self.registry
+            .remove_by_type(crate::provider::ProviderType::Mpd);
         self.mpd_providers.clear();
 
         // Re-create from config
@@ -4083,8 +4604,7 @@ impl AppModel {
 
                 // Generate avatar only for new artists.
                 if !self.artist_avatars.contains_key(&album.artist) {
-                    let bytes =
-                        crate::library::CoverArt::generate_artist_avatar(&album.artist, 64);
+                    let bytes = crate::library::CoverArt::generate_artist_avatar(&album.artist, 64);
                     let handle = widget::icon::from_raster_bytes(bytes);
                     self.artist_avatars.insert(album.artist.clone(), handle);
                 }
@@ -4149,7 +4669,7 @@ impl AppModel {
     /// Checks if the current track's album key differs from the cached blurred
     /// cover key. If so, looks up the raw bytes and spawns a background task
     /// to compute the blur. Returns a Task that sends `Message::BlurReady`.
-     fn maybe_update_blurred_cover(&mut self) -> Task<cosmic::Action<Message>> {
+    fn maybe_update_blurred_cover(&mut self) -> Task<cosmic::Action<Message>> {
         let track = match self.current_track.as_ref() {
             Some(t) => t,
             None => {

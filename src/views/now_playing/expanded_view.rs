@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0
 
-use super::{format_time, truncate_str, NowPlayingMessage};
+use super::{NowPlayingMessage, format_time, truncate_str};
 use crate::config::RepeatMode;
 use crate::library::Track;
 use crate::player::PlaybackState;

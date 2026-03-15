@@ -111,7 +111,8 @@ impl CoverArt {
                     let px = cx - block_w / 2 + dx;
                     let py = cy - block_h / 2 + dy;
                     if px < size && py < size {
-                        let dist = ((px as f32 - center).powi(2) + (py as f32 - center).powi(2)).sqrt();
+                        let dist =
+                            ((px as f32 - center).powi(2) + (py as f32 - center).powi(2)).sqrt();
                         if dist <= radius {
                             img.put_pixel(px, py, Rgba([255, 255, 255, 200]));
                         }

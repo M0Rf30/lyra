@@ -85,3 +85,50 @@ tag-editor-saved = Tags saved successfully
 tag-editor-error = Error saving tags
 tag-editor-local-only = Tag editing is only available for local files
 tag-editor-search = Search tracks...
+
+# Tag editor tabs
+tag-editor-tab-tags = Tags
+tag-editor-tab-lookup = Lookup
+tag-editor-tab-info = File Info
+
+# Tag editor modes
+tag-editor-track-mode = Track
+tag-editor-album-mode = Album
+tag-editor-original = Original: { $value }
+
+# Lookup
+tag-editor-lookup-search = Search query...
+tag-editor-lookup-source-acoustid = AcoustID
+tag-editor-lookup-source-musicbrainz = MusicBrainz
+tag-editor-lookup-source-discogs = Discogs
+tag-editor-lookup-search-btn = Search
+tag-editor-lookup-scan-fingerprint = Scan AcoustID
+tag-editor-lookup-scanning = Scanning fingerprint...
+tag-editor-lookup-searching = Searching...
+tag-editor-lookup-no-results = No results found
+tag-editor-lookup-results = { $count } results found
+tag-editor-lookup-apply = Apply to Track
+tag-editor-lookup-apply-album = Apply to Album
+tag-editor-lookup-fetch-tracks = Fetch Track List
+tag-editor-lookup-fetching = Fetching release details...
+tag-editor-lookup-label = Label
+tag-editor-lookup-tracks = Tracks
+
+# File info
+tag-editor-info-path = File Path
+tag-editor-info-codec = Codec
+tag-editor-info-bitrate = Bitrate
+tag-editor-info-sample-rate = Sample Rate
+tag-editor-info-duration = Duration
+tag-editor-info-file-size = File Size
+
+# API keys
+tag-editor-acoustid-api-key = AcoustID API Key
+tag-editor-discogs-token = Discogs Token
+tag-editor-api-keys = API Keys
+tag-editor-api-keys-hint = Configure API keys for external lookups
+
+# Batch operations
+tag-editor-batch-save = Save All Tracks
+tag-editor-batch-saved = { $count } tracks saved successfully
+tag-editor-select-album = Select an album to edit

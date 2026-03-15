@@ -5,7 +5,7 @@
 //! This matches the original playback bar appearance. Clicking the bar
 //! background expands into the full now-playing view.
 
-use super::{format_time, truncate_str, NowPlayingMessage};
+use super::{NowPlayingMessage, format_time, truncate_str};
 use crate::config::RepeatMode;
 use crate::library::Track;
 use crate::player::PlaybackState;

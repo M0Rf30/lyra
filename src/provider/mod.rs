@@ -141,7 +141,11 @@ pub trait MusicProvider: Send + Sync {
     }
 
     /// Add tracks to a playlist.
-    fn add_to_playlist(&self, playlist_id: &str, track_ids: &[String]) -> Result<(), ProviderError> {
+    fn add_to_playlist(
+        &self,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<(), ProviderError> {
         let _ = (playlist_id, track_ids);
         Err(ProviderError::NotSupported("playlists".into()))
     }
@@ -261,16 +265,10 @@ impl ProviderRegistry {
 
     /// Remove all providers of a given type.
     pub fn remove_by_type(&mut self, ptype: ProviderType) {
-        self.providers
-            .retain(|_, p| p.provider_type() != ptype);
+        self.providers.retain(|_, p| p.provider_type() != ptype);
         // If the active provider was removed, reset to the first remaining
         if !self.providers.contains_key(&self.active_provider_id) {
-            self.active_provider_id = self
-                .providers
-                .keys()
-                .next()
-                .cloned()
-                .unwrap_or_default();
+            self.active_provider_id = self.providers.keys().next().cloned().unwrap_or_default();
         }
     }
 

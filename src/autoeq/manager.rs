@@ -28,9 +28,7 @@ struct CacheEntry {
 impl AutoEQManager {
     /// Create a new AutoEQ manager.
     pub fn new(cache_dir: PathBuf, timeout: Duration) -> Result<Self> {
-        let http_client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()?;
+        let http_client = reqwest::Client::builder().timeout(timeout).build()?;
 
         // Ensure cache directory exists
         if !cache_dir.exists() {
@@ -65,7 +63,9 @@ impl AutoEQManager {
         let response = self.http_client.get(url).send().await?;
 
         if !response.status().is_success() {
-            return Err(AutoEQError::Network(response.error_for_status().unwrap_err()));
+            return Err(AutoEQError::Network(
+                response.error_for_status().unwrap_err(),
+            ));
         }
 
         let content = response.text().await?;
@@ -147,7 +147,9 @@ impl AutoEQManager {
         }
 
         if !response.status().is_success() {
-            return Err(AutoEQError::Network(response.error_for_status().unwrap_err()));
+            return Err(AutoEQError::Network(
+                response.error_for_status().unwrap_err(),
+            ));
         }
 
         let content = response.text().await?;
@@ -158,10 +160,11 @@ impl AutoEQManager {
         const MAX_CACHE_SIZE: usize = 20;
 
         // Evict LRU if at capacity
-        if self.memory_cache.len() >= MAX_CACHE_SIZE && !self.memory_cache.contains_key(&path) {
-            if let Some(lru_key) = self.lru_order.pop_front() {
-                self.memory_cache.remove(&lru_key);
-            }
+        if self.memory_cache.len() >= MAX_CACHE_SIZE
+            && !self.memory_cache.contains_key(&path)
+            && let Some(lru_key) = self.lru_order.pop_front()
+        {
+            self.memory_cache.remove(&lru_key);
         }
 
         // Add or update entry
@@ -220,12 +223,12 @@ impl AutoEQManager {
     fn save_profile_to_disk(&self, path: &str, profile: &AutoEQProfile) -> Result<()> {
         let filename = self.cache_filename(path);
         let cache_path = self.cache_dir.join(filename);
-        
+
         let cache_data = CachedProfile {
             timestamp: SystemTime::now(),
             profile: profile.clone(),
         };
-        
+
         let json = serde_json::to_string_pretty(&cache_data)?;
         std::fs::write(cache_path, json)?;
         Ok(())
@@ -234,7 +237,7 @@ impl AutoEQManager {
     fn load_profile_from_disk(&self, path: &str) -> Result<Option<AutoEQProfile>> {
         let filename = self.cache_filename(path);
         let cache_path = self.cache_dir.join(filename);
-        
+
         if !cache_path.exists() {
             return Ok(None);
         }

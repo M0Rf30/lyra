@@ -9,7 +9,7 @@
 //! white-flash artefact that plagued the `image::Handle::from_rgba` path.
 
 use cosmic::iced::widget::shader;
-use cosmic::iced::{mouse, Rectangle};
+use cosmic::iced::{Rectangle, mouse};
 use cosmic::iced_wgpu::wgpu;
 use std::sync::{Arc, Mutex};
 

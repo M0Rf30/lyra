@@ -10,4 +10,5 @@ pub mod i18n;
 pub mod library;
 pub mod player;
 pub mod provider;
+pub mod services;
 pub mod views;

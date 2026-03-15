@@ -6,6 +6,19 @@ use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
 
+/// Fixed width (px) for the trailing action-button cluster in every track row.
+/// The header row carries a spacer of exactly this width so that the
+/// FillPortion columns (Title / Artist / Album) compute identically in both
+/// the header and the data rows, giving perfect column alignment.
+///
+/// Breakdown (with row spacing = 4 inside the cluster):
+///   heart  (icon 16) ≈ 32 px
+///   5 stars (icon 14, spacing 0) ≈ 5 × 28 = 140 px
+///   playlist (icon 16) ≈ 32 px
+///   2 × 4 px gaps = 8 px
+///   total ≈ 212 px
+const ACTIONS_WIDTH: f32 = 212.0;
+
 #[derive(Debug, Clone)]
 pub enum SongMessage {
     PlayTrack(usize),
@@ -66,7 +79,7 @@ pub fn songs_list_view<'a>(
         .into();
     }
 
-    // Filter bar: Favorites toggle + genre filter indicator
+    // --- Filter bar: Favorites toggle + genre filter indicator + track count ---
     let mut filter_bar = widget::row().spacing(8).align_y(Alignment::Center);
 
     let fav_icon = if favorites_filter {
@@ -102,10 +115,16 @@ pub fn songs_list_view<'a>(
         filter_bar = filter_bar.push(genre_chip);
     }
 
-    filter_bar = filter_bar
-        .push(widget::text::caption(format!("{} tracks", filtered.len())).width(Length::Fill));
+    // Track count badge (right-aligned)
+    filter_bar = filter_bar.push(
+        widget::container(widget::text::caption(format!("{} tracks", filtered.len())))
+            .align_x(Horizontal::Right)
+            .width(Length::Fill),
+    );
 
-    // Column headers — the leading 40px column mirrors the track number / play icon column.
+    // --- Column headers ---
+    // The trailing Space matches ACTIONS_WIDTH so that FillPortion columns
+    // resolve to the same pixel widths as in the data rows below.
     let header = widget::row()
         .push(widget::Space::with_width(40))
         .push(
@@ -152,7 +171,8 @@ pub fn songs_list_view<'a>(
             .width(64)
             .class(cosmic::theme::Button::Text),
         )
-        .push(widget::Space::with_width(Length::Shrink))
+        // Spacer that mirrors the fixed-width action cluster in data rows.
+        .push(widget::Space::with_width(ACTIONS_WIDTH))
         .spacing(8)
         .align_y(Alignment::Center)
         .padding([4, 8]);
@@ -209,15 +229,6 @@ pub fn songs_list_view<'a>(
 
         let rating_row = star_rating_widget(track_id.clone(), track.rating);
 
-        let genre_widget: cosmic::Element<'_, SongMessage> = if !track.genre.is_empty() {
-            widget::button::custom(widget::text::caption(&track.genre))
-                .on_press(SongMessage::FilterByGenre(track.genre.clone()))
-                .class(cosmic::theme::Button::Standard)
-                .into()
-        } else {
-            widget::Space::with_width(0).into()
-        };
-
         let playlist_btn: cosmic::Element<'_, SongMessage> = if !playlists.is_empty() {
             let source_uri = track.source_uri.clone();
             let pl_ids: Vec<String> = playlists.iter().map(|p| p.id.clone()).collect();
@@ -226,17 +237,38 @@ pub fn songs_list_view<'a>(
             widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16)).into()
         };
 
-        let row = widget::button::custom(
+        // Actions cluster — fixed width to match the header spacer above.
+        let actions = widget::container(
             widget::row()
-                .push(widget::container(num_col).width(40).align_x(Horizontal::Center))
-                .push(widget::text(track.title.as_str()).width(Length::FillPortion(3)))
-                .push(widget::text(track.artist.as_str()).width(Length::FillPortion(2)))
-                .push(widget::text(track.album.as_str()).width(Length::FillPortion(2)))
-                .push(widget::text(track.duration_string()).width(64))
                 .push(heart_btn)
                 .push(rating_row)
-                .push(genre_widget)
                 .push(playlist_btn)
+                .spacing(4)
+                .align_y(Alignment::Center),
+        )
+        .width(Length::Fixed(ACTIONS_WIDTH));
+
+        let row = widget::button::custom(
+            widget::row()
+                .push(
+                    widget::container(num_col)
+                        .width(40)
+                        .align_x(Horizontal::Center),
+                )
+                .push(
+                    widget::text(truncate_str(track.title.as_str(), 40))
+                        .width(Length::FillPortion(3)),
+                )
+                .push(
+                    widget::text(non_empty_or_dash(track.artist.as_str()))
+                        .width(Length::FillPortion(2)),
+                )
+                .push(
+                    widget::text(non_empty_or_dash(track.album.as_str()))
+                        .width(Length::FillPortion(2)),
+                )
+                .push(widget::text(track.duration_string()).width(64))
+                .push(actions)
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .padding([6, 8]),
@@ -301,4 +333,20 @@ fn sort_label(name: &str, field: SortField, current: SortField, descending: bool
     } else {
         name.to_string()
     }
+}
+
+/// Truncate `s` to at most `max_chars` Unicode scalar values, appending "…" if
+/// it was cut short.
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{truncated}\u{2026}")
+    }
+}
+
+/// Return `s` unchanged if non-empty, otherwise an em-dash placeholder.
+fn non_empty_or_dash(s: &str) -> &str {
+    if s.is_empty() { "—" } else { s }
 }

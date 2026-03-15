@@ -58,7 +58,10 @@ pub fn parse_lrc(text: &str) -> Lyrics {
         }
 
         // Strip all timestamps from the line to get the text portion.
-        let lyric_text = LRC_TIMESTAMP_RE.replace_all(raw_line, "").trim().to_string();
+        let lyric_text = LRC_TIMESTAMP_RE
+            .replace_all(raw_line, "")
+            .trim()
+            .to_string();
 
         for ts in timestamps {
             lines.push(LyricLine {
@@ -129,10 +132,10 @@ impl LyricsProvider {
         let json: serde_json::Value = response.json().await.ok()?;
 
         // Prefer synced lyrics — parse the LRC text into Lyrics::Synced.
-        if let Some(synced) = json.get("syncedLyrics").and_then(|v| v.as_str()) {
-            if !synced.trim().is_empty() {
-                return Some(parse_lrc(synced));
-            }
+        if let Some(synced) = json.get("syncedLyrics").and_then(|v| v.as_str())
+            && !synced.trim().is_empty()
+        {
+            return Some(parse_lrc(synced));
         }
 
         // Fall back to plain lyrics.

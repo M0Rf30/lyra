@@ -7,7 +7,7 @@
 //! results list below the preset controls.
 
 use crate::autoeq::AutoEQProfileMetadata;
-use crate::player::equalizer::{EqPresetData, PresetSource, BAND_LABELS};
+use crate::player::equalizer::{BAND_LABELS, EqPresetData, PresetSource};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
@@ -39,6 +39,7 @@ pub enum EqualizerMessage {
 }
 
 /// Render the equalizer panel (shown in the context drawer).
+#[allow(clippy::too_many_arguments)]
 pub fn equalizer_view<'a>(
     bands: &'a [f32],
     enabled: bool,

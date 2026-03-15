@@ -112,7 +112,10 @@ pub struct SubsonicProvider {
 impl SubsonicProvider {
     /// Create a new Subsonic provider. The client is constructed immediately
     /// but no network call is made until `ping()` or a browse method is called.
-    pub fn new(config: SubsonicConfig, runtime: tokio::runtime::Handle) -> Result<Self, ProviderError> {
+    pub fn new(
+        config: SubsonicConfig,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Self, ProviderError> {
         let auth = Auth::token(&config.password);
         let mut client = Client::new(&config.url, &config.username, auth)
             .map_err(|e| ProviderError::NotConnected(format!("Invalid Subsonic URL: {e}")))?
@@ -158,7 +161,10 @@ impl SubsonicProvider {
     /// without needing access to the provider/client.
     fn child_to_track(&self, child: &opensubsonic::data::Child) -> Track {
         let title = child.title.clone();
-        let artist = child.artist.clone().unwrap_or_else(|| "Unknown Artist".to_string());
+        let artist = child
+            .artist
+            .clone()
+            .unwrap_or_else(|| "Unknown Artist".to_string());
         let album_artist = child
             .display_album_artist
             .clone()
@@ -170,7 +176,10 @@ impl SubsonicProvider {
                     .map(|a| a.name.clone())
             })
             .unwrap_or_else(|| artist.clone());
-        let album = child.album.clone().unwrap_or_else(|| "Unknown Album".to_string());
+        let album = child
+            .album
+            .clone()
+            .unwrap_or_else(|| "Unknown Album".to_string());
         let genre = child.genre.clone().unwrap_or_default();
         let track_number = child.track.unwrap_or(0) as u32;
         let disc_number = child.disc_number.unwrap_or(1) as u32;
@@ -406,11 +415,8 @@ impl MusicProvider for SubsonicProvider {
 
                         let cover_source = self.cover_source_from_id(&album_detail.cover_art);
 
-                        let mut album = Album::from_tracks(
-                            album_detail.name.clone(),
-                            tracks,
-                            cover_source,
-                        );
+                        let mut album =
+                            Album::from_tracks(album_detail.name.clone(), tracks, cover_source);
                         album.artist = artist_id3.name.clone();
                         album.year = album_detail.year.unwrap_or(0) as u32;
                         artist_albums.push(album);
@@ -476,9 +482,9 @@ impl MusicProvider for SubsonicProvider {
                 .client
                 .search3(
                     &query_owned,
-                    Some(0),  // no artists
+                    Some(0), // no artists
                     None,
-                    Some(0),  // no albums
+                    Some(0), // no albums
                     None,
                     Some(50), // up to 50 songs
                     None,
@@ -518,10 +524,7 @@ impl MusicProvider for SubsonicProvider {
                         .send()
                         .await
                         .map_err(subsonic_err("cover art fetch"))?;
-                    let bytes = resp
-                        .bytes()
-                        .await
-                        .map_err(subsonic_err("cover art read"))?;
+                    let bytes = resp.bytes().await.map_err(subsonic_err("cover art read"))?;
                     Ok(Some(bytes.to_vec()))
                 })
             }
@@ -530,7 +533,11 @@ impl MusicProvider for SubsonicProvider {
                 if let Some(first_track) = album.tracks.first() {
                     self.block_on(async {
                         // The source_uri is the song ID; we can try using it as the cover art ID.
-                        match self.client.get_cover_art(&first_track.source_uri, Some(300)).await {
+                        match self
+                            .client
+                            .get_cover_art(&first_track.source_uri, Some(300))
+                            .await
+                        {
                             Ok(bytes) => Ok(Some(bytes.to_vec())),
                             Err(e) => {
                                 tracing::warn!("Subsonic cover art for '{}': {e}", album.name);
@@ -702,7 +709,11 @@ impl MusicProvider for SubsonicProvider {
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn add_to_playlist(&self, playlist_id: &str, track_ids: &[String]) -> Result<(), ProviderError> {
+    fn add_to_playlist(
+        &self,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<(), ProviderError> {
         let pid = playlist_id.to_string();
         let ids: Vec<String> = track_ids.to_vec();
         self.block_on(async {
