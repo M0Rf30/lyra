@@ -105,45 +105,45 @@ pub fn songs_list_view<'a>(
     let header = widget::row()
         .push(widget::Space::with_width(40))
         .push(
-            widget::button::custom(widget::text(sort_label(
+            widget::button::custom(sort_header(
                 "Title",
                 SortField::Title,
                 current_sort,
                 sort_descending,
-            )))
+            ))
             .on_press(SongMessage::SortBy(SortField::Title))
             .width(Length::FillPortion(3))
             .class(cosmic::theme::Button::Text),
         )
         .push(
-            widget::button::custom(widget::text(sort_label(
+            widget::button::custom(sort_header(
                 "Artist",
                 SortField::Artist,
                 current_sort,
                 sort_descending,
-            )))
+            ))
             .on_press(SongMessage::SortBy(SortField::Artist))
             .width(Length::FillPortion(2))
             .class(cosmic::theme::Button::Text),
         )
         .push(
-            widget::button::custom(widget::text(sort_label(
+            widget::button::custom(sort_header(
                 "Album",
                 SortField::Album,
                 current_sort,
                 sort_descending,
-            )))
+            ))
             .on_press(SongMessage::SortBy(SortField::Album))
             .width(Length::FillPortion(2))
             .class(cosmic::theme::Button::Text),
         )
         .push(
-            widget::button::custom(widget::text(sort_label(
+            widget::button::custom(sort_header(
                 "Duration",
                 SortField::Duration,
                 current_sort,
                 sort_descending,
-            )))
+            ))
             .on_press(SongMessage::SortBy(SortField::Duration))
             .width(64)
             .class(cosmic::theme::Button::Text),
@@ -294,11 +294,25 @@ fn playlist_dropdown_button<'a>(
     }
 }
 
-fn sort_label(name: &str, field: SortField, current: SortField, descending: bool) -> String {
+fn sort_header<'a>(
+    name: &'a str,
+    field: SortField,
+    current: SortField,
+    descending: bool,
+) -> cosmic::Element<'a, SongMessage> {
     if field == current {
-        let arrow = if descending { "\u{25bc}" } else { "\u{25b2}" };
-        format!("{name} {arrow}")
+        let icon_name = if descending {
+            "pan-down-symbolic"
+        } else {
+            "pan-up-symbolic"
+        };
+        widget::row()
+            .push(widget::text::heading(name))
+            .push(widget::icon::from_name(icon_name).size(16))
+            .spacing(spacing::XXXS)
+            .align_y(Alignment::Center)
+            .into()
     } else {
-        name.to_string()
+        widget::text::heading(name).into()
     }
 }

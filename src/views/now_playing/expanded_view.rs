@@ -119,7 +119,7 @@ pub fn expanded_now_playing<'a>(
 
     if let Some(track) = current_track {
         right_col = right_col
-            .push(widget::text::title2(truncate_str(&track.title, 40)))
+            .push(widget::text::title4(truncate_str(&track.title, 40)))
             .push(widget::Space::new(
                 Length::Shrink,
                 Length::Fixed(spacing::XXXS as f32),
@@ -146,7 +146,7 @@ pub fn expanded_now_playing<'a>(
             ));
         }
     } else {
-        right_col = right_col.push(widget::text::title2("No track playing"));
+        right_col = right_col.push(widget::text::title4("No track playing"));
     }
 
     right_col = right_col.push(widget::Space::new(
@@ -242,16 +242,16 @@ pub fn expanded_now_playing<'a>(
     right_col = right_col.push(widget::Space::new(Length::Shrink, Length::Fill));
 
     let right_panel = widget::container(right_col.width(Length::Fill))
-        .padding([spacing::S, spacing::L, spacing::L, spacing::L])
+        .padding([spacing::S, spacing::M, spacing::M, spacing::M])
         .width(Length::FillPortion(1))
         .height(Length::Fill)
         .class(cosmic::theme::Container::custom(|theme| {
             let cosmic = theme.cosmic();
-            let mut bg: Color = cosmic.background.base.into();
+            let mut bg: Color = cosmic.bg_component_color().into();
             bg.a = 0.72;
             cosmic::iced::widget::container::Style {
                 background: Some(bg.into()),
-                text_color: Some(cosmic.on_bg_color().into()),
+                text_color: Some(cosmic.on_bg_component_color().into()),
                 ..Default::default()
             }
         }));

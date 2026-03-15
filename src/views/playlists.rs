@@ -155,12 +155,13 @@ pub fn playlist_detail_view<'a>(
                     playlist.track_count,
                     format_duration(playlist.total_duration)
                 )))
+                .push(widget::Space::with_height(spacing::S - spacing::XXXS))
                 .push(rename_row)
                 .push(
                     widget::button::suggested("Play All")
                         .on_press(PlaylistMessage::PlayPlaylist(playlist_index)),
                 )
-                .spacing(spacing::XXS),
+                .spacing(spacing::XXXS),
         )
         .spacing(spacing::S)
         .align_y(Alignment::Center);

@@ -210,20 +210,16 @@ pub fn equalizer_view<'a>(
     };
 
     // --- Preamp slider ---
-    let preamp_row = widget::row()
-        .push(widget::text::body("Preamp:"))
-        .push(widget::horizontal_space())
-        .push(widget::text::body(format!("{:+.1} dB", preamp)))
-        .spacing(spacing::XXS)
-        .align_y(Alignment::Center);
-
+    let preamp_label = widget::text::body(format!("{:+.1} dB", preamp));
     let preamp_slider =
         widget::slider(-20.0..=10.0, preamp, EqualizerMessage::SetPreamp).width(Length::Fill);
 
     let preamp_control = widget::column()
-        .push(preamp_row)
+        .push(preamp_label)
         .push(preamp_slider)
         .spacing(spacing::XXXS);
+
+    let preamp_flex = cosmic::widget::settings::flex_item("Preamp", preamp_control);
 
     // --- 10-band vertical sliders ---
     let mut band_row = widget::row().spacing(spacing::XXXS).width(Length::Fill);
@@ -252,22 +248,30 @@ pub fn equalizer_view<'a>(
     }
 
     // --- Assemble layout ---
+    let preset_section = cosmic::widget::settings::section()
+        .title("Preset")
+        .add(preset_dropdown)
+        .add(toolbar_row)
+        .add(save_as_row);
+
+    let autoeq_section_widget = cosmic::widget::settings::section()
+        .title("AutoEQ")
+        .add(autoeq_section);
+
+    let preamp_section = cosmic::widget::settings::section()
+        .title("Preamp")
+        .add(preamp_flex);
+
+    let bands_section = cosmic::widget::settings::section()
+        .title("Bands")
+        .add(band_row);
+
     widget::column()
         .push(toggle)
-        .push(widget::divider::horizontal::default())
-        .push(widget::text::title4("Preset"))
-        .push(preset_dropdown)
-        .push(toolbar_row)
-        .push(save_as_row)
-        .push(widget::divider::horizontal::default())
-        .push(widget::text::title4("AutoEQ"))
-        .push(autoeq_section)
-        .push(widget::divider::horizontal::default())
-        .push(widget::text::title4("Preamp"))
-        .push(preamp_control)
-        .push(widget::divider::horizontal::default())
-        .push(widget::text::title4("Bands"))
-        .push(band_row)
+        .push(preset_section)
+        .push(autoeq_section_widget)
+        .push(preamp_section)
+        .push(bands_section)
         .spacing(spacing::XXS)
         .padding(spacing::S)
         .into()

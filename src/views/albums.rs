@@ -149,10 +149,11 @@ pub fn album_detail_view<'a>(
             album.track_count(),
             format_duration(album.total_duration())
         )))
+        .push(widget::Space::with_height(spacing::S - spacing::XXXS))
         .push(
             widget::button::suggested("Play Album").on_press(AlbumMessage::PlayAlbum(album_index)),
         )
-        .spacing(spacing::XXS);
+        .spacing(spacing::XXXS);
 
     // Genre chips in album header
     if !genres.is_empty() {

@@ -141,7 +141,7 @@ pub fn artist_detail_view<'a>(
             )
             .push(
                 widget::column()
-                    .push(widget::text::title4(album.name.as_str()))
+                    .push(widget::text::heading(album.name.as_str()))
                     .push(widget::text::caption(format!(
                         "{}  \u{2022}  {} tracks",
                         if album.year > 0 {
