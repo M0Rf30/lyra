@@ -58,10 +58,17 @@ pub struct LocalBackend {
 impl LocalBackend {
     /// List available audio output device names.
     pub fn list_output_devices() -> Vec<String> {
-        cpal::default_host()
-            .output_devices()
-            .map(|devices| devices.filter_map(|d| d.name().ok()).collect())
-            .unwrap_or_default()
+        let mut result: Vec<String> = cpal::available_hosts()
+            .into_iter()
+            .filter_map(|id| cpal::host_from_id(id).ok())
+            .filter_map(|host| host.output_devices().ok())
+            .flatten()
+            .filter_map(|d| d.name().ok())
+            .filter(|name| name != "default")
+            .collect();
+        result.sort();
+        result.dedup();
+        result
     }
 
     /// Create a new local backend, optionally targeting a specific output device by name.
@@ -69,9 +76,12 @@ impl LocalBackend {
     /// If `device_name` is `None` or empty, falls back to the system default output.
     pub fn new_with_device(device_name: Option<&str>) -> Result<Self, PlayerError> {
         let stream = if let Some(name) = device_name.filter(|n| !n.is_empty()) {
-            let device = cpal::default_host()
-                .output_devices()
-                .map_err(|e| PlayerError(format!("Failed to enumerate audio devices: {e}")))?
+            // Search across all available hosts (PipeWire, ALSA, etc.)
+            let device = cpal::available_hosts()
+                .into_iter()
+                .filter_map(|id| cpal::host_from_id(id).ok())
+                .filter_map(|host| host.output_devices().ok())
+                .flatten()
                 .find(|d| d.name().ok().as_deref() == Some(name));
 
             if let Some(device) = device {
