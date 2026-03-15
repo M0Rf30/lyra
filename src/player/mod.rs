@@ -73,6 +73,10 @@ pub struct Player {
     next_pre_queued: bool,
     /// Replay gain mode for volume normalization.
     replay_gain_mode: ReplayGainMode,
+    /// Whether gapless playback is enabled.
+    gapless_enabled: bool,
+    /// Fallback gain in dB when track has no RG tags.
+    replay_gain_fallback_db: f32,
 }
 
 impl Player {
@@ -92,6 +96,8 @@ impl Player {
             queue_index: 0,
             next_pre_queued: false,
             replay_gain_mode: ReplayGainMode::Off,
+            gapless_enabled: true,
+            replay_gain_fallback_db: 0.0,
         })
     }
 
@@ -156,17 +162,22 @@ impl Player {
 
     /// Compute the replay gain adjustment for a track based on the current mode.
     fn compute_replay_gain(&self, track: &Track) -> Option<f32> {
+        let fallback = if self.replay_gain_fallback_db != 0.0 {
+            Some(self.replay_gain_fallback_db)
+        } else {
+            None
+        };
         match self.replay_gain_mode {
             ReplayGainMode::Off => None,
-            ReplayGainMode::Track => track.rg_track_gain,
-            ReplayGainMode::Album => track.rg_album_gain.or(track.rg_track_gain),
+            ReplayGainMode::Track => track.rg_track_gain.or(fallback),
+            ReplayGainMode::Album => track.rg_album_gain.or(track.rg_track_gain).or(fallback),
             ReplayGainMode::Auto => {
                 // Use album gain when playing tracks sequentially from the same album
                 // (i.e. the queue appears to be an album playback), track gain otherwise.
                 if self.is_playing_album_sequentially(track) {
-                    track.rg_album_gain.or(track.rg_track_gain)
+                    track.rg_album_gain.or(track.rg_track_gain).or(fallback)
                 } else {
-                    track.rg_track_gain.or(track.rg_album_gain)
+                    track.rg_track_gain.or(track.rg_album_gain).or(fallback)
                 }
             }
         }
@@ -298,6 +309,9 @@ impl Player {
     /// Only works for `LocalBackend` with local files (not HTTP streams or MPD).
     /// No-op if the queue has only one track or the active backend isn't local.
     pub fn pre_queue_next(&mut self) {
+        if !self.gapless_enabled {
+            return;
+        }
         if self.queue.len() <= 1 || self.active_backend != ActiveBackend::Local {
             return;
         }
@@ -383,5 +397,15 @@ impl Player {
     /// Set the replay gain mode.
     pub fn set_replay_gain_mode(&mut self, mode: ReplayGainMode) {
         self.replay_gain_mode = mode;
+    }
+
+    /// Enable or disable gapless playback.
+    pub fn set_gapless_enabled(&mut self, enabled: bool) {
+        self.gapless_enabled = enabled;
+    }
+
+    /// Set the fallback replay gain in dB (applied when track has no RG tags).
+    pub fn set_replay_gain_fallback(&mut self, db: f32) {
+        self.replay_gain_fallback_db = db;
     }
 }

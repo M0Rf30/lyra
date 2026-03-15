@@ -376,6 +376,10 @@ pub enum Message {
     SetCrossfade(f32),
     /// Set replay gain mode.
     SetReplayGainMode(ReplayGainMode),
+    /// Toggle gapless playback.
+    SetGaplessPlayback(bool),
+    /// Set replay gain fallback gain in dB.
+    SetReplayGainFallback(f32),
 
     // Expanded now-playing view
     ExpandNowPlaying,
@@ -1004,12 +1008,20 @@ impl cosmic::Application for AppModel {
                 let settings_content = settings::settings_view(
                     self.config.crossfade_duration_secs,
                     self.config.replay_gain_mode,
+                    self.config.gapless_playback,
+                    self.config.replay_gain_fallback_db,
                     active_provider_type,
                 )
                 .map(|msg| match msg {
                     settings::SettingsMessage::SetCrossfade(v) => Message::SetCrossfade(v),
                     settings::SettingsMessage::SetReplayGainMode(m) => {
                         Message::SetReplayGainMode(m)
+                    }
+                    settings::SettingsMessage::SetGaplessPlayback(v) => {
+                        Message::SetGaplessPlayback(v)
+                    }
+                    settings::SettingsMessage::SetReplayGainFallback(v) => {
+                        Message::SetReplayGainFallback(v)
                     }
                 });
 
@@ -2990,6 +3002,30 @@ impl cosmic::Application for AppModel {
                 }
             }
 
+            Message::SetGaplessPlayback(enabled) => {
+                self.config.gapless_playback = enabled;
+                if let Some(ref mut player) = self.player {
+                    player.set_gapless_enabled(enabled);
+                }
+                if let Some(ref context) = self.config_context
+                    && let Err(e) = self.config.write_entry(context)
+                {
+                    tracing::error!("Failed to save config: {e:?}");
+                }
+            }
+
+            Message::SetReplayGainFallback(db) => {
+                self.config.replay_gain_fallback_db = db;
+                if let Some(ref mut player) = self.player {
+                    player.set_replay_gain_fallback(db);
+                }
+                if let Some(ref context) = self.config_context
+                    && let Err(e) = self.config.write_entry(context)
+                {
+                    tracing::error!("Failed to save config: {e:?}");
+                }
+            }
+
             Message::ExpandNowPlaying => {
                 self.expand_target = Some(1.0);
                 self.expand_anim_start = Some(std::time::Instant::now());
@@ -3812,6 +3848,10 @@ impl AppModel {
                     gains.copy_from_slice(&self.config.equalizer_bands);
                     eq.set_all(&gains);
                 }
+
+                // Apply saved playback settings.
+                p.set_gapless_enabled(self.config.gapless_playback);
+                p.set_replay_gain_fallback(self.config.replay_gain_fallback_db);
 
                 self.player = Some(p);
             }

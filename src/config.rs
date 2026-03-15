@@ -126,7 +126,7 @@ pub enum ReplayGainMode {
 
 /// Persistent configuration stored via cosmic-config.
 #[derive(Debug, Clone, CosmicConfigEntry, PartialEq)]
-#[version = 2]
+#[version = 3]
 pub struct Config {
     /// Music library directories to scan.
     pub music_dirs: Vec<PathBuf>,
@@ -154,6 +154,10 @@ pub struct Config {
     pub crossfade_duration_secs: f32,
     /// Replay gain mode.
     pub replay_gain_mode: ReplayGainMode,
+    /// Whether gapless playback is enabled (pre-queue next track).
+    pub gapless_playback: bool,
+    /// Fallback replay gain in dB when track has no RG tags (prevents loud jumps).
+    pub replay_gain_fallback_db: f32,
 }
 
 impl Default for Config {
@@ -180,6 +184,8 @@ impl Default for Config {
             subsonic_servers: Vec::new(),
             crossfade_duration_secs: 0.0,
             replay_gain_mode: ReplayGainMode::Off,
+            gapless_playback: true,
+            replay_gain_fallback_db: 0.0,
         }
     }
 }
