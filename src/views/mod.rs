@@ -8,6 +8,7 @@ pub mod lyrics;
 pub mod now_playing;
 pub mod playlists;
 pub mod providers;
+pub mod settings;
 pub mod songs;
 
 use cosmic::iced::alignment::{Horizontal, Vertical};

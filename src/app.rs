@@ -10,7 +10,7 @@ use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{MusicProvider, ProviderRegistry};
 use crate::views::{
-    albums, artists, equalizer, genres, lyrics, now_playing, playlists, providers, songs,
+    albums, artists, equalizer, genres, lyrics, now_playing, playlists, providers, settings, songs,
 };
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
@@ -476,6 +476,11 @@ impl cosmic::Application for AppModel {
             .data::<Page>(Page::Genres)
             .icon(icon::from_name("audio-x-generic-symbolic"));
 
+        nav.insert()
+            .text(fl!("settings"))
+            .data::<Page>(Page::Settings)
+            .icon(icon::from_name("preferences-system-symbolic"));
+
         let about = About::default()
             .name(fl!("app-title"))
             .icon(widget::icon::from_svg_bytes(APP_ICON))
@@ -912,16 +917,12 @@ impl cosmic::Application for AppModel {
                 .title(fl!("equalizer"))
             }
             ContextPage::Providers => {
-                let active_provider_type = self.registry.active().map(|p| p.provider_type());
                 let providers_content = providers::providers_view(
                     &self.config.music_dirs,
                     &self.mpd_edit_states,
                     &self.mpd_connection_status,
                     &self.subsonic_edit_states,
                     &self.subsonic_connection_status,
-                    self.config.crossfade_duration_secs,
-                    self.config.replay_gain_mode,
-                    active_provider_type,
                 )
                 .map(|msg| match msg {
                     // Local music directories
@@ -968,11 +969,6 @@ impl cosmic::Application for AppModel {
                     }
                     providers::ProvidersMessage::SubsonicTranscodingFormat(i, f) => {
                         Message::SubsonicTranscodingFormat(i, f)
-                    }
-                    // Playback settings (Tasks 107, 108)
-                    providers::ProvidersMessage::SetCrossfade(v) => Message::SetCrossfade(v),
-                    providers::ProvidersMessage::SetReplayGainMode(m) => {
-                        Message::SetReplayGainMode(m)
                     }
                 });
 
@@ -1173,6 +1169,21 @@ impl cosmic::Application for AppModel {
                         genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
                     })
                 }
+            }
+
+            Page::Settings => {
+                let active_provider_type = self.registry.active().map(|p| p.provider_type());
+                settings::settings_view(
+                    self.config.crossfade_duration_secs,
+                    self.config.replay_gain_mode,
+                    active_provider_type,
+                )
+                .map(|msg| match msg {
+                    settings::SettingsMessage::SetCrossfade(v) => Message::SetCrossfade(v),
+                    settings::SettingsMessage::SetReplayGainMode(m) => {
+                        Message::SetReplayGainMode(m)
+                    }
+                })
             }
         };
 
@@ -4023,6 +4034,7 @@ pub enum Page {
     Songs,
     Playlists,
     Genres,
+    Settings,
 }
 
 /// Context drawer pages.
