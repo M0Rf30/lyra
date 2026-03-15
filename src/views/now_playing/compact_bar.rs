@@ -5,10 +5,11 @@
 //! This matches the original playback bar appearance. Clicking the bar
 //! background expands into the full now-playing view.
 
-use super::{format_time, truncate_str, NowPlayingMessage};
+use super::{NowPlayingMessage, format_time, truncate_str};
 use crate::config::RepeatMode;
 use crate::library::Track;
 use crate::player::PlaybackState;
+use crate::views::spacing;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -77,11 +78,11 @@ pub fn playback_bar<'a>(
                 widget::column()
                     .push(widget::text::body(truncate_str(&track.title, 30)))
                     .push(widget::text::caption(truncate_str(&track.artist, 30)))
-                    .spacing(2)
+                    .spacing(spacing::XXXS)
                     .width(Length::Fill),
             )
             .push(heart_btn)
-            .spacing(12)
+            .spacing(spacing::XS)
             .align_y(Alignment::Center)
             .width(Length::FillPortion(1))
             .into()
@@ -89,7 +90,7 @@ pub fn playback_bar<'a>(
         widget::row()
             .push(widget::icon::from_name("media-optical-cd-audio-symbolic").size(40))
             .push(widget::text::caption("No track playing"))
-            .spacing(12)
+            .spacing(spacing::XS)
             .align_y(Alignment::Center)
             .width(Length::FillPortion(1))
             .into()
@@ -131,7 +132,7 @@ pub fn playback_bar<'a>(
             widget::button::icon(widget::icon::from_name(repeat_icon).size(24))
                 .on_press(NowPlayingMessage::CycleRepeat),
         )
-        .spacing(4)
+        .spacing(spacing::XXXS)
         .align_y(Alignment::Center);
 
     // --- Seek bar with time labels ---
@@ -144,12 +145,11 @@ pub fn playback_bar<'a>(
                 .width(Length::Fill),
         )
         .push(widget::text::caption(format_time(duration)))
-        .spacing(8)
+        .spacing(spacing::XXS)
         .align_y(Alignment::Center)
         .width(Length::Fill);
 
     // --- Right: volume + lyrics ---
-    // FillPortion(1) matches the left section so center stays truly centered.
     let right_section = widget::container(
         widget::row()
             .push(widget::icon::from_name("audio-volume-high-symbolic").size(20))
@@ -162,7 +162,7 @@ pub fn playback_bar<'a>(
                 widget::button::icon(widget::icon::from_name("view-list-lyrics-symbolic"))
                     .on_press(NowPlayingMessage::ShowLyrics),
             )
-            .spacing(8)
+            .spacing(spacing::XXS)
             .align_y(Alignment::Center),
     )
     .align_x(Horizontal::Right)
@@ -171,7 +171,7 @@ pub fn playback_bar<'a>(
     let center_section = widget::column()
         .push(transport)
         .push(seek_bar)
-        .spacing(4)
+        .spacing(spacing::XXXS)
         .align_x(Alignment::Center)
         .width(Length::FillPortion(2));
 
@@ -181,9 +181,9 @@ pub fn playback_bar<'a>(
         .push(expandable_info)
         .push(center_section)
         .push(right_section)
-        .spacing(16)
+        .spacing(spacing::S)
         .align_y(Alignment::Center)
-        .padding(12);
+        .padding(spacing::XS);
 
     widget::container(controls_row)
         .width(Length::Fill)

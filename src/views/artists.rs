@@ -3,6 +3,7 @@
 //! Artists view - list of artists with album sub-views.
 
 use crate::library::{Artist, CoverArt};
+use crate::views::{empty_state, spacing};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -29,21 +30,14 @@ pub fn artist_list_view<'a>(
     artist_avatars: &'a std::collections::HashMap<String, widget::icon::Handle>,
 ) -> cosmic::Element<'a, ArtistMessage> {
     if artists.is_empty() {
-        return widget::container(
-            widget::column()
-                .push(widget::icon::from_name("system-users-symbolic").size(64))
-                .push(widget::text::title3("No artists found"))
-                .spacing(12)
-                .align_x(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Horizontal::Center)
-        .align_y(Vertical::Center)
-        .into();
+        return empty_state(
+            "system-users-symbolic",
+            "No artists found",
+            "Add music directories in Settings to get started",
+        );
     }
 
-    let mut list = widget::column().spacing(2);
+    let mut list = widget::column().spacing(spacing::XXXS);
 
     for (index, artist) in artists.iter().enumerate() {
         let avatar: cosmic::Element<'_, ArtistMessage> =
@@ -66,11 +60,11 @@ pub fn artist_list_view<'a>(
                             artist.album_count(),
                             artist.track_count()
                         )))
-                        .spacing(2),
+                        .spacing(spacing::XXXS),
                 )
-                .spacing(14)
+                .spacing(spacing::XS)
                 .align_y(Alignment::Center)
-                .padding([10, 8]),
+                .padding([spacing::XXS, spacing::XXS]),
         )
         .on_press(ArtistMessage::SelectArtist(index))
         .width(Length::Fill)
@@ -79,9 +73,13 @@ pub fn artist_list_view<'a>(
         list = list.push(row);
     }
 
-    widget::scrollable(widget::container(list).padding(16).width(Length::Fill))
-        .height(Length::Fill)
-        .into()
+    widget::scrollable(
+        widget::container(list)
+            .padding(spacing::S)
+            .width(Length::Fill),
+    )
+    .height(Length::Fill)
+    .into()
 }
 
 /// Render the detail view for a selected artist.
@@ -115,12 +113,12 @@ pub fn artist_detail_view<'a>(
                     artist.album_count(),
                     artist.track_count()
                 )))
-                .spacing(4),
+                .spacing(spacing::XXXS),
         )
-        .spacing(16)
+        .spacing(spacing::S)
         .align_y(Alignment::Center);
 
-    let mut content = widget::column().push(header).spacing(16);
+    let mut content = widget::column().push(header).spacing(spacing::S);
 
     for (album_idx, album) in artist.albums.iter().enumerate() {
         let key = CoverArt::album_key(&artist.name, &album.name);
@@ -145,7 +143,7 @@ pub fn artist_detail_view<'a>(
                 widget::column()
                     .push(widget::text::title4(album.name.as_str()))
                     .push(widget::text::caption(format!(
-                        "{}  -  {} tracks",
+                        "{}  \u{2022}  {} tracks",
                         if album.year > 0 {
                             album.year.to_string()
                         } else {
@@ -153,18 +151,18 @@ pub fn artist_detail_view<'a>(
                         },
                         album.track_count()
                     )))
-                    .spacing(2),
+                    .spacing(spacing::XXXS),
             )
             .push(
                 widget::button::suggested("Play")
                     .on_press(ArtistMessage::PlayArtistAlbum(artist_index, album_idx)),
             )
-            .spacing(12)
+            .spacing(spacing::XS)
             .align_y(Alignment::Center);
 
         content = content.push(album_header);
 
-        let mut track_list = widget::column().spacing(1);
+        let mut track_list = widget::column().spacing(spacing::XXXS);
         for (track_idx, track) in album.tracks.iter().enumerate() {
             let track_id = track.id.to_string();
             let is_playing = current_track_id == Some(track.id);
@@ -208,9 +206,9 @@ pub fn artist_detail_view<'a>(
                     .push(heart_btn)
                     .push(rating_row)
                     .push(genre_widget)
-                    .spacing(8)
+                    .spacing(spacing::XXS)
                     .align_y(Alignment::Center)
-                    .padding(4),
+                    .padding([spacing::XXXS, spacing::XXS]),
             )
             .on_press(ArtistMessage::PlayTrack(artist_index, album_idx, track_idx))
             .width(Length::Fill)
@@ -223,9 +221,13 @@ pub fn artist_detail_view<'a>(
         content = content.push(widget::divider::horizontal::default());
     }
 
-    widget::scrollable(widget::container(content).padding(16).width(Length::Fill))
-        .height(Length::Fill)
-        .into()
+    widget::scrollable(
+        widget::container(content)
+            .padding(spacing::S)
+            .width(Length::Fill),
+    )
+    .height(Length::Fill)
+    .into()
 }
 
 /// Star rating widget for artist detail tracks (1-5 stars).

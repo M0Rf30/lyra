@@ -4,6 +4,7 @@
 //! and a detail view showing tracks in a selected playlist.
 
 use crate::library::{Playlist, Track};
+use crate::views::{empty_state, spacing};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -39,7 +40,7 @@ pub fn playlist_list_view<'a>(
     playlists: &'a [Playlist],
     new_playlist_name: &'a str,
 ) -> cosmic::Element<'a, PlaylistMessage> {
-    let mut col = widget::column().spacing(12).padding(16);
+    let mut col = widget::column().spacing(spacing::XS).padding(spacing::S);
 
     // Create playlist row
     let create_row = widget::row()
@@ -57,42 +58,33 @@ pub fn playlist_list_view<'a>(
                 ))
             }),
         )
-        .spacing(8)
+        .spacing(spacing::XXS)
         .align_y(Alignment::Center);
 
     col = col.push(create_row);
     col = col.push(widget::divider::horizontal::default());
 
     if playlists.is_empty() {
-        col = col.push(
-            widget::container(
-                widget::column()
-                    .push(widget::icon::from_name("playlist-symbolic").size(64))
-                    .push(widget::text::title3("No playlists"))
-                    .push(widget::text("Create a playlist to get started"))
-                    .spacing(12)
-                    .align_x(Alignment::Center),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Horizontal::Center)
-            .align_y(Vertical::Center),
-        );
+        col = col.push(empty_state::<PlaylistMessage>(
+            "playlist-symbolic",
+            "No playlists",
+            "Create a playlist to get started",
+        ));
 
         return col.into();
     }
 
-    let mut list = widget::column().spacing(2);
+    let mut list = widget::column().spacing(spacing::XXXS);
 
     for (index, playlist) in playlists.iter().enumerate() {
         let info = widget::column()
             .push(widget::text(playlist.name.as_str()))
             .push(widget::text::caption(format!(
-                "{} tracks  -  {}",
+                "{} tracks  \u{2022}  {}",
                 playlist.track_count,
                 format_duration(playlist.total_duration)
             )))
-            .spacing(2);
+            .spacing(spacing::XXXS);
 
         let delete_btn = widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
             .on_press(PlaylistMessage::DeletePlaylist(index));
@@ -105,9 +97,9 @@ pub fn playlist_list_view<'a>(
                 .push(playlist_icon)
                 .push(info.width(Length::Fill))
                 .push(delete_btn)
-                .spacing(12)
+                .spacing(spacing::XS)
                 .align_y(Alignment::Center)
-                .padding(8),
+                .padding(spacing::XXS),
         )
         .on_press(PlaylistMessage::SelectPlaylist(index))
         .width(Length::Fill)
@@ -146,7 +138,7 @@ pub fn playlist_detail_view<'a>(
                 None
             },
         ))
-        .spacing(8)
+        .spacing(spacing::XXS)
         .align_y(Alignment::Center);
 
     let header = widget::row()
@@ -159,7 +151,7 @@ pub fn playlist_detail_view<'a>(
             widget::column()
                 .push(widget::text::title1(playlist.name.as_str()))
                 .push(widget::text::caption(format!(
-                    "{} tracks  -  {}",
+                    "{} tracks  \u{2022}  {}",
                     playlist.track_count,
                     format_duration(playlist.total_duration)
                 )))
@@ -168,12 +160,12 @@ pub fn playlist_detail_view<'a>(
                     widget::button::suggested("Play All")
                         .on_press(PlaylistMessage::PlayPlaylist(playlist_index)),
                 )
-                .spacing(8),
+                .spacing(spacing::XXS),
         )
-        .spacing(16)
+        .spacing(spacing::S)
         .align_y(Alignment::Center);
 
-    let mut track_list = widget::column().spacing(2);
+    let mut track_list = widget::column().spacing(spacing::XXXS);
 
     for (track_idx, track) in playlist.tracks.iter().enumerate() {
         let remove_btn = widget::button::icon(widget::icon::from_name("list-remove-symbolic"))
@@ -186,9 +178,9 @@ pub fn playlist_detail_view<'a>(
                 .push(widget::text(track.artist.as_str()).width(200))
                 .push(widget::text(track.duration_string()).width(60))
                 .push(remove_btn)
-                .spacing(8)
+                .spacing(spacing::XXS)
                 .align_y(Alignment::Center)
-                .padding(4),
+                .padding([spacing::XXXS, spacing::XXS]),
         )
         .on_press(PlaylistMessage::PlayTrack(playlist_index, track_idx))
         .width(Length::Fill)
@@ -202,7 +194,7 @@ pub fn playlist_detail_view<'a>(
             widget::container(widget::text(
                 "This playlist is empty. Add tracks from the Songs view.",
             ))
-            .padding(16),
+            .padding(spacing::S),
         );
     }
 
@@ -211,8 +203,8 @@ pub fn playlist_detail_view<'a>(
             .push(header)
             .push(widget::divider::horizontal::default())
             .push(track_list)
-            .spacing(16)
-            .padding(16),
+            .spacing(spacing::S)
+            .padding(spacing::S),
     )
     .height(Length::Fill)
     .into()

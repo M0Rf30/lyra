@@ -5,9 +5,9 @@
 //! Handles `TrackSource::LocalFile` and `TrackSource::HttpStream`
 //! by decoding audio locally and outputting to the system sound device.
 
-use super::backend::{PlaybackBackend, PlayerError};
-use super::eq_source::{new_shared_coeffs, EqController, EqSource, SharedCoeffs};
 use super::PlaybackState;
+use super::backend::{PlaybackBackend, PlayerError};
+use super::eq_source::{EqController, EqSource, SharedCoeffs, new_shared_coeffs};
 use crate::library::TrackSource;
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use std::fs::File;
@@ -114,10 +114,10 @@ impl LocalBackend {
 
     /// Cancel any active crossfade immediately (e.g. on manual skip).
     fn cancel_crossfade(&mut self) {
-        if let Some(out_sink) = self.crossfade_out.take() {
-            if let Ok(sink) = out_sink.lock() {
-                sink.stop();
-            }
+        if let Some(out_sink) = self.crossfade_out.take()
+            && let Ok(sink) = out_sink.lock()
+        {
+            sink.stop();
         }
     }
 
@@ -690,7 +690,10 @@ where
             {
                 static WARN_COUNTER: std::sync::atomic::AtomicUsize =
                     std::sync::atomic::AtomicUsize::new(0);
-                if WARN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 48000 == 0 {
+                if WARN_COUNTER
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    .is_multiple_of(48000)
+                {
                     tracing::debug!("PCM buffer lock contention (visualizer may be lagging)");
                 }
             }

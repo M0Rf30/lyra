@@ -3,7 +3,7 @@
 //! Albums grid view - displays album covers in a responsive grid (Lollypop-style).
 
 use crate::library::{Album, CoverArt, Playlist};
-use crate::views::card_button_class;
+use crate::views::{card_button_class, empty_state, spacing, truncate_str};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -30,27 +30,20 @@ pub enum AlbumMessage {
     AddToPlaylist(String, String),
 }
 
+/// Card cover art size in the grid view.
+const CARD_ART_SIZE: u16 = 200;
+
 /// Render the album grid view.
 pub fn album_grid_view<'a>(
     albums: &'a [Album],
     cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
 ) -> cosmic::Element<'a, AlbumMessage> {
     if albums.is_empty() {
-        return widget::container(
-            widget::column()
-                .push(widget::icon::from_name("folder-music-symbolic").size(64))
-                .push(widget::text::title3("No albums found"))
-                .push(widget::text(
-                    "Add music directories in Settings to get started",
-                ))
-                .spacing(12)
-                .align_x(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Horizontal::Center)
-        .align_y(Vertical::Center)
-        .into();
+        return empty_state(
+            "folder-music-symbolic",
+            "No albums found",
+            "Add music directories in Settings to get started",
+        );
     }
 
     let cards: Vec<cosmic::Element<'_, AlbumMessage>> = albums
@@ -60,15 +53,17 @@ pub fn album_grid_view<'a>(
             let key = CoverArt::album_key(&album.artist, &album.name);
             let art_widget: cosmic::Element<'_, AlbumMessage> =
                 if let Some(handle) = cover_images.get(&key) {
-                    widget::icon::icon(handle.clone()).size(160).into()
+                    widget::icon::icon(handle.clone())
+                        .size(CARD_ART_SIZE)
+                        .into()
                 } else {
                     let placeholder_icon: cosmic::Element<'_, AlbumMessage> =
                         widget::icon::from_name("media-optical-cd-audio-symbolic")
                             .size(64)
                             .into();
                     widget::container(placeholder_icon)
-                        .width(160)
-                        .height(160)
+                        .width(CARD_ART_SIZE)
+                        .height(CARD_ART_SIZE)
                         .align_x(Horizontal::Center)
                         .align_y(Vertical::Center)
                         .class(cosmic::theme::Container::Card)
@@ -78,35 +73,42 @@ pub fn album_grid_view<'a>(
             let album_card = widget::column()
                 .push(
                     widget::container(art_widget)
-                        .width(160)
-                        .height(160)
+                        .width(CARD_ART_SIZE)
+                        .height(CARD_ART_SIZE)
                         .align_x(Horizontal::Center)
                         .align_y(Vertical::Center),
                 )
                 .push(
                     widget::column()
-                        .push(widget::text(truncate_str(&album.name, 22)).width(160))
-                        .push(widget::text::caption(truncate_str(&album.artist, 26)).width(160))
-                        .spacing(2),
+                        .push(widget::text(truncate_str(&album.name, 26)).width(CARD_ART_SIZE))
+                        .push(
+                            widget::text::caption(truncate_str(&album.artist, 30))
+                                .width(CARD_ART_SIZE),
+                        )
+                        .spacing(spacing::XXXS),
                 )
-                .spacing(8);
+                .spacing(spacing::XXS);
 
             widget::button::custom(album_card)
                 .on_press(AlbumMessage::SelectAlbum(index))
-                .padding(8)
+                .padding(spacing::XXS)
                 .class(card_button_class())
                 .into()
         })
         .collect();
 
     let grid = widget::flex_row(cards)
-        .column_spacing(20)
-        .row_spacing(20)
+        .column_spacing(spacing::M)
+        .row_spacing(spacing::M)
         .width(Length::Fill);
 
-    widget::scrollable(widget::container(grid).padding(16).width(Length::Fill))
-        .height(Length::Fill)
-        .into()
+    widget::scrollable(
+        widget::container(grid)
+            .padding(spacing::S)
+            .width(Length::Fill),
+    )
+    .height(Length::Fill)
+    .into()
 }
 
 pub fn album_detail_view<'a>(
@@ -126,7 +128,7 @@ pub fn album_detail_view<'a>(
             .into()
     };
 
-    // Task 103: Collect distinct genres from album tracks for header chips
+    // Collect distinct genres from album tracks for header chips
     let genres: Vec<String> = {
         let mut g: Vec<String> = album
             .tracks
@@ -143,20 +145,21 @@ pub fn album_detail_view<'a>(
         .push(widget::text::title1(album.name.as_str()))
         .push(widget::text::title3(album.artist.as_str()))
         .push(widget::text::caption(format!(
-            "{} tracks  -  {}",
+            "{} tracks  \u{2022}  {}",
             album.track_count(),
             format_duration(album.total_duration())
         )))
         .push(
             widget::button::suggested("Play Album").on_press(AlbumMessage::PlayAlbum(album_index)),
         )
-        .spacing(8);
+        .spacing(spacing::XXS);
 
-    // Task 103: Genre chips in album header
+    // Genre chips in album header
     if !genres.is_empty() {
-        let mut genre_row = widget::row().spacing(4).align_y(Alignment::Center);
+        let mut genre_row = widget::row()
+            .spacing(spacing::XXXS)
+            .align_y(Alignment::Center);
         for genre in genres {
-            // Use the owned String for both the message and the label.
             let label = genre.clone();
             genre_row = genre_row.push(
                 widget::button::custom(widget::text::caption(label))
@@ -180,10 +183,10 @@ pub fn album_detail_view<'a>(
                 .align_y(Vertical::Center),
         )
         .push(meta_col)
-        .spacing(16)
+        .spacing(spacing::S)
         .align_y(Alignment::Center);
 
-    let mut track_list = widget::column().spacing(2);
+    let mut track_list = widget::column().spacing(spacing::XXXS);
 
     for (track_idx, track) in album.tracks.iter().enumerate() {
         let track_id = track.id.to_string();
@@ -205,10 +208,8 @@ pub fn album_detail_view<'a>(
         let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(16))
             .on_press(AlbumMessage::ToggleFavorite(track_id.clone()));
 
-        // Task 102: Star rating widget
         let rating_row = album_star_rating(track_id.clone(), track.rating);
 
-        // Task 103: Genre chip per track
         let genre_widget: cosmic::Element<'_, AlbumMessage> = if !track.genre.is_empty() {
             widget::button::custom(widget::text::caption(&track.genre))
                 .on_press(AlbumMessage::FilterByGenre(track.genre.clone()))
@@ -218,7 +219,6 @@ pub fn album_detail_view<'a>(
             widget::Space::with_width(0).into()
         };
 
-        // Task 98: Add to playlist button
         let playlist_btn: cosmic::Element<'_, AlbumMessage> =
             if let Some(first_pl) = playlists.first() {
                 widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16))
@@ -245,9 +245,9 @@ pub fn album_detail_view<'a>(
                 .push(rating_row)
                 .push(genre_widget)
                 .push(playlist_btn)
-                .spacing(8)
+                .spacing(spacing::XXS)
                 .align_y(Alignment::Center)
-                .padding(4),
+                .padding([spacing::XXXS, spacing::XXS]),
         )
         .on_press(AlbumMessage::PlayTrack(album_index, track_idx))
         .width(Length::Fill)
@@ -261,8 +261,8 @@ pub fn album_detail_view<'a>(
             .push(header)
             .push(widget::divider::horizontal::default())
             .push(track_list)
-            .spacing(16)
-            .padding(16),
+            .spacing(spacing::S)
+            .padding(spacing::S),
     )
     .height(Length::Fill)
     .into()
@@ -289,15 +289,6 @@ fn album_star_rating<'a>(
     }
 
     row.into()
-}
-
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-        format!("{truncated}\u{2026}")
-    }
 }
 
 fn format_duration(d: std::time::Duration) -> String {

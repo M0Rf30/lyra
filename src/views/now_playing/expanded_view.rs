@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0
 
-use super::{format_time, truncate_str, NowPlayingMessage};
+use super::{NowPlayingMessage, format_time, truncate_str};
 use crate::config::RepeatMode;
 use crate::library::Track;
 use crate::player::PlaybackState;
+use crate::views::spacing;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::widget::Stack;
 use cosmic::iced::{Alignment, Color, Length};
@@ -77,9 +78,12 @@ pub fn expanded_now_playing<'a>(
             .height(Length::Fill)
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center)
-            .class(cosmic::theme::Container::custom(|_| {
+            .class(cosmic::theme::Container::custom(|theme| {
+                let cosmic = theme.cosmic();
+                let mut bg: Color = cosmic.background.base.into();
+                bg.a = 0.25;
                 cosmic::iced::widget::container::Style {
-                    background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.25).into()),
+                    background: Some(bg.into()),
                     ..Default::default()
                 }
             }))
@@ -116,7 +120,10 @@ pub fn expanded_now_playing<'a>(
     if let Some(track) = current_track {
         right_col = right_col
             .push(widget::text::title2(truncate_str(&track.title, 40)))
-            .push(widget::Space::new(Length::Shrink, Length::Fixed(6.0)));
+            .push(widget::Space::new(
+                Length::Shrink,
+                Length::Fixed(spacing::XXXS as f32),
+            ));
 
         let mut sub_parts: Vec<String> = Vec::new();
         if !track.artist.is_empty() {
@@ -130,8 +137,11 @@ pub fn expanded_now_playing<'a>(
         }
         if !sub_parts.is_empty() {
             right_col = right_col.push(widget::text::body(sub_parts.join(" \u{2022} ")).class(
-                cosmic::theme::Text::Custom(|_theme| cosmic::iced::widget::text::Style {
-                    color: Some(cosmic::iced::Color::from_rgba(1.0, 1.0, 1.0, 0.7)),
+                cosmic::theme::Text::Custom(|theme| {
+                    let neutral = theme.cosmic().palette.neutral_7;
+                    cosmic::iced::widget::text::Style {
+                        color: Some(neutral.into()),
+                    }
                 }),
             ));
         }
@@ -139,7 +149,10 @@ pub fn expanded_now_playing<'a>(
         right_col = right_col.push(widget::text::title2("No track playing"));
     }
 
-    right_col = right_col.push(widget::Space::new(Length::Shrink, Length::Fixed(24.0)));
+    right_col = right_col.push(widget::Space::new(
+        Length::Shrink,
+        Length::Fixed(spacing::M as f32),
+    ));
 
     let seek_bar = widget::row()
         .push(widget::text::body(format_time(display_position)))
@@ -150,11 +163,14 @@ pub fn expanded_now_playing<'a>(
                 .width(Length::Fill),
         )
         .push(widget::text::body(format_time(duration)))
-        .spacing(12)
+        .spacing(spacing::XS)
         .align_y(Alignment::Center);
     right_col = right_col.push(seek_bar);
 
-    right_col = right_col.push(widget::Space::new(Length::Shrink, Length::Fixed(16.0)));
+    right_col = right_col.push(widget::Space::new(
+        Length::Shrink,
+        Length::Fixed(spacing::S as f32),
+    ));
 
     let transport = widget::row()
         .push(
@@ -177,7 +193,7 @@ pub fn expanded_now_playing<'a>(
             widget::button::icon(widget::icon::from_name(repeat_icon).size(24))
                 .on_press(NowPlayingMessage::CycleRepeat),
         )
-        .spacing(8)
+        .spacing(spacing::XXS)
         .align_y(Alignment::Center);
 
     right_col = right_col.push(
@@ -186,7 +202,10 @@ pub fn expanded_now_playing<'a>(
             .width(Length::Fill),
     );
 
-    right_col = right_col.push(widget::Space::new(Length::Shrink, Length::Fixed(16.0)));
+    right_col = right_col.push(widget::Space::new(
+        Length::Shrink,
+        Length::Fixed(spacing::S as f32),
+    ));
 
     #[allow(unused_mut)]
     let mut bottom_row = widget::row()
@@ -218,30 +237,33 @@ pub fn expanded_now_playing<'a>(
         }
     }
 
-    right_col = right_col.push(bottom_row.spacing(10).align_y(Alignment::Center));
+    right_col = right_col.push(bottom_row.spacing(spacing::XXS).align_y(Alignment::Center));
 
     right_col = right_col.push(widget::Space::new(Length::Shrink, Length::Fill));
 
     let right_panel = widget::container(right_col.width(Length::Fill))
-        .padding([20, 28, 28, 28])
+        .padding([spacing::S, spacing::L, spacing::L, spacing::L])
         .width(Length::FillPortion(1))
-        .height(Length::Fixed(800.0))
-        .class(cosmic::theme::Container::custom(|_| {
+        .height(Length::Fill)
+        .class(cosmic::theme::Container::custom(|theme| {
+            let cosmic = theme.cosmic();
+            let mut bg: Color = cosmic.background.base.into();
+            bg.a = 0.72;
             cosmic::iced::widget::container::Style {
-                background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.72).into()),
-                text_color: Some(Color::WHITE),
+                background: Some(bg.into()),
+                text_color: Some(cosmic.on_bg_color().into()),
                 ..Default::default()
             }
         }));
 
     let left_panel = widget::container(cover_col)
         .width(Length::FillPortion(1))
-        .height(Length::Fixed(800.0));
+        .height(Length::Fill);
 
     let two_col = widget::row()
         .push(left_panel)
         .push(right_panel)
-        .height(Length::Fixed(800.0))
+        .height(Length::Fill)
         .width(Length::Fill);
 
     #[cfg(feature = "visualizer")]
@@ -265,39 +287,31 @@ pub fn expanded_now_playing<'a>(
                             }
                         })),
                     )
-                    .spacing(4);
+                    .spacing(spacing::XXXS);
 
-                let overlay_pill = widget::container(overlay_col).padding([12, 16]).class(
-                    cosmic::theme::Container::custom(move |_theme| {
+                let overlay_pill = widget::container(overlay_col)
+                    .padding([spacing::XS, spacing::S])
+                    .class(cosmic::theme::Container::custom(move |theme| {
+                        let cosmic = theme.cosmic();
+                        let mut bg: Color = cosmic.background.base.into();
+                        bg.a = 0.65 * viz_metadata_opacity;
+                        let mut fg: Color = cosmic.on_bg_color().into();
+                        fg.a = viz_metadata_opacity;
                         cosmic::iced::widget::container::Style {
-                            background: Some(
-                                cosmic::iced::Color::from_rgba(
-                                    0.0,
-                                    0.0,
-                                    0.0,
-                                    0.65 * viz_metadata_opacity,
-                                )
-                                .into(),
-                            ),
-                            text_color: Some(cosmic::iced::Color::from_rgba(
-                                1.0,
-                                1.0,
-                                1.0,
-                                viz_metadata_opacity,
-                            )),
+                            background: Some(bg.into()),
+                            text_color: Some(fg),
                             border: cosmic::iced::Border {
-                                radius: [8.0; 4].into(),
+                                radius: cosmic.corner_radii.radius_m.into(),
                                 ..Default::default()
                             },
                             ..Default::default()
                         }
-                    }),
-                );
+                    }));
 
                 let positioned = widget::container(overlay_pill)
-                    .padding([24, 0, 0, 24])
+                    .padding([spacing::M, 0, 0, spacing::M])
                     .width(Length::Fill)
-                    .height(Length::Fixed(800.0));
+                    .height(Length::Fill);
 
                 Some(positioned.into())
             } else {
@@ -313,14 +327,14 @@ pub fn expanded_now_playing<'a>(
             Arc::clone(&viz_frame_buf),
         ))
         .width(Length::Fill)
-        .height(Length::Fixed(800.0));
+        .height(Length::Fill);
         Some(shader.into())
     } else {
         blurred_cover.map(|h| {
             let el: cosmic::Element<'_, NowPlayingMessage> = widget::icon::icon(h.clone())
                 .content_fit(cosmic::iced::ContentFit::Cover)
                 .width(Length::Fill)
-                .height(Length::Fixed(800.0))
+                .height(Length::Fill)
                 .into();
             el
         })
@@ -331,7 +345,7 @@ pub fn expanded_now_playing<'a>(
         let el: cosmic::Element<'_, NowPlayingMessage> = widget::icon::icon(h.clone())
             .content_fit(cosmic::iced::ContentFit::Cover)
             .width(Length::Fill)
-            .height(Length::Fixed(800.0))
+            .height(Length::Fill)
             .into();
         el
     });
@@ -340,10 +354,12 @@ pub fn expanded_now_playing<'a>(
         let black_base: cosmic::Element<'_, NowPlayingMessage> =
             widget::container(widget::Space::new(0, 0))
                 .width(Length::Fill)
-                .height(Length::Fixed(800.0))
-                .class(cosmic::theme::Container::custom(|_theme| {
+                .height(Length::Fill)
+                .class(cosmic::theme::Container::custom(|theme| {
+                    let cosmic = theme.cosmic();
+                    let base: Color = cosmic.background.base.into();
                     cosmic::iced::widget::container::Style {
-                        background: Some(Color::BLACK.into()),
+                        background: Some(base.into()),
                         ..Default::default()
                     }
                 }))
@@ -360,9 +376,9 @@ pub fn expanded_now_playing<'a>(
         #[cfg(feature = "visualizer")]
         if visualizer_active {
             let dbl_click_cap: cosmic::Element<'_, NowPlayingMessage> = widget::mouse_area(
-                widget::container(widget::Space::new(Length::Fill, Length::Fixed(800.0)))
+                widget::container(widget::Space::new(Length::Fill, Length::Fill))
                     .width(Length::Fill)
-                    .height(Length::Fixed(800.0)),
+                    .height(Length::Fill),
             )
             .on_double_press(NowPlayingMessage::ToggleVizFullscreen)
             .into();
@@ -376,16 +392,9 @@ pub fn expanded_now_playing<'a>(
             .align_x(Horizontal::Center)
             .class(cosmic::theme::Container::custom(|theme| {
                 let cosmic = theme.cosmic();
+                let base: Color = cosmic.background.base.into();
                 cosmic::iced::widget::container::Style {
-                    background: Some(
-                        Color::from_rgba(
-                            cosmic.background.base.red,
-                            cosmic.background.base.green,
-                            cosmic.background.base.blue,
-                            1.0,
-                        )
-                        .into(),
-                    ),
+                    background: Some(base.into()),
                     ..Default::default()
                 }
             }))

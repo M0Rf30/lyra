@@ -7,7 +7,8 @@
 //! results list below the preset controls.
 
 use crate::autoeq::AutoEQProfileMetadata;
-use crate::player::equalizer::{EqPresetData, PresetSource, BAND_LABELS};
+use crate::player::equalizer::{BAND_LABELS, EqPresetData, PresetSource};
+use crate::views::spacing;
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
@@ -39,6 +40,7 @@ pub enum EqualizerMessage {
 }
 
 /// Render the equalizer panel (shown in the context drawer).
+#[allow(clippy::too_many_arguments)]
 pub fn equalizer_view<'a>(
     bands: &'a [f32],
     enabled: bool,
@@ -104,7 +106,7 @@ pub fn equalizer_view<'a>(
         .push(save_btn)
         .push(delete_btn)
         .push(reset_btn)
-        .spacing(4);
+        .spacing(spacing::XXXS);
 
     // --- Save As inline input ---
     let save_as_input = widget::text_input("Preset name...", save_as_name)
@@ -119,7 +121,7 @@ pub fn equalizer_view<'a>(
     let save_as_row = widget::row()
         .push(save_as_input)
         .push(save_as_btn)
-        .spacing(4)
+        .spacing(spacing::XXXS)
         .align_y(Alignment::Center);
 
     // --- AutoEQ section: search input + scrollable results list ---
@@ -133,33 +135,34 @@ pub fn equalizer_view<'a>(
             let filtered: Vec<&AutoEQProfileMetadata> = autoeq_profiles
                 .iter()
                 .filter(|p| p.name.to_lowercase().contains(&query))
-                .take(50) // cap results for performance
+                .take(50)
                 .collect();
 
             let count = filtered.len();
             let count_text: cosmic::Element<'_, EqualizerMessage> = if count == 0 {
                 widget::text::caption("No matches").into()
             } else if count >= 50 {
-                widget::text::caption("50+ matches — refine your search").into()
+                widget::text::caption("50+ matches \u{2014} refine your search").into()
             } else {
                 widget::text::caption(format!("{count} matches")).into()
             };
 
-            // Build scrollable clickable list of matching profiles
-            let mut result_list = widget::column().spacing(1);
+            let mut result_list = widget::column().spacing(spacing::XXXS);
             for profile in &filtered {
                 let path = profile.path.clone();
-                let subtitle = format!("{} · {}", profile.type_, profile.source);
+                let subtitle = format!("{} \u{00b7} {}", profile.type_, profile.source);
 
                 let row_content = widget::column()
                     .push(widget::text::body(&profile.name))
                     .push(widget::text::caption(subtitle))
-                    .spacing(1);
+                    .spacing(spacing::XXXS);
 
-                let row = widget::button::custom(widget::container(row_content).padding([4, 8]))
-                    .on_press(EqualizerMessage::SelectAutoEQ(path))
-                    .width(Length::Fill)
-                    .class(cosmic::theme::Button::Text);
+                let row = widget::button::custom(
+                    widget::container(row_content).padding([spacing::XXXS, spacing::XXS]),
+                )
+                .on_press(EqualizerMessage::SelectAutoEQ(path))
+                .width(Length::Fill)
+                .class(cosmic::theme::Button::Text);
 
                 result_list = result_list.push(row);
             }
@@ -176,7 +179,7 @@ pub fn equalizer_view<'a>(
                 .push(count_text)
                 .push(scrollable_results)
                 .push(refresh_btn)
-                .spacing(4)
+                .spacing(spacing::XXXS)
                 .into()
         } else {
             let hint: cosmic::Element<'_, EqualizerMessage> =
@@ -190,7 +193,7 @@ pub fn equalizer_view<'a>(
                 .push(search_input)
                 .push(hint)
                 .push(refresh_btn)
-                .spacing(4)
+                .spacing(spacing::XXXS)
                 .into()
         }
     } else {
@@ -200,7 +203,10 @@ pub fn equalizer_view<'a>(
         } else {
             widget::button::text("Load AutoEQ Profiles").on_press(EqualizerMessage::FetchAutoEQ)
         };
-        widget::column().push(fetch_btn).spacing(4).into()
+        widget::column()
+            .push(fetch_btn)
+            .spacing(spacing::XXXS)
+            .into()
     };
 
     // --- Preamp slider ---
@@ -208,7 +214,7 @@ pub fn equalizer_view<'a>(
         .push(widget::text::body("Preamp:"))
         .push(widget::horizontal_space())
         .push(widget::text::body(format!("{:+.1} dB", preamp)))
-        .spacing(8)
+        .spacing(spacing::XXS)
         .align_y(Alignment::Center);
 
     let preamp_slider =
@@ -217,12 +223,10 @@ pub fn equalizer_view<'a>(
     let preamp_control = widget::column()
         .push(preamp_row)
         .push(preamp_slider)
-        .spacing(4);
+        .spacing(spacing::XXXS);
 
     // --- 10-band vertical sliders ---
-    // Each band column gets equal width via Length::Fill so they spread
-    // evenly across the full panel width.
-    let mut band_row = widget::row().spacing(2).width(Length::Fill);
+    let mut band_row = widget::row().spacing(spacing::XXXS).width(Length::Fill);
 
     for (i, &gain) in bands.iter().enumerate().take(10) {
         let label = if i < BAND_LABELS.len() {
@@ -240,7 +244,7 @@ pub fn equalizer_view<'a>(
                 .height(150.0),
             )
             .push(widget::text::caption(label).size(10))
-            .spacing(2)
+            .spacing(spacing::XXXS)
             .width(Length::Fill)
             .align_x(Alignment::Center);
 
@@ -264,7 +268,7 @@ pub fn equalizer_view<'a>(
         .push(widget::divider::horizontal::default())
         .push(widget::text::title4("Bands"))
         .push(band_row)
-        .spacing(8)
-        .padding(16)
+        .spacing(spacing::XXS)
+        .padding(spacing::S)
         .into()
 }

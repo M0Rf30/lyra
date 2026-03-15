@@ -4,8 +4,8 @@
 
 use crate::fl;
 use crate::provider::ProviderType;
+use crate::views::spacing;
 use cosmic::iced::Alignment;
-use cosmic::iced_core::Color;
 use cosmic::prelude::*;
 use cosmic::widget;
 
@@ -209,6 +209,7 @@ pub enum ProvidersMessage {
 // ── View ───────────────────────────────────────────────────────────────────
 
 /// Render the providers settings panel (shown in the context drawer).
+#[allow(clippy::too_many_arguments)]
 pub fn providers_view<'a>(
     music_dirs: &'a [std::path::PathBuf],
     mpd_servers: &'a [MpdEditState],
@@ -219,7 +220,7 @@ pub fn providers_view<'a>(
     replay_gain_mode: crate::config::ReplayGainMode,
     active_provider_type: Option<ProviderType>,
 ) -> cosmic::Element<'a, ProvidersMessage> {
-    let mut col = widget::column().spacing(16).padding(16);
+    let mut col = widget::column().spacing(spacing::S).padding(spacing::S);
 
     // ── Playback settings (Task 107, 108) ──────────────────────────────────
     col = col.push(widget::text::title4(fl!("playback-settings")));
@@ -249,7 +250,7 @@ pub fn providers_view<'a>(
                     widget::slider(0.0..=12.0, crossfade_secs, ProvidersMessage::SetCrossfade)
                         .step(0.5),
                 )
-                .spacing(4),
+                .spacing(spacing::XXXS),
         );
     }
 
@@ -269,7 +270,9 @@ pub fn providers_view<'a>(
             (ReplayGainMode::Auto, fl!("replay-gain-auto")),
         ];
 
-        let mut mode_row = widget::row().spacing(8).align_y(Alignment::Center);
+        let mut mode_row = widget::row()
+            .spacing(spacing::XXS)
+            .align_y(Alignment::Center);
         mode_row = mode_row.push(widget::text::body(fl!("replay-gain")));
         for (mode, label) in modes {
             let btn = if mode == replay_gain_mode {
@@ -300,7 +303,7 @@ pub fn providers_view<'a>(
                         widget::button::destructive(fl!("remove"))
                             .on_press(ProvidersMessage::RemoveMusicDir(i)),
                     )
-                    .spacing(8)
+                    .spacing(spacing::XXS)
                     .align_y(Alignment::Center),
             );
         }
@@ -339,7 +342,7 @@ pub fn providers_view<'a>(
                 widget::button::text(fl!("add-subsonic-server"))
                     .on_press(ProvidersMessage::AddSubsonic),
             )
-            .spacing(8),
+            .spacing(spacing::XXS),
     );
 
     col.into()
@@ -365,7 +368,9 @@ fn mpd_server_card<'a>(
         .on_input(move |v| ProvidersMessage::EditPassword(index, v))
         .password();
 
-    let mut action_buttons = widget::row().spacing(8).align_y(Alignment::Center);
+    let mut action_buttons = widget::row()
+        .spacing(spacing::XXS)
+        .align_y(Alignment::Center);
     action_buttons = action_buttons
         .push(widget::button::standard(fl!("save")).on_press(ProvidersMessage::Save(index)));
     action_buttons = action_buttons.push(
@@ -390,11 +395,11 @@ fn mpd_server_card<'a>(
             widget::row()
                 .push(port_input)
                 .push(password_input)
-                .spacing(8),
+                .spacing(spacing::XXS),
         )
         .push(widget::divider::horizontal::default())
         .push(buttons)
-        .spacing(8)
+        .spacing(spacing::XXS)
         .into()
 }
 
@@ -423,7 +428,9 @@ fn subsonic_server_card<'a>(
         .on_toggle(move |v| ProvidersMessage::SubsonicToggleCerts(index, v));
 
     // Save + Test Connection on the left, Remove pushed to the right
-    let mut action_buttons = widget::row().spacing(8).align_y(Alignment::Center);
+    let mut action_buttons = widget::row()
+        .spacing(spacing::XXS)
+        .align_y(Alignment::Center);
     action_buttons = action_buttons.push(
         widget::button::standard(fl!("save")).on_press(ProvidersMessage::SubsonicSave(index)),
     );
@@ -477,7 +484,7 @@ fn subsonic_server_card<'a>(
                 .into(),
         );
     }
-    let bitrate_row = widget::flex_row(bitrate_children).spacing(4);
+    let bitrate_row = widget::flex_row(bitrate_children).spacing(spacing::XXXS);
 
     let current_format = server.transcoding_format.clone();
     let mut format_children: Vec<cosmic::Element<ProvidersMessage>> =
@@ -494,14 +501,14 @@ fn subsonic_server_card<'a>(
                 .into(),
         );
     }
-    let format_row = widget::flex_row(format_children).spacing(4);
+    let format_row = widget::flex_row(format_children).spacing(spacing::XXXS);
 
     // Task 110: Bandwidth savings estimate
     let mut transcoding_col = widget::column()
         .push(widget::text::title4(fl!("transcoding")))
         .push(bitrate_row)
         .push(format_row)
-        .spacing(8);
+        .spacing(spacing::XXS);
 
     if let Some(bitrate) = current_bitrate {
         // Rough estimate: typical FLAC ~1000 kbps, so savings ≈ (1 - bitrate/1000) * 100
@@ -520,34 +527,48 @@ fn subsonic_server_card<'a>(
             widget::row()
                 .push(username_input)
                 .push(password_input)
-                .spacing(8),
+                .spacing(spacing::XXS),
         )
-        .push(widget::container(tls_toggle).padding([8, 0]))
+        .push(widget::container(tls_toggle).padding([spacing::XXS, 0]))
         .push(transcoding_col)
         .push(widget::divider::horizontal::default())
         .push(buttons)
-        .spacing(8)
+        .spacing(spacing::XXS)
         .into()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
+/// Theme-aware success text style.
+fn success_text_style(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
+    cosmic::iced::widget::text::Style {
+        color: Some(theme.cosmic().success_color().into()),
+    }
+}
+
+/// Theme-aware destructive text style.
+fn destructive_text_style(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
+    cosmic::iced::widget::text::Style {
+        color: Some(theme.cosmic().destructive_color().into()),
+    }
+}
+
 /// Render a connection status label with color coding.
 ///
-/// Green for "Connected", red for anything else (connection failed + error).
+/// Uses COSMIC theme success/destructive colors for proper dark/light adaptation.
 fn status_label<'a, M: 'a>(status: &str) -> cosmic::Element<'a, M> {
     let connected_text = crate::fl!("connected");
     let is_connected = status == connected_text;
 
-    let color = if is_connected {
-        Color::from_rgb(0.2, 0.8, 0.2) // green
+    let dot = "\u{25cf} ";
+
+    let text_class = if is_connected {
+        cosmic::theme::Text::Custom(success_text_style)
     } else {
-        Color::from_rgb(0.9, 0.2, 0.2) // red
+        cosmic::theme::Text::Custom(destructive_text_style)
     };
 
-    let dot = "● ";
-
     widget::text::caption(format!("{dot}{status}"))
-        .class(cosmic::theme::Text::Color(color))
+        .class(text_class)
         .into()
 }

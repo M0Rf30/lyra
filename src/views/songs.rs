@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 use crate::library::{Playlist, Track};
+use crate::views::{empty_state, spacing};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -52,22 +53,17 @@ pub fn songs_list_view<'a>(
         .collect();
 
     if tracks.is_empty() {
-        return widget::container(
-            widget::column()
-                .push(widget::icon::from_name("audio-x-generic-symbolic").size(64))
-                .push(widget::text::title3("No songs found"))
-                .spacing(12)
-                .align_x(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Horizontal::Center)
-        .align_y(Vertical::Center)
-        .into();
+        return empty_state(
+            "audio-x-generic-symbolic",
+            "No songs found",
+            "Add music directories in Settings to get started",
+        );
     }
 
     // Filter bar: Favorites toggle + genre filter indicator
-    let mut filter_bar = widget::row().spacing(8).align_y(Alignment::Center);
+    let mut filter_bar = widget::row()
+        .spacing(spacing::XXS)
+        .align_y(Alignment::Center);
 
     let fav_icon = if favorites_filter {
         "emblem-favorite-symbolic"
@@ -78,7 +74,7 @@ pub fn songs_list_view<'a>(
         widget::row()
             .push(widget::icon::from_name(fav_icon).size(16))
             .push(widget::text::body("Favorites"))
-            .spacing(4)
+            .spacing(spacing::XXXS)
             .align_y(Alignment::Center),
     )
     .on_press(SongMessage::ToggleFavoritesFilter)
@@ -94,7 +90,7 @@ pub fn songs_list_view<'a>(
             widget::row()
                 .push(widget::text::caption(genre))
                 .push(widget::icon::from_name("window-close-symbolic").size(12))
-                .spacing(4)
+                .spacing(spacing::XXXS)
                 .align_y(Alignment::Center),
         )
         .on_press(SongMessage::ClearGenreFilter)
@@ -105,7 +101,7 @@ pub fn songs_list_view<'a>(
     filter_bar = filter_bar
         .push(widget::text::caption(format!("{} tracks", filtered.len())).width(Length::Fill));
 
-    // Column headers — the leading 40px column mirrors the track number / play icon column.
+    // Column headers
     let header = widget::row()
         .push(widget::Space::with_width(40))
         .push(
@@ -153,13 +149,13 @@ pub fn songs_list_view<'a>(
             .class(cosmic::theme::Button::Text),
         )
         .push(widget::Space::with_width(Length::Shrink))
-        .spacing(8)
+        .spacing(spacing::XXS)
         .align_y(Alignment::Center)
-        .padding([4, 8]);
+        .padding([spacing::XXXS, spacing::XXS]);
 
     if filtered.is_empty() {
         let message = if favorites_filter {
-            "No favorites yet — click the heart on any track to add one"
+            "No favorites yet \u{2014} click the heart on any track to add one"
         } else {
             "No tracks match the current filter"
         };
@@ -172,7 +168,7 @@ pub fn songs_list_view<'a>(
                     widget::column()
                         .push(widget::icon::from_name("edit-find-symbolic").size(48))
                         .push(widget::text::title3(message))
-                        .spacing(12)
+                        .spacing(spacing::XS)
                         .align_x(Alignment::Center),
                 )
                 .width(Length::Fill)
@@ -180,12 +176,12 @@ pub fn songs_list_view<'a>(
                 .align_x(Horizontal::Center)
                 .align_y(Vertical::Center),
             )
-            .padding(16)
-            .spacing(4)
+            .padding(spacing::S)
+            .spacing(spacing::XXXS)
             .into();
     }
 
-    let mut track_list = widget::column().spacing(2);
+    let mut track_list = widget::column().spacing(spacing::XXXS);
 
     for (original_index, track) in &filtered {
         let track_id = track.id.to_string();
@@ -228,7 +224,11 @@ pub fn songs_list_view<'a>(
 
         let row = widget::button::custom(
             widget::row()
-                .push(widget::container(num_col).width(40).align_x(Horizontal::Center))
+                .push(
+                    widget::container(num_col)
+                        .width(40)
+                        .align_x(Horizontal::Center),
+                )
                 .push(widget::text(track.title.as_str()).width(Length::FillPortion(3)))
                 .push(widget::text(track.artist.as_str()).width(Length::FillPortion(2)))
                 .push(widget::text(track.album.as_str()).width(Length::FillPortion(2)))
@@ -237,9 +237,9 @@ pub fn songs_list_view<'a>(
                 .push(rating_row)
                 .push(genre_widget)
                 .push(playlist_btn)
-                .spacing(8)
+                .spacing(spacing::XXS)
                 .align_y(Alignment::Center)
-                .padding([6, 8]),
+                .padding([spacing::XXXS + 2, spacing::XXS]),
         )
         .on_press(SongMessage::PlayTrack(*original_index))
         .width(Length::Fill)
@@ -256,8 +256,8 @@ pub fn songs_list_view<'a>(
             widget::scrollable(widget::container(track_list).width(Length::Fill))
                 .height(Length::Fill),
         )
-        .padding(16)
-        .spacing(4)
+        .padding(spacing::S)
+        .spacing(spacing::XXXS)
         .into()
 }
 
@@ -296,7 +296,7 @@ fn playlist_dropdown_button<'a>(
 
 fn sort_label(name: &str, field: SortField, current: SortField, descending: bool) -> String {
     if field == current {
-        let arrow = if descending { "▼" } else { "▲" };
+        let arrow = if descending { "\u{25bc}" } else { "\u{25b2}" };
         format!("{name} {arrow}")
     } else {
         name.to_string()

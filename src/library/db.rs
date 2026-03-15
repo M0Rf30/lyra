@@ -3,7 +3,7 @@
 //! SQLite-backed music library database.
 
 use super::{Album, Artist, Track};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

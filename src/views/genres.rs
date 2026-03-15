@@ -3,7 +3,7 @@
 //! Genres view - grid of all genres; clicking one shows filtered tracks.
 
 use crate::library::Track;
-use crate::views::card_button_class;
+use crate::views::{card_button_class, empty_state, spacing, truncate_str};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -20,21 +20,18 @@ pub enum GenreMessage {
     PlayTrack(usize),
 }
 
+/// Card icon container size for genres.
+const GENRE_CARD_W: u16 = 160;
+const GENRE_CARD_H: u16 = 120;
+
 /// Render the genre grid view.
 pub fn genre_grid_view(genres: &[String]) -> cosmic::Element<'_, GenreMessage> {
     if genres.is_empty() {
-        return widget::container(
-            widget::column()
-                .push(widget::icon::from_name("audio-x-generic-symbolic").size(64))
-                .push(widget::text::title3("No genres found"))
-                .spacing(12)
-                .align_x(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Horizontal::Center)
-        .align_y(Vertical::Center)
-        .into();
+        return empty_state(
+            "audio-x-generic-symbolic",
+            "No genres found",
+            "Add music with genre tags to see them here",
+        );
     }
 
     let cards: Vec<cosmic::Element<'_, GenreMessage>> = genres
@@ -46,8 +43,8 @@ pub fn genre_grid_view(genres: &[String]) -> cosmic::Element<'_, GenreMessage> {
                 widget::icon::from_name(icon_name).size(48).into();
 
             let icon_container: cosmic::Element<'_, GenreMessage> = widget::container(genre_icon)
-                .width(140)
-                .height(100)
+                .width(GENRE_CARD_W)
+                .height(GENRE_CARD_H)
                 .align_x(Horizontal::Center)
                 .align_y(Vertical::Center)
                 .class(cosmic::theme::Container::Card)
@@ -56,29 +53,33 @@ pub fn genre_grid_view(genres: &[String]) -> cosmic::Element<'_, GenreMessage> {
             let card = widget::column()
                 .push(icon_container)
                 .push(
-                    widget::text(truncate_str(genre, 22))
-                        .width(140)
+                    widget::text(truncate_str(genre, 24))
+                        .width(GENRE_CARD_W)
                         .align_x(Horizontal::Center),
                 )
-                .spacing(6)
+                .spacing(spacing::XXS)
                 .align_x(Alignment::Center);
 
             widget::button::custom(card)
                 .on_press(GenreMessage::SelectGenre(index))
-                .padding(8)
+                .padding(spacing::XXS)
                 .class(card_button_class())
                 .into()
         })
         .collect();
 
     let grid = widget::flex_row(cards)
-        .column_spacing(20)
-        .row_spacing(20)
+        .column_spacing(spacing::M)
+        .row_spacing(spacing::M)
         .width(Length::Fill);
 
-    widget::scrollable(widget::container(grid).padding(16).width(Length::Fill))
-        .height(Length::Fill)
-        .into()
+    widget::scrollable(
+        widget::container(grid)
+            .padding(spacing::S)
+            .width(Length::Fill),
+    )
+    .height(Length::Fill)
+    .into()
 }
 
 /// Render the detail view for a selected genre, showing filtered tracks.
@@ -101,12 +102,12 @@ pub fn genre_detail_view<'a>(
             widget::column()
                 .push(widget::text::title1(genre_name))
                 .push(widget::text::caption(format!("{} tracks", tracks.len())))
-                .spacing(4),
+                .spacing(spacing::XXXS),
         )
-        .spacing(16)
+        .spacing(spacing::S)
         .align_y(Alignment::Center);
 
-    let mut track_list = widget::column().spacing(1);
+    let mut track_list = widget::column().spacing(spacing::XXXS);
 
     for (index, track) in tracks.iter().enumerate() {
         let row = widget::button::custom(
@@ -116,9 +117,9 @@ pub fn genre_detail_view<'a>(
                 .push(widget::text(track.artist.as_str()).width(200))
                 .push(widget::text(track.album.as_str()).width(200))
                 .push(widget::text(track.duration_string()).width(80))
-                .spacing(8)
+                .spacing(spacing::XXS)
                 .align_y(Alignment::Center)
-                .padding([4, 8]),
+                .padding([spacing::XXXS, spacing::XXS]),
         )
         .on_press(GenreMessage::PlayTrack(index))
         .width(Length::Fill)
@@ -128,8 +129,9 @@ pub fn genre_detail_view<'a>(
     }
 
     if tracks.is_empty() {
-        track_list = track_list
-            .push(widget::container(widget::text("No tracks found for this genre.")).padding(16));
+        track_list = track_list.push(
+            widget::container(widget::text("No tracks found for this genre.")).padding(spacing::S),
+        );
     }
 
     widget::scrollable(
@@ -137,8 +139,8 @@ pub fn genre_detail_view<'a>(
             .push(header)
             .push(widget::divider::horizontal::default())
             .push(track_list)
-            .spacing(16)
-            .padding(16),
+            .spacing(spacing::S)
+            .padding(spacing::S),
     )
     .height(Length::Fill)
     .into()
@@ -174,14 +176,5 @@ fn genre_icon_name(genre: &str) -> &'static str {
         "weather-clear-symbolic"
     } else {
         "audio-x-generic-symbolic"
-    }
-}
-
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-        format!("{truncated}\u{2026}")
     }
 }

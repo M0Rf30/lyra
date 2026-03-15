@@ -3,7 +3,7 @@
 //! Benchmarks for `LibraryDb::all_albums()` and `LibraryDb::all_artists()`
 //! grouping performance at various dataset sizes.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lyra::library::{LibraryDb, Track};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,6 +30,10 @@ fn make_track(i: usize) -> Track {
         sample_rate: 44100,
         provider_id: Arc::from("local"),
         source_uri: format!("/music/track_{i}.flac"),
+        is_favorite: false,
+        rating: None,
+        rg_track_gain: None,
+        rg_album_gain: None,
     }
 }
 

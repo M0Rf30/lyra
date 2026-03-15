@@ -5,9 +5,9 @@
 //! Tasks 104-105: Synced lyrics rendering with highlighted current line.
 
 use crate::library::{LyricLine, Lyrics};
+use crate::views::spacing;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
-use cosmic::iced_core::Color;
 use cosmic::prelude::*;
 use cosmic::widget;
 use std::time::Duration;
@@ -25,7 +25,6 @@ pub enum LyricsMessage {
 /// or `None` if no line has started yet.
 fn find_current_line_index(lines: &[LyricLine], position: Duration) -> Option<usize> {
     let pos_ms = position.as_millis() as u64;
-    // Find the last line whose timestamp is <= pos_ms.
     let mut current = None;
     for (i, line) in lines.iter().enumerate() {
         if line.timestamp_ms <= pos_ms {
@@ -50,7 +49,7 @@ pub fn lyrics_view<'a>(
     let header = widget::column()
         .push(widget::text::title4(track_title))
         .push(widget::text::caption(track_artist))
-        .spacing(4);
+        .spacing(spacing::XXXS);
 
     let content: cosmic::Element<'_, LyricsMessage> = if is_loading {
         widget::container(widget::text("Loading lyrics..."))
@@ -61,20 +60,20 @@ pub fn lyrics_view<'a>(
         match lyrics_data {
             Lyrics::Synced(lines) => {
                 let current_idx = find_current_line_index(lines, playback_position);
-                let mut col = widget::column().spacing(4);
+                let mut col = widget::column().spacing(spacing::XXXS);
                 for (i, line) in lines.iter().enumerate() {
                     let is_current = current_idx == Some(i);
                     col = col.push(synced_line_widget(line, is_current));
                 }
-                widget::scrollable(widget::container(col).padding(8))
+                widget::scrollable(widget::container(col).padding(spacing::XXS))
                     .height(Length::Fill)
                     .into()
             }
-            Lyrics::Unsynced(text) => {
-                widget::scrollable(widget::container(widget::text(text.as_str())).padding(8))
-                    .height(Length::Fill)
-                    .into()
-            }
+            Lyrics::Unsynced(text) => widget::scrollable(
+                widget::container(widget::text(text.as_str())).padding(spacing::XXS),
+            )
+            .height(Length::Fill)
+            .into(),
         }
     } else {
         widget::container(
@@ -83,7 +82,7 @@ pub fn lyrics_view<'a>(
                 .push(
                     widget::button::suggested("Search Online").on_press(LyricsMessage::FetchLyrics),
                 )
-                .spacing(8)
+                .spacing(spacing::XXS)
                 .align_x(Alignment::Center),
         )
         .align_x(Horizontal::Center)
@@ -95,8 +94,8 @@ pub fn lyrics_view<'a>(
         .push(header)
         .push(widget::divider::horizontal::default())
         .push(content)
-        .spacing(12)
-        .padding(16)
+        .spacing(spacing::XS)
+        .padding(spacing::S)
         .width(Length::Fill)
         .height(Length::Shrink)
         .into()
@@ -104,24 +103,42 @@ pub fn lyrics_view<'a>(
 
 /// Render a single synced lyric line with a timestamp prefix.
 ///
-/// Task 104: The current line is rendered with accent color (bright), others are dimmed.
+/// The current line uses the COSMIC accent color; others use the theme's
+/// neutral_7 (dimmed) color. This ensures proper adaptation to light/dark themes.
 fn synced_line_widget(line: &LyricLine, is_current: bool) -> cosmic::Element<'_, LyricsMessage> {
     let total_secs = line.timestamp_ms / 1000;
     let mins = total_secs / 60;
     let secs = total_secs % 60;
     let timestamp = format!("[{mins:02}:{secs:02}]");
 
-    // Current line: bright accent color; others: dimmed gray.
-    let color = if is_current {
-        Color::from_rgb(0.3, 0.7, 1.0) // accent blue
+    let text_class = if is_current {
+        cosmic::theme::Text::Custom(|theme| cosmic::iced::widget::text::Style {
+            color: Some(theme.cosmic().accent_color().into()),
+        })
     } else {
-        Color::from_rgba(0.6, 0.6, 0.6, 0.7) // dimmed
+        cosmic::theme::Text::Custom(|theme| cosmic::iced::widget::text::Style {
+            color: Some(theme.cosmic().palette.neutral_7.into()),
+        })
+    };
+
+    let line_text: cosmic::Element<'_, LyricsMessage> = if is_current {
+        widget::text::body(&line.text).class(text_class).into()
+    } else {
+        widget::text(&line.text).class(text_class).into()
     };
 
     widget::row()
-        .push(widget::text::caption(timestamp).class(cosmic::theme::Text::Color(color)))
-        .push(widget::text(&line.text).class(cosmic::theme::Text::Color(color)))
-        .spacing(8)
+        .push(widget::text::caption(timestamp).class(if is_current {
+            cosmic::theme::Text::Custom(|theme| cosmic::iced::widget::text::Style {
+                color: Some(theme.cosmic().accent_color().into()),
+            })
+        } else {
+            cosmic::theme::Text::Custom(|theme| cosmic::iced::widget::text::Style {
+                color: Some(theme.cosmic().palette.neutral_7.into()),
+            })
+        }))
+        .push(line_text)
+        .spacing(spacing::XXS)
         .align_y(Alignment::Center)
         .into()
 }
