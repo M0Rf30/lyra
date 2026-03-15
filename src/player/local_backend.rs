@@ -9,6 +9,7 @@ use super::PlaybackState;
 use super::backend::{PlaybackBackend, PlayerError};
 use super::eq_source::{EqController, EqSource, SharedCoeffs, new_shared_coeffs};
 use crate::library::TrackSource;
+use cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use std::fs::File;
 use std::io::BufReader;
@@ -55,10 +56,39 @@ pub struct LocalBackend {
 }
 
 impl LocalBackend {
-    /// Create a new local backend with the default audio output.
-    pub fn new() -> Result<Self, PlayerError> {
-        let stream = OutputStreamBuilder::open_default_stream()
-            .map_err(|e| PlayerError(format!("Failed to open audio output: {e}")))?;
+    /// List available audio output device names.
+    pub fn list_output_devices() -> Vec<String> {
+        cpal::default_host()
+            .output_devices()
+            .map(|devices| devices.filter_map(|d| d.name().ok()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Create a new local backend, optionally targeting a specific output device by name.
+    ///
+    /// If `device_name` is `None` or empty, falls back to the system default output.
+    pub fn new_with_device(device_name: Option<&str>) -> Result<Self, PlayerError> {
+        let stream = if let Some(name) = device_name.filter(|n| !n.is_empty()) {
+            let device = cpal::default_host()
+                .output_devices()
+                .map_err(|e| PlayerError(format!("Failed to enumerate audio devices: {e}")))?
+                .find(|d| d.name().ok().as_deref() == Some(name));
+
+            if let Some(device) = device {
+                OutputStreamBuilder::from_device(device)
+                    .map_err(|e| PlayerError(format!("Failed to open audio device '{name}': {e}")))?
+                    .open_stream()
+                    .map_err(|e| PlayerError(format!("Failed to open audio stream: {e}")))?
+            } else {
+                tracing::warn!("Output device '{name}' not found, falling back to default");
+                OutputStreamBuilder::open_default_stream()
+                    .map_err(|e| PlayerError(format!("Failed to open audio output: {e}")))?
+            }
+        } else {
+            OutputStreamBuilder::open_default_stream()
+                .map_err(|e| PlayerError(format!("Failed to open audio output: {e}")))?
+        };
+
         let sink = Sink::connect_new(stream.mixer());
         let volume = 0.8;
         sink.set_volume(volume);
@@ -91,6 +121,11 @@ impl LocalBackend {
             #[cfg(feature = "visualizer")]
             pcm_buffer: None,
         })
+    }
+
+    /// Create a new local backend with the default audio output.
+    pub fn new() -> Result<Self, PlayerError> {
+        Self::new_with_device(None)
     }
 
     /// Get a clone of the EQ controller for UI-thread use.

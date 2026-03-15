@@ -4179,6 +4179,7 @@ dependencies = [
  "ashpd 0.12.1",
  "chrono",
  "console-subscriber",
+ "cpal",
  "criterion",
  "dirs",
  "futures-util",

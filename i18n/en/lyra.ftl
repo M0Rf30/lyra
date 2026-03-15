@@ -74,3 +74,6 @@ gapless-description = Pre-queue next track for seamless transitions
 gapless-disabled-crossfade = Disabled when crossfade is active
 replay-gain-fallback = Fallback Gain
 replay-gain-fallback-description = Applied when track has no ReplayGain tags
+audio-output = Audio Output
+output-device = Output Device
+system-default = System Default

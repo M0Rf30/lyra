@@ -19,6 +19,8 @@ pub enum SettingsMessage {
     SetGaplessPlayback(bool),
     /// Replay gain fallback dB changed.
     SetReplayGainFallback(f32),
+    /// Audio output device changed (empty = system default).
+    SetOutputDevice(String),
 }
 
 /// Render the Settings page.
@@ -28,6 +30,8 @@ pub fn settings_view<'a>(
     gapless_playback: bool,
     replay_gain_fallback_db: f32,
     active_provider_type: Option<crate::provider::ProviderType>,
+    output_device: &str,
+    available_devices: &[String],
 ) -> cosmic::Element<'a, SettingsMessage> {
     let show_crossfade = active_provider_type
         .map(|pt| {
@@ -47,6 +51,35 @@ pub fn settings_view<'a>(
         .unwrap_or(true);
 
     let mut col = widget::column().spacing(spacing::XXS).padding(spacing::S);
+
+    // Audio Output section — always shown so users can pick their device.
+    {
+        let mut device_options: Vec<String> = vec![fl!("system-default")];
+        let mut device_values: Vec<String> = vec![String::new()];
+        for d in available_devices {
+            device_options.push(d.clone());
+            device_values.push(d.clone());
+        }
+
+        let selected_idx = if output_device.is_empty() {
+            Some(0)
+        } else {
+            device_values.iter().position(|v| v == output_device)
+        };
+
+        let dropdown = widget::dropdown(device_options, selected_idx, move |idx| {
+            SettingsMessage::SetOutputDevice(device_values.get(idx).cloned().unwrap_or_default())
+        });
+
+        let audio_section = cosmic::widget::settings::section()
+            .title(fl!("audio-output"))
+            .add(cosmic::widget::settings::flex_item(
+                fl!("output-device"),
+                dropdown,
+            ));
+
+        col = col.push(audio_section);
+    }
 
     if show_crossfade || show_replay_gain {
         let mut playback_section =

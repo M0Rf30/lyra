@@ -158,6 +158,8 @@ pub struct Config {
     pub gapless_playback: bool,
     /// Fallback replay gain in dB when track has no RG tags (prevents loud jumps).
     pub replay_gain_fallback_db: f32,
+    /// Preferred audio output device name (empty = system default).
+    pub output_device: String,
 }
 
 impl Default for Config {
@@ -186,6 +188,7 @@ impl Default for Config {
             replay_gain_mode: ReplayGainMode::Off,
             gapless_playback: true,
             replay_gain_fallback_db: 0.0,
+            output_device: String::new(),
         }
     }
 }

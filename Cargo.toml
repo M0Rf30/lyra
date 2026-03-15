@@ -22,6 +22,7 @@ futures-util = "0.3"
 
 # Audio playback
 rodio = { version = "0.21", features = ["symphonia-all"] }
+cpal = "0.16"
 
 # MPD protocol client
 mpd_client = "1.4"

@@ -144,6 +144,9 @@ pub struct AppModel {
     /// Progress value when the current animation started (for reversals).
     expand_anim_from: f32,
 
+    /// Cached list of audio output device names, refreshed at startup.
+    available_output_devices: Vec<String>,
+
     // ProjectM visualizer (behind feature flag)
     #[cfg(feature = "visualizer")]
     visualizer_active: bool,
@@ -380,6 +383,8 @@ pub enum Message {
     SetGaplessPlayback(bool),
     /// Set replay gain fallback gain in dB.
     SetReplayGainFallback(f32),
+    /// Set preferred audio output device (empty = system default).
+    SetOutputDevice(String),
 
     // Expanded now-playing view
     ExpandNowPlaying,
@@ -672,9 +677,15 @@ impl cosmic::Application for AppModel {
         let subsonic_connection_status: Vec<Option<String>> =
             vec![None; subsonic_edit_states.len()];
 
+        // Cache available audio output devices at startup.
+        let available_output_devices = Player::list_output_devices();
+
         // Initialize player
         #[allow(unused_mut)]
-        let mut player = match Player::new(None) {
+        let mut player = match Player::new_with_device(None, {
+            let d = config.output_device.as_str();
+            if d.is_empty() { None } else { Some(d) }
+        }) {
             Ok(p) => Some(p),
             Err(e) => {
                 tracing::error!("Failed to initialize audio player: {e}");
@@ -757,6 +768,7 @@ impl cosmic::Application for AppModel {
             subsonic_connection_status,
             subsonic_providers,
             cover_art_bytes: HashMap::new(),
+            available_output_devices,
             blurred_cover: None,
             blurred_cover_key: None,
             expand_progress: 0.0,
@@ -1011,6 +1023,8 @@ impl cosmic::Application for AppModel {
                     self.config.gapless_playback,
                     self.config.replay_gain_fallback_db,
                     active_provider_type,
+                    &self.config.output_device,
+                    &self.available_output_devices,
                 )
                 .map(|msg| match msg {
                     settings::SettingsMessage::SetCrossfade(v) => Message::SetCrossfade(v),
@@ -1023,6 +1037,7 @@ impl cosmic::Application for AppModel {
                     settings::SettingsMessage::SetReplayGainFallback(v) => {
                         Message::SetReplayGainFallback(v)
                     }
+                    settings::SettingsMessage::SetOutputDevice(d) => Message::SetOutputDevice(d),
                 });
 
                 context_drawer::context_drawer(
@@ -3026,6 +3041,15 @@ impl cosmic::Application for AppModel {
                 }
             }
 
+            Message::SetOutputDevice(name) => {
+                self.config.output_device = name;
+                if let Some(ref context) = self.config_context
+                    && let Err(e) = self.config.write_entry(context)
+                {
+                    tracing::error!("Failed to save config: {e:?}");
+                }
+            }
+
             Message::ExpandNowPlaying => {
                 self.expand_target = Some(1.0);
                 self.expand_anim_start = Some(std::time::Instant::now());
@@ -3828,7 +3852,12 @@ impl AppModel {
     /// Recreate the Player with the appropriate backend for the current provider.
     fn recreate_player(&mut self) {
         let mpd_backend = self.make_mpd_backend();
-        match Player::new(mpd_backend) {
+        let device = if self.config.output_device.is_empty() {
+            None
+        } else {
+            Some(self.config.output_device.as_str())
+        };
+        match Player::new_with_device(mpd_backend, device) {
             #[allow(unused_mut)]
             Ok(mut p) => {
                 // Re-wire PCM buffer for visualizer

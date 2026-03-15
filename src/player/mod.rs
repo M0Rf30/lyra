@@ -80,11 +80,26 @@ pub struct Player {
 }
 
 impl Player {
+    /// List available audio output device names.
+    pub fn list_output_devices() -> Vec<String> {
+        LocalBackend::list_output_devices()
+    }
+
     /// Create a new player instance.
     ///
     /// `mpd_backend` should be `Some(...)` when an MPD provider is active.
+    /// `output_device` selects a specific audio output device by name (empty = system default).
     pub fn new(mpd_backend: Option<MpdBackend>) -> Result<Self, String> {
-        let local_backend = LocalBackend::new().map_err(|e| e.to_string())?;
+        Self::new_with_device(mpd_backend, None)
+    }
+
+    /// Create a new player instance targeting a specific output device.
+    pub fn new_with_device(
+        mpd_backend: Option<MpdBackend>,
+        output_device: Option<&str>,
+    ) -> Result<Self, String> {
+        let local_backend =
+            LocalBackend::new_with_device(output_device).map_err(|e| e.to_string())?;
 
         Ok(Self {
             local_backend,
