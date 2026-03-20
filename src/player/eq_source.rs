@@ -7,6 +7,7 @@
 //! never blocks on a mutex when the UI adjusts a slider.
 
 use rodio::Source;
+use rodio::source::SeekError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -335,6 +336,10 @@ impl<S: Source<Item = f32>> Source for EqSource<S> {
 
     fn total_duration(&self) -> Option<Duration> {
         self.inner.total_duration()
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        self.inner.try_seek(pos)
     }
 }
 

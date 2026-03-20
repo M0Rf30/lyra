@@ -10,6 +10,7 @@ use super::backend::{PlaybackBackend, PlayerError};
 use super::eq_source::{EqController, EqSource, SharedCoeffs, new_shared_coeffs};
 use crate::library::TrackSource;
 use cpal::traits::{DeviceTrait, HostTrait};
+use rodio::source::SeekError;
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
 use std::fs::File;
 use std::io::BufReader;
@@ -694,6 +695,10 @@ where
     fn total_duration(&self) -> Option<Duration> {
         self.inner.total_duration()
     }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        self.inner.try_seek(pos)
+    }
 }
 
 // --- TappedSource adapter for visualizer PCM feed ---
@@ -770,5 +775,9 @@ where
 
     fn total_duration(&self) -> Option<Duration> {
         self.inner.total_duration()
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        self.inner.try_seek(pos)
     }
 }
