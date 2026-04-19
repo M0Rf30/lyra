@@ -2,7 +2,7 @@
 
 //! Scans directories for audio files and extracts metadata via lofty.
 
-use super::{db::LibraryDb, Track};
+use super::{Track, db::LibraryDb};
 use lofty::prelude::*;
 use lofty::probe::Probe;
 use lofty::tag::ItemKey;
@@ -65,9 +65,10 @@ impl LibraryScanner {
 
                 let path_str = path.to_string_lossy();
                 if let Some(existing_mtime) = db.get_track_mtime(&path_str)
-                    && existing_mtime == mtime {
-                        continue; // File hasn't changed
-                    }
+                    && existing_mtime == mtime
+                {
+                    continue; // File hasn't changed
+                }
 
                 match Self::read_metadata(path) {
                     Ok(track) => {
@@ -86,9 +87,10 @@ impl LibraryScanner {
 
         // Clean up tracks that no longer exist
         if let Ok(removed) = db.remove_missing_tracks()
-            && removed > 0 {
-                tracing::info!("Removed {removed} missing tracks from library");
-            }
+            && removed > 0
+        {
+            tracing::info!("Removed {removed} missing tracks from library");
+        }
 
         Ok(count)
     }
@@ -130,19 +132,13 @@ impl LibraryScanner {
                 match Self::read_metadata(path) {
                     Ok(track) => {
                         if let Err(e) = db.upsert_track(&track, mtime) {
-                            tracing::error!(
-                                "Failed to upsert track {}: {e}",
-                                path.display()
-                            );
+                            tracing::error!("Failed to upsert track {}: {e}", path.display());
                         } else {
                             count += 1;
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "Failed to read metadata for {}: {e}",
-                            path.display()
-                        );
+                        tracing::warn!("Failed to read metadata for {}: {e}", path.display());
                     }
                 }
             } else {
@@ -150,10 +146,7 @@ impl LibraryScanner {
                 let path_str = path.to_string_lossy();
                 if db.get_track_mtime(&path_str).is_some() {
                     if let Err(e) = db.remove_track_by_path(&path_str) {
-                        tracing::error!(
-                            "Failed to remove track {}: {e}",
-                            path.display()
-                        );
+                        tracing::error!("Failed to remove track {}: {e}", path.display());
                     } else {
                         count += 1;
                     }
@@ -238,10 +231,10 @@ impl LibraryScanner {
             .or_else(|| tagged_file.first_tag());
         let rg_track_gain = tag2
             .and_then(|t| t.get_string(ItemKey::ReplayGainTrackGain))
-            .and_then(|s| parse_replay_gain(s));
+            .and_then(parse_replay_gain);
         let rg_album_gain = tag2
             .and_then(|t| t.get_string(ItemKey::ReplayGainAlbumGain))
-            .and_then(|s| parse_replay_gain(s));
+            .and_then(parse_replay_gain);
 
         let source_uri = path.to_string_lossy().to_string();
         Ok(Track {

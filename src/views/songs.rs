@@ -228,7 +228,11 @@ pub fn songs_list_view<'a>(
 
         let row = widget::button::custom(
             widget::row()
-                .push(widget::container(num_col).width(40).align_x(Horizontal::Center))
+                .push(
+                    widget::container(num_col)
+                        .width(40)
+                        .align_x(Horizontal::Center),
+                )
                 .push(widget::text(track.title.as_str()).width(Length::FillPortion(3)))
                 .push(widget::text(track.artist.as_str()).width(Length::FillPortion(2)))
                 .push(widget::text(track.album.as_str()).width(Length::FillPortion(2)))

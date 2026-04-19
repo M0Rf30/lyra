@@ -7,21 +7,19 @@
 
 use super::{MusicProvider, ProviderError, ProviderType};
 use crate::library::{Album, Artist, CoverSource, Playlist, Track, TrackSource};
+use mpd_client::Client;
 use mpd_client::client::{ConnectWithPasswordError, ConnectionEvents};
 use mpd_client::commands::{
-    self, Find, List, Status, CurrentSong, Update,
-    GetPlaylists, GetPlaylist, SaveQueueAsPlaylist, DeletePlaylist, AddToPlaylist,
-    SetRandom, SetRepeat, SetSingle, Crossfade, SetReplayGainMode,
-    StickerGet, StickerSet, StickerDelete, StickerFind,
-    SingleMode, ReplayGainMode,
+    self, AddToPlaylist, Crossfade, CurrentSong, DeletePlaylist, Find, GetPlaylist, GetPlaylists,
+    List, ReplayGainMode, SaveQueueAsPlaylist, SetRandom, SetRepeat, SetReplayGainMode, SetSingle,
+    SingleMode, Status, StickerDelete, StickerFind, StickerGet, StickerSet, Update,
 };
 use mpd_client::filter::{Filter, Operator};
 use mpd_client::responses;
 use mpd_client::tag::Tag;
-use mpd_client::Client;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -194,7 +192,8 @@ impl MpdProvider {
                 !msg.contains("unknown command")
             }
         };
-        self.stickers_supported.store(stickers_ok, Ordering::Relaxed);
+        self.stickers_supported
+            .store(stickers_ok, Ordering::Relaxed);
         tracing::info!("MPD sticker support: {stickers_ok}");
 
         let mut guard = self.client.lock().await;
@@ -294,10 +293,7 @@ impl MpdProvider {
     /// Query MPD status (async).
     pub async fn status_async(&self) -> Result<responses::Status, ProviderError> {
         let client = self.get_client().await?;
-        client
-            .command(Status)
-            .await
-            .map_err(mpd_err("status"))
+        client.command(Status).await.map_err(mpd_err("status"))
     }
 
     /// Query current song (async).
@@ -679,7 +675,11 @@ impl MusicProvider for MpdProvider {
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
-    fn add_to_playlist(&self, playlist_id: &str, track_ids: &[String]) -> Result<(), ProviderError> {
+    fn add_to_playlist(
+        &self,
+        playlist_id: &str,
+        track_ids: &[String],
+    ) -> Result<(), ProviderError> {
         let playlist_owned = playlist_id.to_string();
         let uris: Vec<String> = track_ids.to_vec();
         self.block_on(async {
@@ -713,9 +713,7 @@ impl MusicProvider for MpdProvider {
 
             if is_fav {
                 // Remove favorite sticker
-                let _ = client
-                    .command(StickerDelete::new(&uri, "favorite"))
-                    .await;
+                let _ = client.command(StickerDelete::new(&uri, "favorite")).await;
                 Ok(false)
             } else {
                 client
@@ -752,9 +750,7 @@ impl MusicProvider for MpdProvider {
             let client = self.get_client().await?;
             if rating == 0 {
                 // Clear rating
-                let _ = client
-                    .command(StickerDelete::new(&uri, "rating"))
-                    .await;
+                let _ = client.command(StickerDelete::new(&uri, "rating")).await;
                 Ok(())
             } else {
                 let val = rating.min(5).to_string();
@@ -795,13 +791,9 @@ impl MusicProvider for MpdProvider {
                 .map_err(mpd_err("sticker find favorite"))?;
 
             let mut tracks = Vec::with_capacity(results.value.len());
-            for (uri, _value) in &results.value {
+            for uri in results.value.keys() {
                 // Look up each song's metadata
-                let filter = Filter::new(
-                    Tag::Other("file".into()),
-                    Operator::Equal,
-                    uri.as_str(),
-                );
+                let filter = Filter::new(Tag::Other("file".into()), Operator::Equal, uri.as_str());
                 if let Ok(songs) = client.command(Find::new(filter)).await {
                     for song in &songs {
                         let mut track = self.song_to_track(song);
@@ -825,10 +817,7 @@ impl MusicProvider for MpdProvider {
                 .await
                 .map_err(mpd_err("list genre"))?;
 
-            Ok(genre_list
-                .into_iter()
-                .filter(|g| !g.is_empty())
-                .collect())
+            Ok(genre_list.into_iter().filter(|g| !g.is_empty()).collect())
         })
     }
 

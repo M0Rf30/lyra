@@ -22,10 +22,10 @@ pub fn parse_index(content: &str) -> Result<Vec<AutoEQProfileMetadata>> {
 
             // URL-decode name and path
             let name = urlencoding::decode(name)
-                .unwrap_or_else(|_| std::borrow::Cow::Borrowed(name))
+                .unwrap_or(std::borrow::Cow::Borrowed(name))
                 .to_string();
             let path_str = urlencoding::decode(path)
-                .unwrap_or_else(|_| std::borrow::Cow::Borrowed(path))
+                .unwrap_or(std::borrow::Cow::Borrowed(path))
                 .to_string();
 
             // Extract source and type from path (format: source/type/name)
@@ -117,7 +117,7 @@ pub fn parse_fixed_band_eq(path: &str, content: &str) -> Result<AutoEQProfile> {
 
     // Extract name, source, type from path
     let decoded_path = urlencoding::decode(path)
-        .unwrap_or_else(|_| std::borrow::Cow::Borrowed(path))
+        .unwrap_or(std::borrow::Cow::Borrowed(path))
         .to_string();
 
     let parts: Vec<&str> = decoded_path.split('/').collect();

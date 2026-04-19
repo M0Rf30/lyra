@@ -9,7 +9,7 @@ mod scanner;
 
 pub use cover_art::CoverArt;
 pub use db::LibraryDb;
-pub use lyrics::{parse_lrc, LyricsProvider};
+pub use lyrics::{LyricsProvider, parse_lrc};
 pub use scanner::LibraryScanner;
 
 use std::path::PathBuf;
@@ -102,7 +102,11 @@ impl Album {
     /// Construct an album from a name, sorted track list, and optional cover source.
     ///
     /// Extracts artist and year from the first track.
-    pub fn from_tracks(name: String, tracks: Vec<Track>, cover_source: Option<CoverSource>) -> Self {
+    pub fn from_tracks(
+        name: String,
+        tracks: Vec<Track>,
+        cover_source: Option<CoverSource>,
+    ) -> Self {
         let artist = tracks
             .first()
             .map(|t| t.album_artist.clone())

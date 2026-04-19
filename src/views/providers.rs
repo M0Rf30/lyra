@@ -209,6 +209,7 @@ pub enum ProvidersMessage {
 // ── View ───────────────────────────────────────────────────────────────────
 
 /// Render the providers settings panel (shown in the context drawer).
+#[allow(clippy::too_many_arguments)]
 pub fn providers_view<'a>(
     music_dirs: &'a [std::path::PathBuf],
     mpd_servers: &'a [MpdEditState],

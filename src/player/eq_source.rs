@@ -7,8 +7,8 @@
 //! never blocks on a mutex when the UI adjusts a slider.
 
 use rodio::Source;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use super::equalizer::BAND_FREQUENCIES;

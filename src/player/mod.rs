@@ -221,9 +221,7 @@ impl Player {
     /// Seek to a position.
     #[tracing::instrument(skip(self), level = "debug")]
     pub fn seek(&mut self, position: Duration) -> Result<(), String> {
-        self.active_mut()
-            .seek(position)
-            .map_err(|e| e.to_string())
+        self.active_mut().seek(position).map_err(|e| e.to_string())
     }
 
     /// Get the current playback position from the active backend.
