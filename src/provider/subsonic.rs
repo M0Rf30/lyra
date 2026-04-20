@@ -116,8 +116,8 @@ impl SubsonicProvider {
         config: SubsonicConfig,
         runtime: tokio::runtime::Handle,
     ) -> Result<Self, ProviderError> {
-        let auth = Auth::token(&config.password);
-        let mut client = Client::new(&config.url, &config.username, auth)
+        let auth = Auth::token(&config.username, &config.password);
+        let mut client = Client::new(&config.url, auth)
             .map_err(|e| ProviderError::NotConnected(format!("Invalid Subsonic URL: {e}")))?
             .with_client_name("lyra");
 
@@ -557,7 +557,7 @@ impl MusicProvider for SubsonicProvider {
         let song_id = track.path.to_string_lossy();
         self.block_on(async {
             // Try getLyricsBySongId first (OpenSubsonic extension).
-            match self.client.get_lyrics_by_song_id(&song_id).await {
+            match self.client.get_lyrics_by_song_id(&song_id, None).await {
                 Ok(lyrics_list) => {
                     if let Some(structured) = lyrics_list.structured_lyrics.first() {
                         if structured.synced {

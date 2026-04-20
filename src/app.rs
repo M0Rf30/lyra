@@ -2890,8 +2890,8 @@ impl cosmic::Application for AppModel {
 
                     return cosmic::task::future(async move {
                         let result = async {
-                            let auth = opensubsonic::Auth::token(&password);
-                            let mut client = opensubsonic::Client::new(&url, &username, auth)
+                            let auth = opensubsonic::Auth::token(&username, &password);
+                            let mut client = opensubsonic::Client::new(&url, auth)
                                 .map_err(|e| format!("Client: {e}"))?;
                             if accept_invalid_certs {
                                 client = client
