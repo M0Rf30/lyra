@@ -39,10 +39,10 @@ pub fn playlist_list_view<'a>(
     playlists: &'a [Playlist],
     new_playlist_name: &'a str,
 ) -> cosmic::Element<'a, PlaylistMessage> {
-    let mut col = widget::column().spacing(12).padding(16);
+    let mut col = widget::Column::new().spacing(12).padding(16);
 
     // Create playlist row
-    let create_row = widget::row()
+    let create_row = widget::Row::new()
         .push(
             widget::text_input("New playlist name...", new_playlist_name)
                 .on_input(PlaylistMessage::NewPlaylistNameChanged)
@@ -66,7 +66,7 @@ pub fn playlist_list_view<'a>(
     if playlists.is_empty() {
         col = col.push(
             widget::container(
-                widget::column()
+                widget::Column::new()
                     .push(widget::icon::from_name("playlist-symbolic").size(64))
                     .push(widget::text::title3("No playlists"))
                     .push(widget::text("Create a playlist to get started"))
@@ -82,10 +82,10 @@ pub fn playlist_list_view<'a>(
         return col.into();
     }
 
-    let mut list = widget::column().spacing(2);
+    let mut list = widget::Column::new().spacing(2);
 
     for (index, playlist) in playlists.iter().enumerate() {
-        let info = widget::column()
+        let info = widget::Column::new()
             .push(widget::text(playlist.name.as_str()))
             .push(widget::text::caption(format!(
                 "{} tracks  -  {}",
@@ -101,7 +101,7 @@ pub fn playlist_list_view<'a>(
             widget::icon::from_name("playlist-symbolic").size(40).into();
 
         let row = widget::button::custom(
-            widget::row()
+            widget::Row::new()
                 .push(playlist_icon)
                 .push(info.width(Length::Fill))
                 .push(delete_btn)
@@ -130,7 +130,7 @@ pub fn playlist_detail_view<'a>(
     let detail_icon: cosmic::Element<'_, PlaylistMessage> =
         widget::icon::from_name("playlist-symbolic").size(80).into();
 
-    let rename_row = widget::row()
+    let rename_row = widget::Row::new()
         .push(
             widget::text_input("Playlist name...", edit_name)
                 .on_input(move |text| PlaylistMessage::RenameInputChanged(playlist_index, text))
@@ -149,14 +149,14 @@ pub fn playlist_detail_view<'a>(
         .spacing(8)
         .align_y(Alignment::Center);
 
-    let header = widget::row()
+    let header = widget::Row::new()
         .push(
             widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
                 .on_press(PlaylistMessage::BackToList),
         )
         .push(detail_icon)
         .push(
-            widget::column()
+            widget::Column::new()
                 .push(widget::text::title1(playlist.name.as_str()))
                 .push(widget::text::caption(format!(
                     "{} tracks  -  {}",
@@ -173,14 +173,14 @@ pub fn playlist_detail_view<'a>(
         .spacing(16)
         .align_y(Alignment::Center);
 
-    let mut track_list = widget::column().spacing(2);
+    let mut track_list = widget::Column::new().spacing(2);
 
     for (track_idx, track) in playlist.tracks.iter().enumerate() {
         let remove_btn = widget::button::icon(widget::icon::from_name("list-remove-symbolic"))
             .on_press(PlaylistMessage::RemoveTrack(playlist_index, track_idx));
 
         let row = widget::button::custom(
-            widget::row()
+            widget::Row::new()
                 .push(widget::text(format!("{}", track_idx + 1)).width(40))
                 .push(widget::text(track.title.as_str()).width(Length::Fill))
                 .push(widget::text(track.artist.as_str()).width(200))
@@ -207,7 +207,7 @@ pub fn playlist_detail_view<'a>(
     }
 
     widget::scrollable(
-        widget::column()
+        widget::Column::new()
             .push(header)
             .push(widget::divider::horizontal::default())
             .push(track_list)

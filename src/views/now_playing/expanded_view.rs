@@ -103,20 +103,20 @@ pub fn expanded_now_playing<'a>(
     let collapse_btn = widget::button::icon(widget::icon::from_name("go-down-symbolic").size(24))
         .on_press(NowPlayingMessage::Collapse);
 
-    let mut right_col = widget::column().spacing(0);
+    let mut right_col = widget::Column::new().spacing(0);
 
-    let top_bar = widget::row()
-        .push(widget::Space::new(Length::Fill, Length::Shrink))
+    let top_bar = widget::Row::new()
+        .push(widget::Space::new().width(Length::Fill).height(Length::Shrink))
         .push(collapse_btn)
         .align_y(Alignment::Center);
     right_col = right_col.push(top_bar);
 
-    right_col = right_col.push(widget::Space::new(Length::Shrink, Length::Fill));
+    right_col = right_col.push(widget::Space::new().width(Length::Shrink).height(Length::Fill));
 
     if let Some(track) = current_track {
         right_col = right_col
             .push(widget::text::title2(truncate_str(&track.title, 40)))
-            .push(widget::Space::new(Length::Shrink, Length::Fixed(6.0)));
+            .push(widget::Space::new().width(Length::Shrink).height(Length::Fixed(6.0)));
 
         let mut sub_parts: Vec<String> = Vec::new();
         if !track.artist.is_empty() {
@@ -132,6 +132,7 @@ pub fn expanded_now_playing<'a>(
             right_col = right_col.push(widget::text::body(sub_parts.join(" \u{2022} ")).class(
                 cosmic::theme::Text::Custom(|_theme| cosmic::iced::widget::text::Style {
                     color: Some(cosmic::iced::Color::from_rgba(1.0, 1.0, 1.0, 0.7)),
+                    ..Default::default()
                 }),
             ));
         }
@@ -139,9 +140,9 @@ pub fn expanded_now_playing<'a>(
         right_col = right_col.push(widget::text::title2("No track playing"));
     }
 
-    right_col = right_col.push(widget::Space::new(Length::Shrink, Length::Fixed(24.0)));
+    right_col = right_col.push(widget::Space::new().width(Length::Shrink).height(Length::Fixed(24.0)));
 
-    let seek_bar = widget::row()
+    let seek_bar = widget::Row::new()
         .push(widget::text::body(format_time(display_position)))
         .push(
             widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
@@ -154,9 +155,9 @@ pub fn expanded_now_playing<'a>(
         .align_y(Alignment::Center);
     right_col = right_col.push(seek_bar);
 
-    right_col = right_col.push(widget::Space::new(Length::Shrink, Length::Fixed(16.0)));
+    right_col = right_col.push(widget::Space::new().width(Length::Shrink).height(Length::Fixed(16.0)));
 
-    let transport = widget::row()
+    let transport = widget::Row::new()
         .push(
             widget::button::icon(widget::icon::from_name(shuffle_icon).size(24))
                 .on_press(NowPlayingMessage::ToggleShuffle),
@@ -186,10 +187,10 @@ pub fn expanded_now_playing<'a>(
             .width(Length::Fill),
     );
 
-    right_col = right_col.push(widget::Space::new(Length::Shrink, Length::Fixed(16.0)));
+    right_col = right_col.push(widget::Space::new().width(Length::Shrink).height(Length::Fixed(16.0)));
 
     #[allow(unused_mut)]
-    let mut bottom_row = widget::row()
+    let mut bottom_row = widget::Row::new()
         .push(widget::icon::from_name("audio-volume-high-symbolic").size(20))
         .push(
             widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
@@ -220,7 +221,7 @@ pub fn expanded_now_playing<'a>(
 
     right_col = right_col.push(bottom_row.spacing(10).align_y(Alignment::Center));
 
-    right_col = right_col.push(widget::Space::new(Length::Shrink, Length::Fill));
+    right_col = right_col.push(widget::Space::new().width(Length::Shrink).height(Length::Fill));
 
     let right_panel = widget::container(right_col.width(Length::Fill))
         .padding([20, 28, 28, 28])
@@ -238,7 +239,7 @@ pub fn expanded_now_playing<'a>(
         .width(Length::FillPortion(1))
         .height(Length::Fixed(800.0));
 
-    let two_col = widget::row()
+    let two_col = widget::Row::new()
         .push(left_panel)
         .push(right_panel)
         .height(Length::Fixed(800.0))
@@ -256,12 +257,13 @@ pub fn expanded_now_playing<'a>(
                     parts.join(" \u{2022} ")
                 };
 
-                let overlay_col = widget::column()
+                let overlay_col = widget::Column::new()
                     .push(widget::text::title3(truncate_str(&track.title, 40)))
                     .push(
                         widget::text::body(subtitle).class(cosmic::theme::Text::Custom(|theme| {
                             cosmic::iced::widget::text::Style {
                                 color: Some(theme.cosmic().palette.neutral_7.into()),
+                                ..Default::default()
                             }
                         })),
                     )
@@ -338,7 +340,7 @@ pub fn expanded_now_playing<'a>(
 
     if let Some(bg_layer) = bg_element {
         let black_base: cosmic::Element<'_, NowPlayingMessage> =
-            widget::container(widget::Space::new(0, 0))
+            widget::container(widget::Space::new().width(0).height(0))
                 .width(Length::Fill)
                 .height(Length::Fixed(800.0))
                 .class(cosmic::theme::Container::custom(|_theme| {
@@ -360,7 +362,7 @@ pub fn expanded_now_playing<'a>(
         #[cfg(feature = "visualizer")]
         if visualizer_active {
             let dbl_click_cap: cosmic::Element<'_, NowPlayingMessage> = widget::mouse_area(
-                widget::container(widget::Space::new(Length::Fill, Length::Fixed(800.0)))
+                widget::container(widget::Space::new().width(Length::Fill).height(Length::Fixed(800.0)))
                     .width(Length::Fill)
                     .height(Length::Fixed(800.0)),
             )
@@ -379,9 +381,9 @@ pub fn expanded_now_playing<'a>(
                 cosmic::iced::widget::container::Style {
                     background: Some(
                         Color::from_rgba(
-                            cosmic.background.base.red,
-                            cosmic.background.base.green,
-                            cosmic.background.base.blue,
+                            cosmic.background(false).base.red,
+                            cosmic.background(false).base.green,
+                            cosmic.background(false).base.blue,
                             1.0,
                         )
                         .into(),

@@ -30,7 +30,7 @@ pub fn artist_list_view<'a>(
 ) -> cosmic::Element<'a, ArtistMessage> {
     if artists.is_empty() {
         return widget::container(
-            widget::column()
+            widget::Column::new()
                 .push(widget::icon::from_name("system-users-symbolic").size(64))
                 .push(widget::text::title3("No artists found"))
                 .spacing(12)
@@ -43,7 +43,7 @@ pub fn artist_list_view<'a>(
         .into();
     }
 
-    let mut list = widget::column().spacing(2);
+    let mut list = widget::Column::new().spacing(2);
 
     for (index, artist) in artists.iter().enumerate() {
         let avatar: cosmic::Element<'_, ArtistMessage> =
@@ -56,10 +56,10 @@ pub fn artist_list_view<'a>(
             };
 
         let row = widget::button::custom(
-            widget::row()
+            widget::Row::new()
                 .push(avatar)
                 .push(
-                    widget::column()
+                    widget::Column::new()
                         .push(widget::text(artist.name.as_str()))
                         .push(widget::text::caption(format!(
                             "{} albums, {} tracks",
@@ -101,14 +101,14 @@ pub fn artist_detail_view<'a>(
                 .into()
         };
 
-    let header = widget::row()
+    let header = widget::Row::new()
         .push(
             widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
                 .on_press(ArtistMessage::BackToList),
         )
         .push(avatar)
         .push(
-            widget::column()
+            widget::Column::new()
                 .push(widget::text::title1(artist.name.as_str()))
                 .push(widget::text::caption(format!(
                     "{} albums, {} tracks",
@@ -120,7 +120,7 @@ pub fn artist_detail_view<'a>(
         .spacing(16)
         .align_y(Alignment::Center);
 
-    let mut content = widget::column().push(header).spacing(16);
+    let mut content = widget::Column::new().push(header).spacing(16);
 
     for (album_idx, album) in artist.albums.iter().enumerate() {
         let key = CoverArt::album_key(&artist.name, &album.name);
@@ -133,7 +133,7 @@ pub fn artist_detail_view<'a>(
                     .into()
             };
 
-        let album_header = widget::row()
+        let album_header = widget::Row::new()
             .push(
                 widget::container(album_art)
                     .width(64)
@@ -142,7 +142,7 @@ pub fn artist_detail_view<'a>(
                     .align_y(Vertical::Center),
             )
             .push(
-                widget::column()
+                widget::Column::new()
                     .push(widget::text::title4(album.name.as_str()))
                     .push(widget::text::caption(format!(
                         "{}  -  {} tracks",
@@ -164,7 +164,7 @@ pub fn artist_detail_view<'a>(
 
         content = content.push(album_header);
 
-        let mut track_list = widget::column().spacing(1);
+        let mut track_list = widget::Column::new().spacing(1);
         for (track_idx, track) in album.tracks.iter().enumerate() {
             let track_id = track.id.to_string();
             let is_playing = current_track_id == Some(track.id);
@@ -193,11 +193,11 @@ pub fn artist_detail_view<'a>(
                     .class(cosmic::theme::Button::Standard)
                     .into()
             } else {
-                widget::Space::with_width(0).into()
+                widget::Space::new().width(0).into()
             };
 
             let row = widget::button::custom(
-                widget::row()
+                widget::Row::new()
                     .push(
                         widget::container(num_col)
                             .width(32)
@@ -234,7 +234,7 @@ fn artist_star_rating<'a>(
     current_rating: Option<u8>,
 ) -> cosmic::Element<'a, ArtistMessage> {
     let rating = current_rating.unwrap_or(0);
-    let mut row = widget::row().spacing(0).align_y(Alignment::Center);
+    let mut row = widget::Row::new().spacing(0).align_y(Alignment::Center);
 
     for star in 1u8..=5 {
         let icon_name = if star <= rating {

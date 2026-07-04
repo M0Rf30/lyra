@@ -16,9 +16,10 @@ use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::{Alignment, Length, Subscription};
 use cosmic::widget::{self, about::About, icon, menu, nav_bar};
-use cosmic::{iced_futures, prelude::*};
-use futures_util::{SinkExt, StreamExt};
+use cosmic::prelude::*;
+use futures_util::{SinkExt, Stream, StreamExt};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1265,7 +1266,7 @@ impl cosmic::Application for AppModel {
             widget::container(expanded).width(Length::Fill).into()
         } else {
             // Collapsed state: normal layout
-            let mut layout_col = widget::column().push(
+            let mut layout_col = widget::Column::new().push(
                 widget::container(content)
                     .width(Length::Fill)
                     .height(Length::Fill),
@@ -1274,7 +1275,7 @@ impl cosmic::Application for AppModel {
             if self.library_scanning {
                 layout_col = layout_col.push(
                     widget::container(
-                        widget::row()
+                        widget::Row::new()
                             .push(widget::text::caption(fl!("scanning-library")))
                             .spacing(8)
                             .align_y(Alignment::Center),
@@ -1329,54 +1330,11 @@ impl cosmic::Application for AppModel {
                     && let Some(mpd) = player.mpd_backend_ref()
                 {
                     let client = mpd.client();
-                    subs.push(Subscription::run_with_id(
-                        "mpd-status-poll",
-                        iced_futures::stream::channel(1, |mut emitter| async move {
-                            let mut interval = tokio::time::interval(Duration::from_millis(300));
-                            loop {
-                                interval.tick().await;
-                                match client.command(mpd_client::commands::Status).await {
-                                    Ok(status) => {
-                                        let state = match status.state {
-                                            mpd_client::responses::PlayState::Playing => {
-                                                PlaybackState::Playing
-                                            }
-                                            mpd_client::responses::PlayState::Paused => {
-                                                PlaybackState::Paused
-                                            }
-                                            mpd_client::responses::PlayState::Stopped => {
-                                                PlaybackState::Stopped
-                                            }
-                                        };
-                                        _ = emitter
-                                            .send(Message::MpdStatusUpdate {
-                                                position: status.elapsed.unwrap_or(Duration::ZERO),
-                                                duration: status.duration.unwrap_or(Duration::ZERO),
-                                                state,
-                                                volume: status.volume as f32 / 100.0,
-                                            })
-                                            .await;
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("MPD status poll failed: {e}");
-                                    }
-                                }
-                            }
-                        }),
-                    ));
+                    subs.push(Subscription::run_with(MpdPollKey(client), mpd_status_stream));
                 }
             } else {
                 // Local/Subsonic: simple tick for UI updates.
-                subs.push(Subscription::run_with_id(
-                    "playback-tick",
-                    iced_futures::stream::channel(1, |mut emitter| async move {
-                        let mut interval = tokio::time::interval(Duration::from_millis(500));
-                        loop {
-                            interval.tick().await;
-                            _ = emitter.send(Message::PlaybackTick).await;
-                        }
-                    }),
-                ));
+                subs.push(Subscription::run(playback_tick_stream));
             }
         }
 
@@ -1389,52 +1347,10 @@ impl cosmic::Application for AppModel {
         // This avoids protocol conflicts between idle mode and command execution.
         for (idx, provider) in self.mpd_providers.iter().enumerate() {
             let provider = Arc::clone(provider);
-            let stream = iced_futures::stream::channel(4, |mut emitter| async move {
-                loop {
-                    let pid = provider.id().to_string();
-
-                    // Step 1: Establish the idle connection
-                    // We must keep `_idle_client` alive — dropping it would
-                    // close the background task and end the `events` stream.
-                    let idle_result = provider.connect_idle().await;
-                    let (_idle_client, mut events) = match idle_result {
-                        Ok(pair) => pair,
-                        Err(e) => {
-                            _ = emitter
-                                .send(Message::MpdConnectionFailed(pid, e.to_string()))
-                                .await;
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                            continue;
-                        }
-                    };
-
-                    // Step 2: Establish the command connection
-                    if let Err(e) = provider.connect_command().await {
-                        tracing::error!("MPD provider '{pid}' command connection failed: {e}");
-                        _ = emitter
-                            .send(Message::MpdConnectionFailed(pid, e.to_string()))
-                            .await;
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        continue;
-                    }
-
-                    // Both connections established
-                    _ = emitter.send(Message::MpdConnected(pid.clone())).await;
-
-                    // Loop on idle events until the connection drops
-                    while let Some(_event) = events.next().await {
-                        _ = emitter.send(Message::MpdIdleEvent(pid.clone())).await;
-                    }
-
-                    // Idle stream ended — connection lost. Disconnect command too.
-                    tracing::warn!("MPD provider '{pid}' connection lost, reconnecting...");
-                    provider.disconnect().await;
-
-                    // Backoff before reconnect
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-            });
-            subs.push(Subscription::run_with_id(("mpd-idle", idx), stream));
+            subs.push(Subscription::run_with(
+                MpdIdleKey { idx, provider },
+                mpd_idle_stream,
+            ));
         }
 
         // Expand/collapse animation tick (~60fps, only during transitions)
@@ -1548,93 +1464,7 @@ impl cosmic::Application for AppModel {
 
             if is_local_active && !self.config.music_dirs.is_empty() {
                 let music_dirs = self.config.music_dirs.clone();
-                subs.push(Subscription::run_with_id(
-                    "fs-watcher",
-                    iced_futures::stream::channel(4, move |mut emitter| async move {
-                        use notify::{RecursiveMode, Watcher};
-
-                        let (tx, mut rx) = tokio::sync::mpsc::channel::<PathBuf>(256);
-
-                        // Create watcher that sends changed paths through the channel.
-                        // IMPORTANT: Only react to content changes (Create/Modify/Remove),
-                        // NOT Access events. Reading files during scanning triggers Access
-                        // events which would create an infinite scan loop.
-                        let _watcher = {
-                            let tx = tx.clone();
-                            let mut watcher = match notify::RecommendedWatcher::new(
-                                move |result: Result<notify::Event, notify::Error>| {
-                                    if let Ok(event) = result {
-                                        use notify::EventKind;
-                                        match event.kind {
-                                            EventKind::Create(_)
-                                            | EventKind::Modify(_)
-                                            | EventKind::Remove(_) => {
-                                                for path in event.paths {
-                                                    let _ = tx.blocking_send(path);
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                },
-                                notify::Config::default(),
-                            ) {
-                                Ok(w) => w,
-                                Err(e) => {
-                                    tracing::error!("Failed to create filesystem watcher: {e}");
-                                    // Keep the future alive so the subscription ID is stable.
-                                    std::future::pending::<()>().await;
-                                    return;
-                                }
-                            };
-
-                            for dir in &music_dirs {
-                                if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
-                                    tracing::warn!(
-                                        "Failed to watch directory {}: {e}",
-                                        dir.display()
-                                    );
-                                }
-                            }
-
-                            watcher // keep alive
-                        };
-
-                        // Debounce loop: collect paths, wait for 2s of quiet, then emit.
-                        let debounce_duration = Duration::from_secs(2);
-                        loop {
-                            // Wait for the first event.
-                            let first = match rx.recv().await {
-                                Some(path) => path,
-                                None => break, // channel closed
-                            };
-
-                            let mut changed_paths = vec![first];
-
-                            // Collect more events until 2 seconds of silence.
-                            loop {
-                                match tokio::time::timeout(debounce_duration, rx.recv()).await {
-                                    Ok(Some(path)) => {
-                                        changed_paths.push(path);
-                                    }
-                                    Ok(None) => break, // channel closed
-                                    Err(_) => break,   // timeout — debounce complete
-                                }
-                            }
-
-                            // Deduplicate paths.
-                            changed_paths.sort();
-                            changed_paths.dedup();
-
-                            tracing::debug!(
-                                "Filesystem watcher: {} changed paths after debounce",
-                                changed_paths.len()
-                            );
-
-                            _ = emitter.send(Message::FilesChanged(changed_paths)).await;
-                        }
-                    }),
-                ));
+                subs.push(Subscription::run_with(music_dirs, fs_watcher_stream));
             }
         }
 
@@ -1663,16 +1493,19 @@ impl cosmic::Application for AppModel {
         // Space bar to toggle playback (unless captured by a text input widget)
         subs.push(cosmic::iced::event::listen_with(|event, status, _id| {
             if let cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
-                key: cosmic::iced::keyboard::Key::Named(cosmic::iced::keyboard::key::Named::Space),
+                key: cosmic::iced::keyboard::Key::Character(s),
                 modifiers,
                 ..
-            }) = event
+            }) = &event
             {
                 // Only toggle playback if:
                 // 1. Space key pressed
                 // 2. No modifier keys (Ctrl, Shift, Alt, etc.)
                 // 3. Event not captured by a widget (e.g., text input)
-                if modifiers.is_empty() && status != cosmic::iced::event::Status::Captured {
+                if s.as_str() == " "
+                    && modifiers.is_empty()
+                    && status != cosmic::iced::event::Status::Captured
+                {
                     return Some(Message::TogglePlayback);
                 }
             }
@@ -2564,8 +2397,15 @@ impl cosmic::Application for AppModel {
 
                         let uris = selected.uris();
                         if let Some(uri) = uris.first() {
-                            uri.to_file_path()
-                                .map_err(|_| format!("Could not convert URI to path: {uri}"))
+                            let uri_str = uri.as_str();
+                            uri_str
+                                .strip_prefix("file://")
+                                .ok_or_else(|| format!("Not a local file URI: {uri_str}"))
+                                .and_then(|encoded_path| {
+                                    urlencoding::decode(encoded_path)
+                                        .map(|decoded| PathBuf::from(decoded.as_ref()))
+                                        .map_err(|e| format!("Could not decode URI path: {e}"))
+                                })
                         } else {
                             Err("No directory selected".to_string())
                         }
@@ -3242,6 +3082,225 @@ impl cosmic::Application for AppModel {
     }
 }
 
+/// Identity key for the MPD status-poll subscription. Hashing only the
+/// fixed string (not the client) preserves the old fixed-string-id
+/// behavior: a single persistent subscription while active.
+struct MpdPollKey(mpd_client::Client);
+
+impl Hash for MpdPollKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        "mpd-status-poll".hash(state);
+    }
+}
+
+/// MPD: poll status from the server every 300ms.
+///
+/// This replaces the generic tick for MPD playback — we get
+/// position/duration/state/volume from the real MPD status.
+fn mpd_status_stream(key: &MpdPollKey) -> impl Stream<Item = Message> + use<> {
+    let client = key.0.clone();
+    cosmic::iced::stream::channel(1, |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(300));
+        loop {
+            interval.tick().await;
+            match client.command(mpd_client::commands::Status).await {
+                Ok(status) => {
+                    let state = match status.state {
+                        mpd_client::responses::PlayState::Playing => PlaybackState::Playing,
+                        mpd_client::responses::PlayState::Paused => PlaybackState::Paused,
+                        mpd_client::responses::PlayState::Stopped => PlaybackState::Stopped,
+                    };
+                    _ = emitter
+                        .send(Message::MpdStatusUpdate {
+                            position: status.elapsed.unwrap_or(Duration::ZERO),
+                            duration: status.duration.unwrap_or(Duration::ZERO),
+                            state,
+                            volume: status.volume as f32 / 100.0,
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    tracing::warn!("MPD status poll failed: {e}");
+                }
+            }
+        }
+    })
+}
+
+/// Local/Subsonic: simple tick for UI updates (no captured state).
+fn playback_tick_stream() -> impl Stream<Item = Message> {
+    cosmic::iced::stream::channel(1, |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+            _ = emitter.send(Message::PlaybackTick).await;
+        }
+    })
+}
+
+/// Identity key for an MPD idle-event subscription. Hashing only `idx`
+/// (not the provider) preserves the old `("mpd-idle", idx)` identity
+/// semantics.
+struct MpdIdleKey {
+    idx: usize,
+    provider: Arc<MpdProvider>,
+}
+
+impl Hash for MpdIdleKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.idx.hash(state);
+    }
+}
+
+/// MPD idle event subscription — one per configured MPD provider.
+///
+/// Each subscription opens TWO separate TCP connections to the MPD server:
+/// 1. Idle connection — stays in idle mode, streams events via ConnectionEvents
+/// 2. Command connection — stored in MpdProvider for browse/search/playback
+///
+/// This avoids protocol conflicts between idle mode and command execution.
+fn mpd_idle_stream(key: &MpdIdleKey) -> impl Stream<Item = Message> + use<> {
+    let provider = Arc::clone(&key.provider);
+    cosmic::iced::stream::channel(4, move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+        loop {
+            let pid = provider.id().to_string();
+
+            // Step 1: Establish the idle connection
+            // We must keep `_idle_client` alive — dropping it would
+            // close the background task and end the `events` stream.
+            let idle_result = provider.connect_idle().await;
+            let (_idle_client, mut events) = match idle_result {
+                Ok(pair) => pair,
+                Err(e) => {
+                    _ = emitter
+                        .send(Message::MpdConnectionFailed(pid, e.to_string()))
+                        .await;
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+
+            // Step 2: Establish the command connection
+            if let Err(e) = provider.connect_command().await {
+                tracing::error!("MPD provider '{pid}' command connection failed: {e}");
+                _ = emitter
+                    .send(Message::MpdConnectionFailed(pid, e.to_string()))
+                    .await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+
+            // Both connections established
+            _ = emitter.send(Message::MpdConnected(pid.clone())).await;
+
+            // Loop on idle events until the connection drops
+            while let Some(_event) = events.next().await {
+                _ = emitter.send(Message::MpdIdleEvent(pid.clone())).await;
+            }
+
+            // Idle stream ended — connection lost. Disconnect command too.
+            tracing::warn!("MPD provider '{pid}' connection lost, reconnecting...");
+            provider.disconnect().await;
+
+            // Backoff before reconnect
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    })
+}
+
+/// Filesystem watcher subscription — only when the Local provider is active.
+///
+/// Uses notify::RecommendedWatcher to watch music_dirs recursively.
+/// Debounces events with a 2-second quiet timer before emitting
+/// Message::FilesChanged with the collected paths.
+fn fs_watcher_stream(music_dirs: &Vec<PathBuf>) -> impl Stream<Item = Message> + use<> {
+    let music_dirs = music_dirs.clone();
+    cosmic::iced::stream::channel(4, move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+        use notify::{RecursiveMode, Watcher};
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PathBuf>(256);
+
+        // Create watcher that sends changed paths through the channel.
+        // IMPORTANT: Only react to content changes (Create/Modify/Remove),
+        // NOT Access events. Reading files during scanning triggers Access
+        // events which would create an infinite scan loop.
+        let _watcher = {
+            let tx = tx.clone();
+            let mut watcher = match notify::RecommendedWatcher::new(
+                move |result: Result<notify::Event, notify::Error>| {
+                    if let Ok(event) = result {
+                        use notify::EventKind;
+                        match event.kind {
+                            EventKind::Create(_)
+                            | EventKind::Modify(_)
+                            | EventKind::Remove(_) => {
+                                for path in event.paths {
+                                    let _ = tx.blocking_send(path);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                },
+                notify::Config::default(),
+            ) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::error!("Failed to create filesystem watcher: {e}");
+                    // Keep the future alive so the subscription ID is stable.
+                    std::future::pending::<()>().await;
+                    return;
+                }
+            };
+
+            for dir in &music_dirs {
+                if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
+                    tracing::warn!(
+                        "Failed to watch directory {}: {e}",
+                        dir.display()
+                    );
+                }
+            }
+
+            watcher // keep alive
+        };
+
+        // Debounce loop: collect paths, wait for 2s of quiet, then emit.
+        let debounce_duration = Duration::from_secs(2);
+        loop {
+            // Wait for the first event.
+            let first = match rx.recv().await {
+                Some(path) => path,
+                None => break, // channel closed
+            };
+
+            let mut changed_paths = vec![first];
+
+            // Collect more events until 2 seconds of silence.
+            loop {
+                match tokio::time::timeout(debounce_duration, rx.recv()).await {
+                    Ok(Some(path)) => {
+                        changed_paths.push(path);
+                    }
+                    Ok(None) => break, // channel closed
+                    Err(_) => break,   // timeout — debounce complete
+                }
+            }
+
+            // Deduplicate paths.
+            changed_paths.sort();
+            changed_paths.dedup();
+
+            tracing::debug!(
+                "Filesystem watcher: {} changed paths after debounce",
+                changed_paths.len()
+            );
+
+            _ = emitter.send(Message::FilesChanged(changed_paths)).await;
+        }
+    })
+}
+
 impl AppModel {
     /// Rebuild `provider_list` and `active_provider_index` from the registry.
     ///
@@ -3470,7 +3529,7 @@ impl AppModel {
         let subsonic_providers = self.subsonic_providers.clone();
         let active_id = self.registry.active_id().to_string();
 
-        let stream = iced_futures::stream::channel(8, move |mut emitter| async move {
+        let stream = cosmic::iced::stream::channel(8, move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<cosmic::Action<Message>>| async move {
             const BATCH_SIZE: usize = 50;
 
             match provider_type {

@@ -4,13 +4,39 @@
 //!
 //! Passwords for MPD and Subsonic providers are stored in the platform's
 //! native credential store (e.g., GNOME Keyring, KDE Wallet, macOS Keychain)
-//! via the `keyring` crate. Each password is keyed by `(SERVICE, provider_id)`.
+//! via the `keyring-core` crate. Each password is keyed by `(SERVICE, provider_id)`.
+
+use std::sync::Once;
 
 const SERVICE: &str = "io.github.m0rf30.Lyra";
 
+static INIT: Once = Once::new();
+
+/// Select the default credential store, once, before any [`keyring_core::Entry`] is created.
+///
+/// `keyring-core` requires a default credential store to be set globally before
+/// `Entry::new` can succeed; unlike keyring v3, the `keyring` crate no longer does
+/// this automatically. This restores the old keyring v3 behavior of preferring the
+/// Linux kernel keyutils store (`linux-native-sync-persistent`) and falling back to
+/// the D-Bus Secret Service (`sync-secret-service`) when keyutils is unavailable.
+///
+/// Safe to call multiple times (and from multiple threads/functions): the actual
+/// selection only happens on the first call, via [`std::sync::Once`]. If both
+/// backends fail to initialize, no default store is set and subsequent
+/// `Entry::new` calls will error; callers already treat keyring errors as
+/// "keyring unavailable" degraded mode.
+pub fn init() {
+    INIT.call_once(|| {
+        if keyring::use_native_store(false).is_err() {
+            let _ = keyring::use_native_store(true);
+        }
+    });
+}
+
 /// Store a password in the system keyring for the given provider ID.
 pub fn store_password(provider_id: &str, password: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(SERVICE, provider_id)
+    init();
+    let entry = keyring_core::Entry::new(SERVICE, provider_id)
         .map_err(|e| format!("Failed to create keyring entry for '{provider_id}': {e}"))?;
     entry
         .set_password(password)
@@ -21,11 +47,12 @@ pub fn store_password(provider_id: &str, password: &str) -> Result<(), String> {
 ///
 /// Returns `Ok(None)` if no entry exists (rather than treating it as an error).
 pub fn retrieve_password(provider_id: &str) -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new(SERVICE, provider_id)
+    init();
+    let entry = keyring_core::Entry::new(SERVICE, provider_id)
         .map_err(|e| format!("Failed to create keyring entry for '{provider_id}': {e}"))?;
     match entry.get_password() {
         Ok(password) => Ok(Some(password)),
-        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(keyring_core::Error::NoEntry) => Ok(None),
         Err(e) => Err(format!(
             "Failed to retrieve password for '{provider_id}': {e}"
         )),
@@ -36,11 +63,12 @@ pub fn retrieve_password(provider_id: &str) -> Result<Option<String>, String> {
 ///
 /// Silently succeeds if no entry exists.
 pub fn delete_password(provider_id: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(SERVICE, provider_id)
+    init();
+    let entry = keyring_core::Entry::new(SERVICE, provider_id)
         .map_err(|e| format!("Failed to create keyring entry for '{provider_id}': {e}"))?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(keyring_core::Error::NoEntry) => Ok(()),
         Err(e) => Err(format!(
             "Failed to delete password for '{provider_id}': {e}"
         )),
@@ -52,10 +80,11 @@ pub fn delete_password(provider_id: &str) -> Result<(), String> {
 /// Performs a test store/delete cycle with a probe key. Returns `true` if the
 /// keyring is usable, `false` otherwise.
 pub fn is_keyring_available() -> bool {
+    init();
     const PROBE_USER: &str = "__lyra_keyring_probe__";
     const PROBE_PASSWORD: &str = "probe";
 
-    let entry = match keyring::Entry::new(SERVICE, PROBE_USER) {
+    let entry = match keyring_core::Entry::new(SERVICE, PROBE_USER) {
         Ok(e) => e,
         Err(_) => return false,
     };

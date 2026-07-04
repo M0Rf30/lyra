@@ -24,7 +24,7 @@ pub enum GenreMessage {
 pub fn genre_grid_view(genres: &[String]) -> cosmic::Element<'_, GenreMessage> {
     if genres.is_empty() {
         return widget::container(
-            widget::column()
+            widget::Column::new()
                 .push(widget::icon::from_name("audio-x-generic-symbolic").size(64))
                 .push(widget::text::title3("No genres found"))
                 .spacing(12)
@@ -53,7 +53,7 @@ pub fn genre_grid_view(genres: &[String]) -> cosmic::Element<'_, GenreMessage> {
                 .class(cosmic::theme::Container::Card)
                 .into();
 
-            let card = widget::column()
+            let card = widget::Column::new()
                 .push(icon_container)
                 .push(
                     widget::text(truncate_str(genre, 22))
@@ -91,14 +91,14 @@ pub fn genre_detail_view<'a>(
             .size(64)
             .into();
 
-    let header = widget::row()
+    let header = widget::Row::new()
         .push(
             widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
                 .on_press(GenreMessage::BackToGrid),
         )
         .push(detail_icon)
         .push(
-            widget::column()
+            widget::Column::new()
                 .push(widget::text::title1(genre_name))
                 .push(widget::text::caption(format!("{} tracks", tracks.len())))
                 .spacing(4),
@@ -106,11 +106,11 @@ pub fn genre_detail_view<'a>(
         .spacing(16)
         .align_y(Alignment::Center);
 
-    let mut track_list = widget::column().spacing(1);
+    let mut track_list = widget::Column::new().spacing(1);
 
     for (index, track) in tracks.iter().enumerate() {
         let row = widget::button::custom(
-            widget::row()
+            widget::Row::new()
                 .push(widget::text(format!("{}", index + 1)).width(40))
                 .push(widget::text(track.title.as_str()).width(Length::Fill))
                 .push(widget::text(track.artist.as_str()).width(200))
@@ -133,7 +133,7 @@ pub fn genre_detail_view<'a>(
     }
 
     widget::scrollable(
-        widget::column()
+        widget::Column::new()
             .push(header)
             .push(widget::divider::horizontal::default())
             .push(track_list)

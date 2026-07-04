@@ -9,7 +9,7 @@ use super::PlaybackState;
 use super::backend::{PlaybackBackend, PlayerError};
 use super::eq_source::{EqController, EqSource, SharedCoeffs, new_shared_coeffs};
 use crate::library::TrackSource;
-use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source};
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 /// Rodio-based local audio playback backend.
 pub struct LocalBackend {
-    stream: OutputStream,
-    sink: Arc<Mutex<Sink>>,
+    stream: MixerDeviceSink,
+    sink: Arc<Mutex<Player>>,
     state: PlaybackState,
     volume: f32,
     current_duration: Arc<Mutex<Duration>>,
@@ -46,7 +46,7 @@ pub struct LocalBackend {
     /// Crossfade duration in seconds (0 = disabled, use gapless instead).
     crossfade_secs: f32,
     /// The outgoing sink during a crossfade transition (fading out).
-    crossfade_out: Option<Arc<Mutex<Sink>>>,
+    crossfade_out: Option<Arc<Mutex<Player>>>,
     /// Replay gain to apply to the next track (in dB). Set before `play()`.
     replay_gain_db: Option<f32>,
     /// Shared PCM buffer for the visualizer (copies audio samples for projectM).
@@ -57,9 +57,9 @@ pub struct LocalBackend {
 impl LocalBackend {
     /// Create a new local backend with the default audio output.
     pub fn new() -> Result<Self, PlayerError> {
-        let stream = OutputStreamBuilder::open_default_stream()
+        let stream = DeviceSinkBuilder::open_default_sink()
             .map_err(|e| PlayerError(format!("Failed to open audio output: {e}")))?;
-        let sink = Sink::connect_new(stream.mixer());
+        let sink = Player::connect_new(stream.mixer());
         let volume = 0.8;
         sink.set_volume(volume);
 
@@ -136,7 +136,7 @@ impl LocalBackend {
         let outgoing = Arc::clone(&self.sink);
 
         // Create the incoming sink (starts at zero volume, fades in).
-        let new_sink = Sink::connect_new(self.stream.mixer());
+        let new_sink = Player::connect_new(self.stream.mixer());
         new_sink.set_volume(0.0); // Start silent, fade in.
 
         // Reset track boundary flag for the new track.
@@ -189,7 +189,7 @@ impl LocalBackend {
     }
 
     /// Lock the sink mutex.
-    fn lock_sink(&self) -> Result<MutexGuard<'_, Sink>, PlayerError> {
+    fn lock_sink(&self) -> Result<MutexGuard<'_, Player>, PlayerError> {
         self.sink
             .lock()
             .map_err(|e| PlayerError(format!("Audio sink lock poisoned: {e}")))
@@ -224,7 +224,7 @@ impl LocalBackend {
 
         // Create a new sink that starts paused — the background thread
         // will append the decoded source and un-pause.
-        let new_sink = Sink::connect_new(self.stream.mixer());
+        let new_sink = Player::connect_new(self.stream.mixer());
         new_sink.set_volume(self.volume);
         new_sink.pause();
         let sink_arc = Arc::new(Mutex::new(new_sink));
@@ -336,7 +336,7 @@ impl LocalBackend {
 
     /// Common playback start: stop current sink, create new one, append source.
     ///
-    /// Source chain: decoder → EQ → TrackBoundary → TappedSource (visualizer) → Sink.
+    /// Source chain: decoder → EQ → TrackBoundary → TappedSource (visualizer) → Player.
     ///
     /// If crossfade is enabled and audio is currently playing, uses crossfade
     /// transition instead of a hard cut.
@@ -358,7 +358,7 @@ impl LocalBackend {
         sink.stop();
         drop(sink);
 
-        let new_sink = Sink::connect_new(self.stream.mixer());
+        let new_sink = Player::connect_new(self.stream.mixer());
         new_sink.set_volume(self.volume);
 
         // Reset track boundary flag for the new track.
@@ -379,7 +379,7 @@ impl LocalBackend {
     /// Build the source chain (ReplayGain → EQ → TrackBoundary → Tapped) and append to sink.
     ///
     /// Extracted so both `start_source()` and `queue_next()` use the same pipeline.
-    fn append_source_to_sink<S>(&self, sink: &Sink, source: S)
+    fn append_source_to_sink<S>(&self, sink: &Player, source: S)
     where
         S: Source<Item = f32> + Send + 'static,
     {
@@ -584,7 +584,7 @@ impl PlaybackBackend for LocalBackend {
 
 /// A `Source` wrapper that sets a shared flag when the inner source is exhausted.
 ///
-/// Used with a persistent `Sink` to detect when a track ends naturally,
+/// Used with a persistent `Player` to detect when a track ends naturally,
 /// allowing the UI to update metadata and pre-queue the next track for
 /// gapless playback.
 pub struct TrackBoundarySource<S> {
@@ -638,11 +638,11 @@ where
         self.inner.current_span_len()
     }
 
-    fn channels(&self) -> u16 {
+    fn channels(&self) -> std::num::NonZero<u16> {
         self.inner.channels()
     }
 
-    fn sample_rate(&self) -> u32 {
+    fn sample_rate(&self) -> std::num::NonZero<u32> {
         self.inner.sample_rate()
     }
 
@@ -715,11 +715,11 @@ where
         self.inner.current_span_len()
     }
 
-    fn channels(&self) -> u16 {
+    fn channels(&self) -> std::num::NonZero<u16> {
         self.inner.channels()
     }
 
-    fn sample_rate(&self) -> u32 {
+    fn sample_rate(&self) -> std::num::NonZero<u32> {
         self.inner.sample_rate()
     }
 

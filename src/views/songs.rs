@@ -53,7 +53,7 @@ pub fn songs_list_view<'a>(
 
     if tracks.is_empty() {
         return widget::container(
-            widget::column()
+            widget::Column::new()
                 .push(widget::icon::from_name("audio-x-generic-symbolic").size(64))
                 .push(widget::text::title3("No songs found"))
                 .spacing(12)
@@ -67,7 +67,7 @@ pub fn songs_list_view<'a>(
     }
 
     // Filter bar: Favorites toggle + genre filter indicator
-    let mut filter_bar = widget::row().spacing(8).align_y(Alignment::Center);
+    let mut filter_bar = widget::Row::new().spacing(8).align_y(Alignment::Center);
 
     let fav_icon = if favorites_filter {
         "emblem-favorite-symbolic"
@@ -75,7 +75,7 @@ pub fn songs_list_view<'a>(
         "non-starred-symbolic"
     };
     let fav_button = widget::button::custom(
-        widget::row()
+        widget::Row::new()
             .push(widget::icon::from_name(fav_icon).size(16))
             .push(widget::text::body("Favorites"))
             .spacing(4)
@@ -91,7 +91,7 @@ pub fn songs_list_view<'a>(
 
     if let Some(genre) = genre_filter {
         let genre_chip = widget::button::custom(
-            widget::row()
+            widget::Row::new()
                 .push(widget::text::caption(genre))
                 .push(widget::icon::from_name("window-close-symbolic").size(12))
                 .spacing(4)
@@ -106,8 +106,8 @@ pub fn songs_list_view<'a>(
         .push(widget::text::caption(format!("{} tracks", filtered.len())).width(Length::Fill));
 
     // Column headers — the leading 40px column mirrors the track number / play icon column.
-    let header = widget::row()
-        .push(widget::Space::with_width(40))
+    let header = widget::Row::new()
+        .push(widget::Space::new().width(40))
         .push(
             widget::button::custom(widget::text(sort_label(
                 "Title",
@@ -152,7 +152,7 @@ pub fn songs_list_view<'a>(
             .width(64)
             .class(cosmic::theme::Button::Text),
         )
-        .push(widget::Space::with_width(Length::Shrink))
+        .push(widget::Space::new().width(Length::Shrink))
         .spacing(8)
         .align_y(Alignment::Center)
         .padding([4, 8]);
@@ -163,13 +163,13 @@ pub fn songs_list_view<'a>(
         } else {
             "No tracks match the current filter"
         };
-        return widget::column()
+        return widget::Column::new()
             .push(filter_bar)
             .push(header)
             .push(widget::divider::horizontal::default())
             .push(
                 widget::container(
-                    widget::column()
+                    widget::Column::new()
                         .push(widget::icon::from_name("edit-find-symbolic").size(48))
                         .push(widget::text::title3(message))
                         .spacing(12)
@@ -185,7 +185,7 @@ pub fn songs_list_view<'a>(
             .into();
     }
 
-    let mut track_list = widget::column().spacing(2);
+    let mut track_list = widget::Column::new().spacing(2);
 
     for (original_index, track) in &filtered {
         let track_id = track.id.to_string();
@@ -215,7 +215,7 @@ pub fn songs_list_view<'a>(
                 .class(cosmic::theme::Button::Standard)
                 .into()
         } else {
-            widget::Space::with_width(0).into()
+            widget::Space::new().width(0).into()
         };
 
         let playlist_btn: cosmic::Element<'_, SongMessage> = if !playlists.is_empty() {
@@ -227,7 +227,7 @@ pub fn songs_list_view<'a>(
         };
 
         let row = widget::button::custom(
-            widget::row()
+            widget::Row::new()
                 .push(
                     widget::container(num_col)
                         .width(40)
@@ -252,7 +252,7 @@ pub fn songs_list_view<'a>(
         track_list = track_list.push(row);
     }
 
-    widget::column()
+    widget::Column::new()
         .push(filter_bar)
         .push(header)
         .push(widget::divider::horizontal::default())
@@ -270,7 +270,7 @@ pub fn star_rating_widget<'a>(
     current_rating: Option<u8>,
 ) -> cosmic::Element<'a, SongMessage> {
     let rating = current_rating.unwrap_or(0);
-    let mut row = widget::row().spacing(0).align_y(Alignment::Center);
+    let mut row = widget::Row::new().spacing(0).align_y(Alignment::Center);
     for star in 1u8..=5 {
         let icon_name = if star <= rating {
             "starred-symbolic"
