@@ -3,8 +3,11 @@
 //! Playlists view - list of playlists with create/delete/rename actions,
 //! and a detail view showing tracks in a selected playlist.
 
+use crate::fl;
 use crate::library::{Playlist, Track};
 use crate::views::common;
+use crate::views::list_row_button_class;
+use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
@@ -44,18 +47,29 @@ pub fn playlist_list_view<'a>(
     // Create playlist row
     let create_row = widget::Row::new()
         .push(
-            widget::text_input("New playlist name...", new_playlist_name)
-                .on_input(PlaylistMessage::NewPlaylistNameChanged)
-                .width(Length::Fixed(360.0)),
+            widget::container(
+                widget::text_input(fl!("new-playlist-placeholder"), new_playlist_name)
+                    .on_input(PlaylistMessage::NewPlaylistNameChanged)
+                    .on_submit_maybe(if new_playlist_name.is_empty() {
+                        None
+                    } else {
+                        Some(PlaylistMessage::CreatePlaylist)
+                    })
+                    .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .max_width(420.0),
         )
         .push(
-            widget::button::suggested("Create").on_press_maybe(if new_playlist_name.is_empty() {
-                None
-            } else {
-                Some(PlaylistMessage::CreatePlaylist(
-                    new_playlist_name.to_string(),
-                ))
-            }),
+            widget::button::suggested(fl!("create-playlist")).on_press_maybe(
+                if new_playlist_name.is_empty() {
+                    None
+                } else {
+                    Some(PlaylistMessage::CreatePlaylist(
+                        new_playlist_name.to_string(),
+                    ))
+                },
+            ),
         )
         .spacing(8)
         .align_y(Alignment::Center);
@@ -66,8 +80,8 @@ pub fn playlist_list_view<'a>(
     if playlists.is_empty() {
         col = col.push(common::empty_state(
             "playlist-symbolic",
-            "No playlists",
-            "Create a playlist to get started",
+            fl!("no-playlists"),
+            fl!("playlists-empty-hint"),
         ));
 
         return col.into();
@@ -80,17 +94,18 @@ pub fn playlist_list_view<'a>(
         let info = widget::Column::new()
             .push(common::cell_text(playlist.name.as_str()))
             .push(common::cell_caption(format!(
-                "{track_count} track{}  -  {}",
-                if track_count == 1 { "" } else { "s" },
+                "{}  -  {}",
+                playlist_track_count_label(track_count),
                 common::format_duration_coarse(playlist.total_duration.as_secs())
             )))
             .spacing(2);
 
-        let delete_btn = common::icon_button(
-            "edit-delete-symbolic",
-            16,
-            "Delete playlist",
-            PlaylistMessage::DeletePlaylist(index),
+        let delete_btn = widget::tooltip(
+            widget::button::icon(widget::icon::from_name("edit-delete-symbolic").size(16))
+                .class(cosmic::theme::Button::Destructive)
+                .on_press(PlaylistMessage::DeletePlaylist(index)),
+            widget::text::caption(fl!("delete-playlist-tooltip")),
+            widget::tooltip::Position::Top,
         );
 
         let playlist_icon: cosmic::Element<'_, PlaylistMessage> =
@@ -99,7 +114,7 @@ pub fn playlist_list_view<'a>(
         let row = widget::button::custom(
             widget::Row::new()
                 .push(playlist_icon)
-                .push(info.width(Length::Fill))
+                .push(common::clipped_cell(info.into()))
                 .push(delete_btn)
                 .spacing(12)
                 .align_y(Alignment::Center)
@@ -107,7 +122,7 @@ pub fn playlist_list_view<'a>(
         )
         .on_press(PlaylistMessage::SelectPlaylist(index))
         .width(Length::Fill)
-        .class(cosmic::theme::Button::Text);
+        .class(list_row_button_class(false));
 
         list = list.push(row);
     }
@@ -126,48 +141,68 @@ pub fn playlist_detail_view<'a>(
     let detail_icon: cosmic::Element<'_, PlaylistMessage> =
         widget::icon::from_name("playlist-symbolic").size(80).into();
 
+    let can_rename = !edit_name.trim().is_empty() && edit_name != playlist.name.as_str();
     let rename_row = widget::Row::new()
         .push(
-            widget::text_input("Playlist name...", edit_name)
-                .on_input(move |text| PlaylistMessage::RenameInputChanged(playlist_index, text))
-                .width(Length::Fixed(360.0)),
+            widget::container(
+                widget::text_input(fl!("playlist-name-placeholder"), edit_name)
+                    .on_input(move |text| PlaylistMessage::RenameInputChanged(playlist_index, text))
+                    .on_submit_maybe(if can_rename {
+                        Some(move |text: String| {
+                            PlaylistMessage::RenamePlaylist(playlist_index, text)
+                        })
+                    } else {
+                        None
+                    })
+                    .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .max_width(420.0),
         )
-        .push(widget::button::standard("Rename").on_press_maybe(
-            if !edit_name.trim().is_empty() && edit_name != playlist.name.as_str() {
+        .push(
+            widget::button::standard(fl!("rename-playlist")).on_press_maybe(if can_rename {
                 Some(PlaylistMessage::RenamePlaylist(
                     playlist_index,
                     edit_name.to_string(),
                 ))
             } else {
                 None
-            },
-        ))
+            }),
+        )
         .spacing(8)
         .align_y(Alignment::Center);
 
     let track_count = playlist.track_count;
     let header = widget::Row::new()
-        .push(common::icon_button(
-            "go-previous-symbolic",
-            16,
-            "Back to playlists",
-            PlaylistMessage::BackToList,
+        .push(widget::tooltip(
+            widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
+                .on_press(PlaylistMessage::BackToList),
+            widget::text::caption(fl!("back-to-playlists")),
+            widget::tooltip::Position::Top,
         ))
         .push(detail_icon)
         .push(
             widget::Column::new()
-                .push(widget::text::title1(playlist.name.as_str()))
-                .push(common::cell_caption(format!(
-                    "{track_count} track{}  -  {}",
-                    if track_count == 1 { "" } else { "s" },
-                    common::format_duration_coarse(playlist.total_duration.as_secs())
-                )))
+                .push(common::clipped_cell(
+                    widget::text::title1(playlist.name.as_str())
+                        .wrapping(Wrapping::None)
+                        .into(),
+                ))
+                .push(common::clipped_cell(
+                    common::cell_caption(format!(
+                        "{}  -  {}",
+                        playlist_track_count_label(track_count),
+                        common::format_duration_coarse(playlist.total_duration.as_secs())
+                    ))
+                    .into(),
+                ))
                 .push(rename_row)
                 .push(
-                    widget::button::suggested("Play All")
+                    widget::button::suggested(fl!("play-all"))
                         .on_press(PlaylistMessage::PlayPlaylist(playlist_index)),
                 )
-                .spacing(8),
+                .spacing(8)
+                .width(Length::Fill),
         )
         .spacing(16)
         .align_y(Alignment::Center);
@@ -178,24 +213,34 @@ pub fn playlist_detail_view<'a>(
         let remove_btn = widget::tooltip(
             widget::button::icon(widget::icon::from_name("list-remove-symbolic").size(16))
                 .on_press(PlaylistMessage::RemoveTrack(playlist_index, track_idx)),
-            widget::text::caption("Remove from playlist"),
+            widget::text::caption(fl!("remove-from-playlist")),
             widget::tooltip::Position::Top,
         );
+
+        let title_col = widget::container(common::clipped_cell(
+            common::cell_text(track.title.as_str()).into(),
+        ))
+        .width(Length::FillPortion(4));
+        let artist_col = widget::container(common::clipped_cell(
+            common::cell_text(track.artist.as_str()).into(),
+        ))
+        .width(Length::FillPortion(3));
 
         let row = widget::button::custom(
             widget::Row::new()
                 .push(common::cell_text(format!("{}", track_idx + 1)).width(40))
-                .push(common::cell_text(track.title.as_str()).width(Length::FillPortion(4)))
-                .push(common::cell_text(track.artist.as_str()).width(Length::FillPortion(3)))
+                .push(title_col)
+                .push(artist_col)
                 .push(common::duration_cell(track.duration.as_secs()))
                 .push(remove_btn)
                 .spacing(8)
+                .width(Length::Fill)
                 .align_y(Alignment::Center)
                 .padding(4),
         )
         .on_press(PlaylistMessage::PlayTrack(playlist_index, track_idx))
         .width(Length::Fill)
-        .class(cosmic::theme::Button::Text);
+        .class(list_row_button_class(false));
 
         track_list = track_list.push(row);
     }
@@ -203,8 +248,8 @@ pub fn playlist_detail_view<'a>(
     if playlist.tracks.is_empty() {
         track_list = track_list.push(common::empty_state(
             "playlist-symbolic",
-            "This playlist is empty",
-            "Add tracks from the Songs view.",
+            fl!("playlist-empty"),
+            fl!("playlist-empty-hint"),
         ));
     }
 
@@ -218,4 +263,13 @@ pub fn playlist_detail_view<'a>(
     )
     .height(Length::Fill)
     .into()
+}
+
+/// Localized "N tracks" label used in playlist row/header captions.
+fn playlist_track_count_label(count: u32) -> String {
+    if count == 1 {
+        fl!("playlist-track-count-one", count = count.to_string())
+    } else {
+        fl!("playlist-track-count-other", count = count.to_string())
+    }
 }

@@ -15,10 +15,11 @@ static INIT: Once = Once::new();
 /// Select the default credential store, once, before any [`keyring_core::Entry`] is created.
 ///
 /// `keyring-core` requires a default credential store to be set globally before
-/// `Entry::new` can succeed; unlike keyring v3, the `keyring` crate no longer does
-/// this automatically. This restores the old keyring v3 behavior of preferring the
-/// Linux kernel keyutils store (`linux-native-sync-persistent`) and falling back to
-/// the D-Bus Secret Service (`sync-secret-service`) when keyutils is unavailable.
+/// `Entry::new` can succeed. The `keyring` facade crate only wires up the D-Bus
+/// secret service backend on Linux, so we build the store stack ourselves here,
+/// preferring the Linux kernel keyutils store and falling back to the D-Bus
+/// secret service when keyutils is unavailable. This restores the old keyring v3
+/// default behavior.
 ///
 /// Safe to call multiple times (and from multiple threads/functions): the actual
 /// selection only happens on the first call, via [`std::sync::Once`]. If both
@@ -27,8 +28,14 @@ static INIT: Once = Once::new();
 /// "keyring unavailable" degraded mode.
 pub fn init() {
     INIT.call_once(|| {
-        if keyring::use_native_store(false).is_err() {
-            let _ = keyring::use_native_store(true);
+        let store = linux_keyutils_keyring_store::Store::new()
+            .map(|store| store as std::sync::Arc<keyring_core::api::CredentialStore>)
+            .or_else(|_| {
+                zbus_secret_service_keyring_store::Store::new()
+                    .map(|store| store as std::sync::Arc<keyring_core::api::CredentialStore>)
+            });
+        if let Ok(store) = store {
+            keyring_core::set_default_store(store);
         }
     });
 }

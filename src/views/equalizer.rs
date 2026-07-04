@@ -8,6 +8,7 @@
 
 use crate::autoeq::AutoEQProfileMetadata;
 use crate::player::equalizer::{BAND_LABELS, EqPresetData, PresetSource};
+use crate::views::list_row_button_class;
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
@@ -160,7 +161,7 @@ pub fn equalizer_view<'a>(
                 let row = widget::button::custom(widget::container(row_content).padding([4, 8]))
                     .on_press(EqualizerMessage::SelectAutoEQ(path))
                     .width(Length::Fill)
-                    .class(cosmic::theme::Button::Text);
+                    .class(list_row_button_class(false));
 
                 result_list = result_list.push(row);
             }

@@ -22,10 +22,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Render resolution for the visualizer.
-/// Kept moderate to limit GPU→CPU readback cost and texture upload overhead.
-const RENDER_WIDTH: usize = 640;
-const RENDER_HEIGHT: usize = 360;
+/// Render resolution for the visualizer (16:9).
+/// Balanced for crispness when scaled to fullscreen vs. GPU→CPU readback cost
+/// and texture upload overhead at 30fps.
+const RENDER_WIDTH: usize = 960;
+const RENDER_HEIGHT: usize = 540;
 
 /// The offscreen projectM renderer.
 ///

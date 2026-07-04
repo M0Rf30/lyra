@@ -15,8 +15,8 @@ use crate::views::{
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::{Alignment, Length, Subscription};
-use cosmic::widget::{self, about::About, icon, menu, nav_bar};
 use cosmic::prelude::*;
+use cosmic::widget::{self, about::About, icon, menu, nav_bar};
 use futures_util::{SinkExt, Stream, StreamExt};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -28,6 +28,10 @@ const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 const APP_ICON: &[u8] =
     include_bytes!("../resources/icons/hicolor/scalable/apps/io.github.m0rf30.Lyra.svg");
 
+/// Widget id for the header library-search input, used to programmatically
+/// focus it when the search bar is activated.
+const SEARCH_INPUT_ID: &str = "lyra-library-search";
+
 /// Main application model.
 pub struct AppModel {
     core: cosmic::Core,
@@ -38,6 +42,10 @@ pub struct AppModel {
     /// Cached cosmic-config context to avoid repeated D-Bus watcher creation attempts.
     config_context: Option<cosmic_config::Config>,
     context_page: ContextPage,
+
+    // Notifications
+    /// Toast notifications (e.g. provider connection failures).
+    toasts: widget::toaster::Toasts<Message>,
 
     // Providers
     registry: ProviderRegistry,
@@ -53,6 +61,30 @@ pub struct AppModel {
     all_albums: Vec<Album>,
     all_artists: Vec<Artist>,
     library_scanning: bool,
+
+    // Library search (header search bar)
+    /// Current search query (case-insensitive substring match against the
+    /// active page's fields).
+    library_search: String,
+    /// Whether the header search input is visible/active.
+    search_active: bool,
+    /// Albums matching `library_search`; cached in the model (not built
+    /// fresh inside `view()`) because view functions borrow `&'a [T]`
+    /// slices that must live as long as `&self` — a `Vec` built locally
+    /// inside `view()` would not satisfy that lifetime.
+    filtered_albums: Vec<Album>,
+    /// Maps `filtered_albums[i]` back to its index in `all_albums`, so
+    /// index-carrying view messages (select/play) resolve against the
+    /// real, unfiltered data.
+    filtered_album_map: Vec<usize>,
+    filtered_artists: Vec<Artist>,
+    filtered_artist_map: Vec<usize>,
+    filtered_tracks: Vec<Track>,
+    filtered_track_map: Vec<usize>,
+    filtered_playlists: Vec<crate::library::Playlist>,
+    filtered_playlist_map: Vec<usize>,
+    filtered_genres: Vec<String>,
+    filtered_genre_map: Vec<usize>,
 
     // Player
     player: Option<Player>,
@@ -85,6 +117,9 @@ pub struct AppModel {
     selected_playlist: Option<usize>,
     /// Text input for new playlist name.
     new_playlist_name: String,
+    /// Live-edited text for the rename field in `playlist_detail_view`,
+    /// seeded from the playlist's current name when its detail view opens.
+    rename_playlist_input: String,
     /// All distinct genres from the active provider.
     all_genres: Vec<String>,
     /// Currently selected genre index (for detail view).
@@ -149,6 +184,10 @@ pub struct AppModel {
     /// Whether the visualizer is currently fullscreen.
     #[cfg(feature = "visualizer")]
     viz_fullscreen: bool,
+    /// Nav-bar active state saved when entering visualizer fullscreen, so it
+    /// can be restored on exit (the user may have collapsed it beforehand).
+    #[cfg(feature = "visualizer")]
+    viz_prev_nav_active: bool,
     /// Shared frame buffer for the shader-based visualizer widget.
     /// The render subscription writes RGBA pixels here; the Shader widget
     /// reads them in its `prepare()` method via `queue.write_texture()`.
@@ -174,6 +213,14 @@ pub enum Message {
     /// Tracks text input focus state for keyboard shortcuts.
     /// When true, text input has focus; when false, input lost focus.
     TextInputFocused(bool),
+
+    // Library search
+    /// The library search query changed (live filter as you type).
+    LibrarySearchChanged(String),
+    /// Toggle the header search input on/off.
+    ToggleLibrarySearch,
+    /// Clear the search query and deactivate the search input (Esc / clear icon).
+    ClearLibrarySearch,
     // Library
     ScanLibrary,
     LibraryScanComplete(usize),
@@ -396,6 +443,10 @@ pub enum Message {
     #[cfg(feature = "visualizer")]
     ToggleVisualizerFullscreen,
 
+    // Notifications
+    /// A toast notification was dismissed (by timeout or user action).
+    CloseToast(widget::toaster::ToastId),
+
     // Application lifecycle
     Quit,
 }
@@ -452,7 +503,7 @@ impl cosmic::Application for AppModel {
         nav.insert()
             .text(fl!("albums"))
             .data::<Page>(Page::Albums)
-            .icon(icon::from_name("media-optical-cd-audio-symbolic"))
+            .icon(icon::from_name("media-optical-symbolic"))
             .activate();
 
         nav.insert()
@@ -473,7 +524,7 @@ impl cosmic::Application for AppModel {
         nav.insert()
             .text(fl!("genres"))
             .data::<Page>(Page::Genres)
-            .icon(icon::from_name("audio-x-generic-symbolic"));
+            .icon(icon::from_name("folder-music-symbolic"));
 
         let about = About::default()
             .name(fl!("app-title"))
@@ -636,6 +687,7 @@ impl cosmic::Application for AppModel {
 
         // Initialize Subsonic providers from config.
         let mut subsonic_providers = Vec::new();
+        let mut subsonic_init_errors: Vec<(String, String)> = Vec::new();
         for entry in &config.subsonic_servers {
             let subsonic_config: SubsonicConfig = entry.clone().into();
             match SubsonicProvider::new(subsonic_config, rt_handle.clone()) {
@@ -646,6 +698,7 @@ impl cosmic::Application for AppModel {
                 }
                 Err(e) => {
                     tracing::error!("Failed to create Subsonic provider '{}': {e}", entry.name);
+                    subsonic_init_errors.push((entry.name.clone(), e.to_string()));
                 }
             }
         }
@@ -692,11 +745,12 @@ impl cosmic::Application for AppModel {
         let mut app = AppModel {
             core,
             nav,
-            key_binds: HashMap::new(),
+            key_binds: key_binds(),
             about,
             config,
             config_context: config_context.clone(),
             context_page: ContextPage::default(),
+            toasts: widget::toaster::Toasts::new(Message::CloseToast),
             registry,
             mpd_providers,
             provider_list: Vec::new(),
@@ -705,6 +759,19 @@ impl cosmic::Application for AppModel {
             all_albums: Vec::new(),
             all_artists: Vec::new(),
             library_scanning: false,
+
+            library_search: String::new(),
+            search_active: false,
+            filtered_albums: Vec::new(),
+            filtered_album_map: Vec::new(),
+            filtered_artists: Vec::new(),
+            filtered_artist_map: Vec::new(),
+            filtered_tracks: Vec::new(),
+            filtered_track_map: Vec::new(),
+            filtered_playlists: Vec::new(),
+            filtered_playlist_map: Vec::new(),
+            filtered_genres: Vec::new(),
+            filtered_genre_map: Vec::new(),
             player,
             playback_position: Duration::ZERO,
             current_track: None,
@@ -720,6 +787,7 @@ impl cosmic::Application for AppModel {
             playlists: Vec::new(),
             selected_playlist: None,
             new_playlist_name: String::new(),
+            rename_playlist_input: String::new(),
             all_genres: Vec::new(),
             selected_genre: None,
             genre_tracks: Vec::new(),
@@ -762,6 +830,8 @@ impl cosmic::Application for AppModel {
             #[cfg(feature = "visualizer")]
             viz_fullscreen: false,
             #[cfg(feature = "visualizer")]
+            viz_prev_nav_active: true,
+            #[cfg(feature = "visualizer")]
             viz_frame_buf: {
                 let (w, h) = crate::views::now_playing::visualizer::ProjectMRenderer::resolution();
                 Arc::new(Mutex::new(
@@ -787,7 +857,17 @@ impl cosmic::Application for AppModel {
         // Trigger initial library scan
         let scan_cmd = cosmic::task::message(cosmic::Action::App(Message::ScanLibrary));
 
-        (app, Task::batch([title_cmd, scan_cmd]))
+        // Surface any provider construction failures collected above as toasts.
+        let mut init_tasks = vec![title_cmd, scan_cmd];
+        for (name, reason) in subsonic_init_errors {
+            init_tasks.push(app.push_toast(widget::toaster::Toast::new(fl!(
+                "toast-provider-connect-failed",
+                provider = name,
+                reason = reason
+            ))));
+        }
+
+        (app, Task::batch(init_tasks))
     }
 
     /// Header bar start: menu bar.
@@ -810,6 +890,8 @@ impl cosmic::Application for AppModel {
                 menu::items(
                     &self.key_binds,
                     vec![
+                        menu::Item::Button(fl!("search"), None, MenuAction::Search),
+                        menu::Item::Divider,
                         menu::Item::Button(fl!("equalizer"), None, MenuAction::Equalizer),
                         menu::Item::Button(fl!("providers"), None, MenuAction::Providers),
                         menu::Item::Divider,
@@ -822,30 +904,50 @@ impl cosmic::Application for AppModel {
         vec![menu_bar.into()]
     }
 
-    /// Header bar center: empty (playback controls are in the bottom bar).
+    /// Header bar center: library search input, shown when search is
+    /// active (playback controls are in the bottom bar).
     fn header_center(&self) -> Vec<Element<'_, Self::Message>> {
-        vec![]
-    }
-
-    /// Header bar end: provider selector (shown when multiple providers are configured).
-    fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
-        if self.provider_list.len() <= 1 {
+        if !self.search_active {
             return vec![];
         }
 
-        let provider_names: Vec<String> = self
-            .provider_list
-            .iter()
-            .map(|(_, name)| name.clone())
-            .collect();
+        let input = widget::search_input(fl!("search-library"), &self.library_search)
+            .id(widget::Id::new(SEARCH_INPUT_ID))
+            .on_input(Message::LibrarySearchChanged)
+            .on_clear(Message::ClearLibrarySearch)
+            .width(Length::Fixed(320.0));
 
-        let dropdown = widget::dropdown(
-            provider_names,
-            self.active_provider_index,
-            Message::SwitchProvider,
-        );
+        vec![input.into()]
+    }
 
-        vec![dropdown.into()]
+    /// Header bar end: library search toggle, plus the provider selector
+    /// (shown when multiple providers are configured).
+    fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
+        let mut elements: Vec<Element<'_, Self::Message>> = vec![
+            widget::button::icon(icon::from_name("edit-find-symbolic"))
+                .selected(self.search_active)
+                .tooltip(fl!("search"))
+                .on_press(Message::ToggleLibrarySearch)
+                .into(),
+        ];
+
+        if self.provider_list.len() > 1 {
+            let provider_names: Vec<String> = self
+                .provider_list
+                .iter()
+                .map(|(_, name)| name.clone())
+                .collect();
+
+            let dropdown = widget::dropdown(
+                provider_names,
+                self.active_provider_index,
+                Message::SwitchProvider,
+            );
+
+            elements.push(dropdown.into());
+        }
+
+        elements
     }
 
     fn nav_model(&self) -> Option<&nav_bar::Model> {
@@ -1015,6 +1117,8 @@ impl cosmic::Application for AppModel {
             .cloned()
             .unwrap_or(Page::Albums);
 
+        let search_query_active = self.search_active && !self.library_search.trim().is_empty();
+
         let content: Element<'_, Self::Message> = match page {
             Page::Albums => {
                 if let Some(album_idx) = self.selected_album {
@@ -1031,7 +1135,26 @@ impl cosmic::Application for AppModel {
                         widget::text("Album not found").into()
                     }
                 } else {
-                    albums::album_grid_view(&self.all_albums, &self.cover_images).map(Message::from)
+                    let (albums_data, album_map): (&[Album], Option<&[usize]>) =
+                        if search_query_active {
+                            (
+                                &self.filtered_albums,
+                                Some(self.filtered_album_map.as_slice()),
+                            )
+                        } else {
+                            (&self.all_albums, None)
+                        };
+                    albums::album_grid_view(albums_data, &self.cover_images).map(move |msg| {
+                        Message::from(match msg {
+                            albums::AlbumMessage::SelectAlbum(i) => {
+                                albums::AlbumMessage::SelectAlbum(unfilter_index(album_map, i))
+                            }
+                            albums::AlbumMessage::PlayAlbum(i) => {
+                                albums::AlbumMessage::PlayAlbum(unfilter_index(album_map, i))
+                            }
+                            other => other,
+                        })
+                    })
                 }
             }
 
@@ -1050,74 +1173,89 @@ impl cosmic::Application for AppModel {
                         widget::text("Artist not found").into()
                     }
                 } else {
-                    artists::artist_list_view(&self.all_artists, &self.artist_avatars)
-                        .map(Message::from)
+                    let (artists_data, artist_map): (&[Artist], Option<&[usize]>) =
+                        if search_query_active {
+                            (
+                                &self.filtered_artists,
+                                Some(self.filtered_artist_map.as_slice()),
+                            )
+                        } else {
+                            (&self.all_artists, None)
+                        };
+                    artists::artist_list_view(artists_data, &self.artist_avatars).map(move |msg| {
+                        Message::from(match msg {
+                            artists::ArtistMessage::SelectArtist(i) => {
+                                artists::ArtistMessage::SelectArtist(unfilter_index(artist_map, i))
+                            }
+                            artists::ArtistMessage::PlayArtistAlbum(ai, ali) => {
+                                artists::ArtistMessage::PlayArtistAlbum(
+                                    unfilter_index(artist_map, ai),
+                                    ali,
+                                )
+                            }
+                            artists::ArtistMessage::PlayTrack(ai, ali, ti) => {
+                                artists::ArtistMessage::PlayTrack(
+                                    unfilter_index(artist_map, ai),
+                                    ali,
+                                    ti,
+                                )
+                            }
+                            other => other,
+                        })
+                    })
                 }
             }
 
-            Page::Songs => songs::songs_list_view(
-                &self.all_tracks,
-                self.songs_sort,
-                self.songs_sort_descending,
-                self.favorites_filter,
-                self.genre_filter.as_deref(),
-                &self.playlists,
-                self.current_track.as_ref().map(|t| t.id),
-            )
-            .map(|msg| match msg {
-                songs::SongMessage::PlayTrack(i) => Message::PlayTrackIndex(i),
-                songs::SongMessage::SortBy(f) => Message::SortSongs(f),
-                songs::SongMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
-                songs::SongMessage::SetRating(id, r) => Message::SetRating(id, r),
-                songs::SongMessage::AddToPlaylist(uri, pid) => Message::AddToPlaylist(uri, pid),
-                songs::SongMessage::ToggleFavoritesFilter => Message::ToggleFavoritesFilter,
-                songs::SongMessage::FilterByGenre(g) => Message::FilterByGenre(g),
-                songs::SongMessage::ClearGenreFilter => Message::FilterByGenre(String::new()),
-            }),
+            Page::Songs => {
+                let (tracks_data, track_map): (&[Track], Option<&[usize]>) = if search_query_active
+                {
+                    (
+                        &self.filtered_tracks,
+                        Some(self.filtered_track_map.as_slice()),
+                    )
+                } else {
+                    (&self.all_tracks, None)
+                };
+                songs::songs_list_view(
+                    tracks_data,
+                    self.songs_sort,
+                    self.songs_sort_descending,
+                    self.favorites_filter,
+                    self.genre_filter.as_deref(),
+                    &self.playlists,
+                    self.current_track.as_ref().map(|t| t.id),
+                )
+                .map(move |msg| match msg {
+                    songs::SongMessage::PlayTrack(i) => {
+                        Message::PlayTrackIndex(unfilter_index(track_map, i))
+                    }
+                    songs::SongMessage::SortBy(f) => Message::SortSongs(f),
+                    songs::SongMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
+                    songs::SongMessage::SetRating(id, r) => Message::SetRating(id, r),
+                    songs::SongMessage::AddToPlaylist(uri, pid) => Message::AddToPlaylist(uri, pid),
+                    songs::SongMessage::ToggleFavoritesFilter => Message::ToggleFavoritesFilter,
+                    songs::SongMessage::FilterByGenre(g) => Message::FilterByGenre(g),
+                    songs::SongMessage::ClearGenreFilter => Message::FilterByGenre(String::new()),
+                })
+            }
 
             Page::Playlists => {
                 if let Some(pl_idx) = self.selected_playlist {
                     if let Some(playlist) = self.playlists.get(pl_idx) {
-                        playlists::playlist_detail_view(playlist, pl_idx, &playlist.name).map(
-                            |msg| match msg {
-                                playlists::PlaylistMessage::BackToList => {
-                                    Message::BackToPlaylistList
-                                }
-                                playlists::PlaylistMessage::PlayPlaylist(i) => {
-                                    Message::PlayPlaylist(i)
-                                }
-                                playlists::PlaylistMessage::PlayTrack(pi, ti) => {
-                                    Message::PlayPlaylistTrack(pi, ti)
-                                }
-                                playlists::PlaylistMessage::RemoveTrack(pi, ti) => {
-                                    Message::RemovePlaylistTrack(pi, ti)
-                                }
-                                playlists::PlaylistMessage::SelectPlaylist(i) => {
-                                    Message::SelectPlaylist(i)
-                                }
-                                playlists::PlaylistMessage::CreatePlaylist(n) => {
-                                    Message::CreatePlaylist(n)
-                                }
-                                playlists::PlaylistMessage::DeletePlaylist(i) => {
-                                    Message::DeletePlaylist(i)
-                                }
-                                playlists::PlaylistMessage::RenamePlaylist(i, n) => {
-                                    Message::RenamePlaylist(i, n)
-                                }
-                                playlists::PlaylistMessage::NewPlaylistNameChanged(n) => {
-                                    Message::NewPlaylistNameChanged(n)
-                                }
-                                playlists::PlaylistMessage::RenameInputChanged(i, n) => {
-                                    Message::RenamePlaylistInput(i, n)
-                                }
-                            },
+                        playlists::playlist_detail_view(
+                            playlist,
+                            pl_idx,
+                            &self.rename_playlist_input,
                         )
-                    } else {
-                        widget::text("Playlist not found").into()
-                    }
-                } else {
-                    playlists::playlist_list_view(&self.playlists, &self.new_playlist_name).map(
-                        |msg| match msg {
+                        .map(|msg| match msg {
+                            playlists::PlaylistMessage::BackToList => Message::BackToPlaylistList,
+                            playlists::PlaylistMessage::PlayPlaylist(i) => Message::PlayPlaylist(i),
+                            playlists::PlaylistMessage::PlayTrack(pi, ti) => {
+                                Message::PlayPlaylistTrack(pi, ti)
+                            }
+                            playlists::PlaylistMessage::RemoveTrack(pi, ti) => {
+                                Message::RemovePlaylistTrack(pi, ti)
+                            }
                             playlists::PlaylistMessage::SelectPlaylist(i) => {
                                 Message::SelectPlaylist(i)
                             }
@@ -1136,13 +1274,51 @@ impl cosmic::Application for AppModel {
                             playlists::PlaylistMessage::RenameInputChanged(i, n) => {
                                 Message::RenamePlaylistInput(i, n)
                             }
+                        })
+                    } else {
+                        widget::text("Playlist not found").into()
+                    }
+                } else {
+                    let (playlists_data, playlist_map): (
+                        &[crate::library::Playlist],
+                        Option<&[usize]>,
+                    ) = if search_query_active {
+                        (
+                            &self.filtered_playlists,
+                            Some(self.filtered_playlist_map.as_slice()),
+                        )
+                    } else {
+                        (&self.playlists, None)
+                    };
+                    playlists::playlist_list_view(playlists_data, &self.new_playlist_name).map(
+                        move |msg| match msg {
+                            playlists::PlaylistMessage::SelectPlaylist(i) => {
+                                Message::SelectPlaylist(unfilter_index(playlist_map, i))
+                            }
+                            playlists::PlaylistMessage::CreatePlaylist(n) => {
+                                Message::CreatePlaylist(n)
+                            }
+                            playlists::PlaylistMessage::DeletePlaylist(i) => {
+                                Message::DeletePlaylist(unfilter_index(playlist_map, i))
+                            }
+                            playlists::PlaylistMessage::RenamePlaylist(i, n) => {
+                                Message::RenamePlaylist(unfilter_index(playlist_map, i), n)
+                            }
+                            playlists::PlaylistMessage::NewPlaylistNameChanged(n) => {
+                                Message::NewPlaylistNameChanged(n)
+                            }
+                            playlists::PlaylistMessage::RenameInputChanged(i, n) => {
+                                Message::RenamePlaylistInput(unfilter_index(playlist_map, i), n)
+                            }
                             playlists::PlaylistMessage::BackToList => Message::BackToPlaylistList,
-                            playlists::PlaylistMessage::PlayPlaylist(i) => Message::PlayPlaylist(i),
+                            playlists::PlaylistMessage::PlayPlaylist(i) => {
+                                Message::PlayPlaylist(unfilter_index(playlist_map, i))
+                            }
                             playlists::PlaylistMessage::PlayTrack(pi, ti) => {
-                                Message::PlayPlaylistTrack(pi, ti)
+                                Message::PlayPlaylistTrack(unfilter_index(playlist_map, pi), ti)
                             }
                             playlists::PlaylistMessage::RemoveTrack(pi, ti) => {
-                                Message::RemovePlaylistTrack(pi, ti)
+                                Message::RemovePlaylistTrack(unfilter_index(playlist_map, pi), ti)
                             }
                         },
                     )
@@ -1163,8 +1339,19 @@ impl cosmic::Application for AppModel {
                         widget::text("Genre not found").into()
                     }
                 } else {
-                    genres::genre_grid_view(&self.all_genres).map(|msg| match msg {
-                        genres::GenreMessage::SelectGenre(i) => Message::SelectGenre(i),
+                    let (genres_data, genre_map): (&[String], Option<&[usize]>) =
+                        if search_query_active {
+                            (
+                                &self.filtered_genres,
+                                Some(self.filtered_genre_map.as_slice()),
+                            )
+                        } else {
+                            (&self.all_genres, None)
+                        };
+                    genres::genre_grid_view(genres_data).map(move |msg| match msg {
+                        genres::GenreMessage::SelectGenre(i) => {
+                            Message::SelectGenre(unfilter_index(genre_map, i))
+                        }
                         genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
                         genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
                     })
@@ -1260,6 +1447,8 @@ impl cosmic::Application for AppModel {
                 Arc::clone(&self.viz_frame_buf),
                 #[cfg(feature = "visualizer")]
                 self.viz_metadata_opacity,
+                #[cfg(feature = "visualizer")]
+                self.viz_fullscreen,
             )
             .map(map_now_playing_msg);
 
@@ -1295,11 +1484,12 @@ impl cosmic::Application for AppModel {
         // inherit the correct foreground regardless of maximize state or
         // compositor behavior (which may otherwise paint a transparent/white
         // surface behind the content area).
-        widget::container(layout)
+        let background = widget::container(layout)
             .width(Length::Fill)
             .height(Length::Fill)
-            .class(cosmic::theme::Container::WindowBackground)
-            .into()
+            .class(cosmic::theme::Container::WindowBackground);
+
+        widget::toaster(&self.toasts, background)
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
@@ -1330,7 +1520,10 @@ impl cosmic::Application for AppModel {
                     && let Some(mpd) = player.mpd_backend_ref()
                 {
                     let client = mpd.client();
-                    subs.push(Subscription::run_with(MpdPollKey(client), mpd_status_stream));
+                    subs.push(Subscription::run_with(
+                        MpdPollKey(client),
+                        mpd_status_stream,
+                    ));
                 }
             } else {
                 // Local/Subsonic: simple tick for UI updates.
@@ -1380,75 +1573,13 @@ impl cosmic::Application for AppModel {
             let pcm = Arc::clone(pcm_buf);
             let preset_signal = Arc::clone(&self.next_preset_signal);
             let frame_buf = Arc::clone(&self.viz_frame_buf);
-            subs.push(Subscription::run_with_id(
-                "projectm-render",
-                iced_futures::stream::channel(2, move |mut emitter| async move {
-                    // Use a one-shot channel to know when the render thread
-                    // has produced a new frame so we can notify the UI.
-                    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<()>(2);
-
-                    // Spawn a dedicated OS thread for the GL render loop.
-                    // The EGL context created inside `ProjectMRenderer::new`
-                    // stays current for the lifetime of this thread.
-                    std::thread::Builder::new()
-                        .name("projectm-render".into())
-                        .spawn(move || {
-                            let preset_dir =
-                                dirs::data_dir().map(|d| d.join("projectm").join("presets"));
-                            let mut renderer =
-                                match crate::views::now_playing::visualizer::ProjectMRenderer::new(
-                                    preset_dir,
-                                ) {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        tracing::error!("Failed to create projectM renderer: {e}");
-                                        return;
-                                    }
-                                };
-
-                            loop {
-                                // ~30 fps
-                                std::thread::sleep(Duration::from_millis(33));
-
-                                // Check if a preset change was requested
-                                if preset_signal.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                                    renderer.next_preset();
-                                }
-
-                                // Read PCM from shared buffer
-                                let pcm_data = pcm
-                                    .lock()
-                                    .ok()
-                                    .map(|buf| buf.read_recent(2048))
-                                    .unwrap_or_default();
-
-                                // Render a frame (GL calls, ~3-5ms)
-                                let rgba = renderer.render_frame(&pcm_data);
-
-                                // Write pixels into the shared frame buffer
-                                if let Ok(mut buf) = frame_buf.lock() {
-                                    buf.update(rgba);
-                                }
-
-                                // Notify the async side that a frame is ready.
-                                // If the channel is full or closed, the render
-                                // thread is ahead of the UI — just skip.
-                                if frame_tx.try_send(()).is_err() {
-                                    // Channel closed → subscription was dropped
-                                    // (visualizer deactivated or view collapsed).
-                                    if frame_tx.is_closed() {
-                                        break;
-                                    }
-                                }
-                            }
-                        })
-                        .expect("failed to spawn projectm-render thread");
-
-                    // Relay frame-ready signals from the render thread to iced.
-                    while frame_rx.recv().await.is_some() {
-                        _ = emitter.send(Message::VisualizerFrameReady).await;
-                    }
-                }),
+            subs.push(Subscription::run_with(
+                VizRenderKey {
+                    pcm,
+                    preset_signal,
+                    frame_buf,
+                },
+                projectm_render_stream,
             ));
         }
 
@@ -1512,6 +1643,52 @@ impl cosmic::Application for AppModel {
             None
         }));
 
+        // Global key bindings (e.g. Ctrl+F to toggle library search).
+        // `listen_with` requires a non-capturing `fn` pointer, so this
+        // rebuilds the (tiny) key_binds map on each event rather than
+        // capturing `self.key_binds` — both are sourced from the same
+        // `key_binds()` function, so the menu's displayed shortcut and
+        // this runtime check never drift apart.
+        subs.push(cosmic::iced::event::listen_with(|event, status, _id| {
+            if status == cosmic::iced::event::Status::Captured {
+                return None;
+            }
+            if let cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
+                key,
+                physical_key,
+                modifiers,
+                ..
+            }) = &event
+            {
+                for (bind, action) in &key_binds() {
+                    if bind.matches(*modifiers, key, Some(physical_key)) {
+                        return Some(menu::action::MenuAction::message(action));
+                    }
+                }
+            }
+            None
+        }));
+
+        // Escape closes the library search (in addition to collapsing the
+        // expanded now-playing view, handled above).
+        if self.search_active {
+            subs.push(cosmic::iced::event::listen_with(|event, _status, _id| {
+                if let cosmic::iced::Event::Keyboard(
+                    cosmic::iced::keyboard::Event::KeyPressed {
+                        key: cosmic::iced::keyboard::Key::Named(
+                            cosmic::iced::keyboard::key::Named::Escape,
+                        ),
+                        ..
+                    },
+                ) = event
+                {
+                    Some(Message::ClearLibrarySearch)
+                } else {
+                    None
+                }
+            }));
+        }
+
         Subscription::batch(subs)
     }
 
@@ -1532,6 +1709,32 @@ impl cosmic::Application for AppModel {
 
             Message::TextInputFocused(focused) => {
                 self.text_input_focused = focused;
+            }
+
+            // -- Library search --
+            Message::LibrarySearchChanged(query) => {
+                self.library_search = query;
+                self.refresh_search_filter();
+            }
+
+            Message::ToggleLibrarySearch => {
+                self.search_active = !self.search_active;
+                if self.search_active {
+                    return cosmic::widget::text_input::focus(widget::Id::new(SEARCH_INPUT_ID))
+                        .map(cosmic::Action::App);
+                }
+                self.library_search.clear();
+                self.refresh_search_filter();
+            }
+
+            Message::ClearLibrarySearch => {
+                self.library_search.clear();
+                self.search_active = false;
+                self.refresh_search_filter();
+            }
+
+            Message::CloseToast(id) => {
+                self.toasts.remove(id);
             }
 
             // -- Library --
@@ -1594,6 +1797,7 @@ impl cosmic::Application for AppModel {
                 self.cover_images = cover_images;
                 self.artist_avatars = artist_avatars;
                 self.cover_art_bytes = cover_art_bytes;
+                self.refresh_search_filter();
                 // Re-trigger blur now that cover art bytes are available
                 let blur_task = self.maybe_update_blurred_cover();
                 return blur_task;
@@ -1618,6 +1822,7 @@ impl cosmic::Application for AppModel {
 
                 // Incrementally merge only the new batch into artists
                 self.merge_artists_from_batch(&albums);
+                self.refresh_search_filter();
 
                 // Re-trigger blur in case the current track's cover just arrived
                 let blur_task = self.maybe_update_blurred_cover();
@@ -1630,6 +1835,7 @@ impl cosmic::Application for AppModel {
                 self.all_tracks.sort_by(|a, b| a.title.cmp(&b.title));
                 self.all_albums.sort_by(|a, b| a.name.cmp(&b.name));
                 self.all_artists.sort_by(|a, b| a.name.cmp(&b.name));
+                self.refresh_search_filter();
                 tracing::info!(
                     "Library load complete: {} albums, {} tracks, {} artists",
                     self.all_albums.len(),
@@ -1991,6 +2197,7 @@ impl cosmic::Application for AppModel {
             Message::SortSongs(field) => {
                 self.songs_sort = field;
                 self.sort_tracks(field);
+                self.refresh_search_filter();
             }
 
             Message::ToggleFavoritesFilter => {
@@ -2620,14 +2827,38 @@ impl cosmic::Application for AppModel {
             Message::MpdConnectionFailed(provider_id, error) => {
                 tracing::error!("MPD provider '{provider_id}' failed to connect: {error}");
 
-                // Update connection status for the matching provider card.
+                // Update connection status for the matching provider card, and
+                // surface a toast only on the transition into this failure
+                // state — the idle/command reconnect loop retries every 5s
+                // and would otherwise spam a toast on every retry.
+                let new_status = format!("{}: {error}", fl!("connection-failed"));
                 if let Some(idx) = self
                     .mpd_edit_states
                     .iter()
                     .position(|s| s.id == provider_id)
-                    && let Some(s) = self.mpd_connection_status.get_mut(idx)
                 {
-                    *s = Some(format!("{}: {error}", fl!("connection-failed")));
+                    let already_failed = self
+                        .mpd_connection_status
+                        .get(idx)
+                        .is_some_and(|s| s.as_deref() == Some(new_status.as_str()));
+
+                    if let Some(s) = self.mpd_connection_status.get_mut(idx) {
+                        *s = Some(new_status);
+                    }
+
+                    if !already_failed {
+                        let provider_name = self
+                            .mpd_edit_states
+                            .get(idx)
+                            .map(|s| s.name.clone())
+                            .filter(|n| !n.is_empty())
+                            .unwrap_or(provider_id);
+                        return self.push_toast(widget::toaster::Toast::new(fl!(
+                            "toast-provider-connect-failed",
+                            provider = provider_name,
+                            reason = error
+                        )));
+                    }
                 }
             }
 
@@ -2823,6 +3054,10 @@ impl cosmic::Application for AppModel {
                 self.expand_target = Some(0.0);
                 self.expand_anim_start = Some(std::time::Instant::now());
                 self.expand_anim_from = self.expand_progress;
+                // Leaving the expanded view must also leave fullscreen, else the
+                // header bar / nav sidebar would stay hidden with no visualizer.
+                #[cfg(feature = "visualizer")]
+                self.exit_viz_fullscreen();
             }
 
             Message::ExpandAnimTick => {
@@ -2878,6 +3113,7 @@ impl cosmic::Application for AppModel {
                 // takes over. If it was never computed (e.g. track changed while
                 // viz was active and bytes weren't cached yet), trigger it now.
                 if !self.visualizer_active {
+                    self.exit_viz_fullscreen();
                     // Force retry even if key matches — blurred_cover may be None.
                     if self.blurred_cover.is_none() {
                         self.blurred_cover_key = None;
@@ -2908,22 +3144,35 @@ impl cosmic::Application for AppModel {
 
             #[cfg(feature = "visualizer")]
             Message::ToggleVisualizerFullscreen => {
-                // Hide/show the COSMIC window decorations (titlebar/chrome)
-                // without resizing the OS window. The frosted panel remains
-                // visible so controls are still accessible.
-                if let Some(id) = self.core.main_window_id() {
-                    self.viz_fullscreen = !self.viz_fullscreen;
-                    return cosmic::iced_runtime::window::toggle_decorations(id);
+                // COSMIC uses client-side decorations, so the header bar *is* the
+                // titlebar. "Fullscreen" here means hiding the header bar and the
+                // nav sidebar so the visualizer fills the whole window. (The old
+                // `toggle_decorations` call targeted server-side decorations,
+                // which COSMIC never draws, so it was a silent no-op.)
+                self.viz_fullscreen = !self.viz_fullscreen;
+                if self.viz_fullscreen {
+                    self.viz_prev_nav_active = self.core.nav_bar_active();
+                    self.core.window.show_headerbar = false;
+                    self.core.nav_bar_set_toggled(false);
+                } else {
+                    self.core.window.show_headerbar = true;
+                    self.core.nav_bar_set_toggled(self.viz_prev_nav_active);
                 }
             }
 
             // -- Playlists view --
             Message::SelectPlaylist(idx) => {
                 self.selected_playlist = Some(idx);
+                self.rename_playlist_input = self
+                    .playlists
+                    .get(idx)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
             }
 
             Message::BackToPlaylistList => {
                 self.selected_playlist = None;
+                self.rename_playlist_input.clear();
             }
 
             Message::CreatePlaylist(name) => {
@@ -2998,12 +3247,13 @@ impl cosmic::Application for AppModel {
                 self.new_playlist_name = name;
             }
 
-            Message::RenamePlaylistInput(_idx, _text) => {
-                // Rename input state is handled locally in the view for now.
+            Message::RenamePlaylistInput(_idx, text) => {
+                self.rename_playlist_input = text;
             }
 
             Message::PlaylistsLoaded(playlists) => {
                 self.playlists = playlists;
+                self.refresh_search_filter();
             }
 
             // -- Genres view --
@@ -3040,6 +3290,7 @@ impl cosmic::Application for AppModel {
 
             Message::GenresLoaded(genres) => {
                 self.all_genres = genres;
+                self.refresh_search_filter();
             }
 
             Message::GenreTracksLoaded(tracks) => {
@@ -3099,43 +3350,49 @@ impl Hash for MpdPollKey {
 /// position/duration/state/volume from the real MPD status.
 fn mpd_status_stream(key: &MpdPollKey) -> impl Stream<Item = Message> + use<> {
     let client = key.0.clone();
-    cosmic::iced::stream::channel(1, |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(300));
-        loop {
-            interval.tick().await;
-            match client.command(mpd_client::commands::Status).await {
-                Ok(status) => {
-                    let state = match status.state {
-                        mpd_client::responses::PlayState::Playing => PlaybackState::Playing,
-                        mpd_client::responses::PlayState::Paused => PlaybackState::Paused,
-                        mpd_client::responses::PlayState::Stopped => PlaybackState::Stopped,
-                    };
-                    _ = emitter
-                        .send(Message::MpdStatusUpdate {
-                            position: status.elapsed.unwrap_or(Duration::ZERO),
-                            duration: status.duration.unwrap_or(Duration::ZERO),
-                            state,
-                            volume: status.volume as f32 / 100.0,
-                        })
-                        .await;
-                }
-                Err(e) => {
-                    tracing::warn!("MPD status poll failed: {e}");
+    cosmic::iced::stream::channel(
+        1,
+        |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(300));
+            loop {
+                interval.tick().await;
+                match client.command(mpd_client::commands::Status).await {
+                    Ok(status) => {
+                        let state = match status.state {
+                            mpd_client::responses::PlayState::Playing => PlaybackState::Playing,
+                            mpd_client::responses::PlayState::Paused => PlaybackState::Paused,
+                            mpd_client::responses::PlayState::Stopped => PlaybackState::Stopped,
+                        };
+                        _ = emitter
+                            .send(Message::MpdStatusUpdate {
+                                position: status.elapsed.unwrap_or(Duration::ZERO),
+                                duration: status.duration.unwrap_or(Duration::ZERO),
+                                state,
+                                volume: status.volume as f32 / 100.0,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("MPD status poll failed: {e}");
+                    }
                 }
             }
-        }
-    })
+        },
+    )
 }
 
 /// Local/Subsonic: simple tick for UI updates (no captured state).
 fn playback_tick_stream() -> impl Stream<Item = Message> {
-    cosmic::iced::stream::channel(1, |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
-        loop {
-            interval.tick().await;
-            _ = emitter.send(Message::PlaybackTick).await;
-        }
-    })
+    cosmic::iced::stream::channel(
+        1,
+        |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                _ = emitter.send(Message::PlaybackTick).await;
+            }
+        },
+    )
 }
 
 /// Identity key for an MPD idle-event subscription. Hashing only `idx`
@@ -3161,51 +3418,54 @@ impl Hash for MpdIdleKey {
 /// This avoids protocol conflicts between idle mode and command execution.
 fn mpd_idle_stream(key: &MpdIdleKey) -> impl Stream<Item = Message> + use<> {
     let provider = Arc::clone(&key.provider);
-    cosmic::iced::stream::channel(4, move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-        loop {
-            let pid = provider.id().to_string();
+    cosmic::iced::stream::channel(
+        4,
+        move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+            loop {
+                let pid = provider.id().to_string();
 
-            // Step 1: Establish the idle connection
-            // We must keep `_idle_client` alive — dropping it would
-            // close the background task and end the `events` stream.
-            let idle_result = provider.connect_idle().await;
-            let (_idle_client, mut events) = match idle_result {
-                Ok(pair) => pair,
-                Err(e) => {
+                // Step 1: Establish the idle connection
+                // We must keep `_idle_client` alive — dropping it would
+                // close the background task and end the `events` stream.
+                let idle_result = provider.connect_idle().await;
+                let (_idle_client, mut events) = match idle_result {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        _ = emitter
+                            .send(Message::MpdConnectionFailed(pid, e.to_string()))
+                            .await;
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                };
+
+                // Step 2: Establish the command connection
+                if let Err(e) = provider.connect_command().await {
+                    tracing::error!("MPD provider '{pid}' command connection failed: {e}");
                     _ = emitter
                         .send(Message::MpdConnectionFailed(pid, e.to_string()))
                         .await;
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 }
-            };
 
-            // Step 2: Establish the command connection
-            if let Err(e) = provider.connect_command().await {
-                tracing::error!("MPD provider '{pid}' command connection failed: {e}");
-                _ = emitter
-                    .send(Message::MpdConnectionFailed(pid, e.to_string()))
-                    .await;
+                // Both connections established
+                _ = emitter.send(Message::MpdConnected(pid.clone())).await;
+
+                // Loop on idle events until the connection drops
+                while let Some(_event) = events.next().await {
+                    _ = emitter.send(Message::MpdIdleEvent(pid.clone())).await;
+                }
+
+                // Idle stream ended — connection lost. Disconnect command too.
+                tracing::warn!("MPD provider '{pid}' connection lost, reconnecting...");
+                provider.disconnect().await;
+
+                // Backoff before reconnect
                 tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
             }
-
-            // Both connections established
-            _ = emitter.send(Message::MpdConnected(pid.clone())).await;
-
-            // Loop on idle events until the connection drops
-            while let Some(_event) = events.next().await {
-                _ = emitter.send(Message::MpdIdleEvent(pid.clone())).await;
-            }
-
-            // Idle stream ended — connection lost. Disconnect command too.
-            tracing::warn!("MPD provider '{pid}' connection lost, reconnecting...");
-            provider.disconnect().await;
-
-            // Backoff before reconnect
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    })
+        },
+    )
 }
 
 /// Filesystem watcher subscription — only when the Local provider is active.
@@ -3216,90 +3476,188 @@ fn mpd_idle_stream(key: &MpdIdleKey) -> impl Stream<Item = Message> + use<> {
 #[allow(clippy::ptr_arg)] // must match `fn(&D) -> S` where D = Vec<PathBuf> (Subscription::run_with)
 fn fs_watcher_stream(music_dirs: &Vec<PathBuf>) -> impl Stream<Item = Message> + use<> {
     let music_dirs = music_dirs.clone();
-    cosmic::iced::stream::channel(4, move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-        use notify::{RecursiveMode, Watcher};
+    cosmic::iced::stream::channel(
+        4,
+        move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+            use notify::{RecursiveMode, Watcher};
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<PathBuf>(256);
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<PathBuf>(256);
 
-        // Create watcher that sends changed paths through the channel.
-        // IMPORTANT: Only react to content changes (Create/Modify/Remove),
-        // NOT Access events. Reading files during scanning triggers Access
-        // events which would create an infinite scan loop.
-        let _watcher = {
-            let tx = tx.clone();
-            let mut watcher = match notify::RecommendedWatcher::new(
-                move |result: Result<notify::Event, notify::Error>| {
-                    if let Ok(event) = result {
-                        use notify::EventKind;
-                        match event.kind {
-                            EventKind::Create(_)
-                            | EventKind::Modify(_)
-                            | EventKind::Remove(_) => {
-                                for path in event.paths {
-                                    let _ = tx.blocking_send(path);
+            // Create watcher that sends changed paths through the channel.
+            // IMPORTANT: Only react to content changes (Create/Modify/Remove),
+            // NOT Access events. Reading files during scanning triggers Access
+            // events which would create an infinite scan loop.
+            let _watcher = {
+                let tx = tx.clone();
+                let mut watcher = match notify::RecommendedWatcher::new(
+                    move |result: Result<notify::Event, notify::Error>| {
+                        if let Ok(event) = result {
+                            use notify::EventKind;
+                            match event.kind {
+                                EventKind::Create(_)
+                                | EventKind::Modify(_)
+                                | EventKind::Remove(_) => {
+                                    for path in event.paths {
+                                        let _ = tx.blocking_send(path);
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
+                        }
+                    },
+                    notify::Config::default(),
+                ) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        tracing::error!("Failed to create filesystem watcher: {e}");
+                        // Keep the future alive so the subscription ID is stable.
+                        std::future::pending::<()>().await;
+                        return;
+                    }
+                };
+
+                for dir in &music_dirs {
+                    if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
+                        tracing::warn!("Failed to watch directory {}: {e}", dir.display());
+                    }
+                }
+
+                watcher // keep alive
+            };
+
+            // Debounce loop: collect paths, wait for 2s of quiet, then emit.
+            let debounce_duration = Duration::from_secs(2);
+            loop {
+                // Wait for the first event.
+                let first = match rx.recv().await {
+                    Some(path) => path,
+                    None => break, // channel closed
+                };
+
+                let mut changed_paths = vec![first];
+
+                // Collect more events until 2 seconds of silence.
+                loop {
+                    match tokio::time::timeout(debounce_duration, rx.recv()).await {
+                        Ok(Some(path)) => {
+                            changed_paths.push(path);
+                        }
+                        Ok(None) => break, // channel closed
+                        Err(_) => break,   // timeout — debounce complete
+                    }
+                }
+
+                // Deduplicate paths.
+                changed_paths.sort();
+                changed_paths.dedup();
+
+                tracing::debug!(
+                    "Filesystem watcher: {} changed paths after debounce",
+                    changed_paths.len()
+                );
+
+                _ = emitter.send(Message::FilesChanged(changed_paths)).await;
+            }
+        },
+    )
+}
+
+/// Identity key for the projectM visualizer render subscription. Hashes to
+/// a constant so there's only ever one active instance regardless of the
+/// captured Arc contents (mirrors `MpdPollKey`/`MpdIdleKey`).
+#[cfg(feature = "visualizer")]
+struct VizRenderKey {
+    pcm: Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>,
+    preset_signal: Arc<std::sync::atomic::AtomicBool>,
+    frame_buf: Arc<Mutex<crate::views::now_playing::viz_shader::VizFrameBuffer>>,
+}
+
+#[cfg(feature = "visualizer")]
+impl Hash for VizRenderKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        "projectm-render".hash(state);
+    }
+}
+
+/// Runs the projectM render loop on a dedicated OS thread and relays
+/// "frame ready" notifications back to the UI through an iced subscription
+/// stream. See the call site for why the render loop needs its own thread
+/// (thread-local EGL/GL context).
+#[cfg(feature = "visualizer")]
+fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use<> {
+    let pcm = Arc::clone(&key.pcm);
+    let preset_signal = Arc::clone(&key.preset_signal);
+    let frame_buf = Arc::clone(&key.frame_buf);
+    cosmic::iced::stream::channel(
+        2,
+        move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+            // Use a one-shot channel to know when the render thread
+            // has produced a new frame so we can notify the UI.
+            let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<()>(2);
+
+            // Spawn a dedicated OS thread for the GL render loop.
+            // The EGL context created inside `ProjectMRenderer::new`
+            // stays current for the lifetime of this thread.
+            std::thread::Builder::new()
+                .name("projectm-render".into())
+                .spawn(move || {
+                    let preset_dir =
+                        dirs::data_dir().map(|d| d.join("projectm").join("presets"));
+                    let mut renderer =
+                        match crate::views::now_playing::visualizer::ProjectMRenderer::new(
+                            preset_dir,
+                        ) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                tracing::error!("Failed to create projectM renderer: {e}");
+                                return;
+                            }
+                        };
+
+                    loop {
+                        // ~30 fps
+                        std::thread::sleep(Duration::from_millis(33));
+
+                        // Check if a preset change was requested
+                        if preset_signal.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                            renderer.next_preset();
+                        }
+
+                        // Read PCM from shared buffer
+                        let pcm_data = pcm
+                            .lock()
+                            .ok()
+                            .map(|buf| buf.read_recent(2048))
+                            .unwrap_or_default();
+
+                        // Render a frame (GL calls, ~3-5ms)
+                        let rgba = renderer.render_frame(&pcm_data);
+
+                        // Write pixels into the shared frame buffer
+                        if let Ok(mut buf) = frame_buf.lock() {
+                            buf.update(rgba);
+                        }
+
+                        // Notify the async side that a frame is ready.
+                        // If the channel is full or closed, the render
+                        // thread is ahead of the UI — just skip.
+                        if frame_tx.try_send(()).is_err() {
+                            // Channel closed → subscription was dropped
+                            // (visualizer deactivated or view collapsed).
+                            if frame_tx.is_closed() {
+                                break;
+                            }
                         }
                     }
-                },
-                notify::Config::default(),
-            ) {
-                Ok(w) => w,
-                Err(e) => {
-                    tracing::error!("Failed to create filesystem watcher: {e}");
-                    // Keep the future alive so the subscription ID is stable.
-                    std::future::pending::<()>().await;
-                    return;
-                }
-            };
+                })
+                .expect("failed to spawn projectm-render thread");
 
-            for dir in &music_dirs {
-                if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
-                    tracing::warn!(
-                        "Failed to watch directory {}: {e}",
-                        dir.display()
-                    );
-                }
+            // Relay frame-ready signals from the render thread to iced.
+            while frame_rx.recv().await.is_some() {
+                _ = emitter.send(Message::VisualizerFrameReady).await;
             }
-
-            watcher // keep alive
-        };
-
-        // Debounce loop: collect paths, wait for 2s of quiet, then emit.
-        let debounce_duration = Duration::from_secs(2);
-        loop {
-            // Wait for the first event.
-            let first = match rx.recv().await {
-                Some(path) => path,
-                None => break, // channel closed
-            };
-
-            let mut changed_paths = vec![first];
-
-            // Collect more events until 2 seconds of silence.
-            loop {
-                match tokio::time::timeout(debounce_duration, rx.recv()).await {
-                    Ok(Some(path)) => {
-                        changed_paths.push(path);
-                    }
-                    Ok(None) => break, // channel closed
-                    Err(_) => break,   // timeout — debounce complete
-                }
-            }
-
-            // Deduplicate paths.
-            changed_paths.sort();
-            changed_paths.dedup();
-
-            tracing::debug!(
-                "Filesystem watcher: {} changed paths after debounce",
-                changed_paths.len()
-            );
-
-            _ = emitter.send(Message::FilesChanged(changed_paths)).await;
-        }
-    })
+        },
+    )
 }
 
 impl AppModel {
@@ -3530,161 +3888,173 @@ impl AppModel {
         let subsonic_providers = self.subsonic_providers.clone();
         let active_id = self.registry.active_id().to_string();
 
-        let stream = cosmic::iced::stream::channel(8, move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<cosmic::Action<Message>>| async move {
-            const BATCH_SIZE: usize = 50;
+        let stream = cosmic::iced::stream::channel(
+            8,
+            move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<
+                cosmic::Action<Message>,
+            >| async move {
+                const BATCH_SIZE: usize = 50;
 
-            match provider_type {
-                crate::provider::ProviderType::Mpd => {
-                    // Find the matching MpdProvider by id.
-                    let mpd = match mpd_providers.iter().find(|p| p.id() == active_id) {
-                        Some(p) => Arc::clone(p),
-                        None => return,
-                    };
+                match provider_type {
+                    crate::provider::ProviderType::Mpd => {
+                        // Find the matching MpdProvider by id.
+                        let mpd = match mpd_providers.iter().find(|p| p.id() == active_id) {
+                            Some(p) => Arc::clone(p),
+                            None => return,
+                        };
 
-                    // Step 1: Get all album names (single fast command).
-                    let album_names = match mpd.list_album_names().await {
-                        Ok(names) => names,
-                        Err(e) => {
-                            tracing::error!("MPD list_album_names failed: {e}");
-                            _ = emitter
-                                .send(cosmic::Action::App(Message::LibraryLoadComplete))
-                                .await;
-                            return;
-                        }
-                    };
-
-                    tracing::info!(
-                        "MPD incremental load: {} albums in batches of {BATCH_SIZE}",
-                        album_names.len()
-                    );
-
-                    // Step 2: Process in batches.
-                    for chunk in album_names.chunks(BATCH_SIZE) {
-                        let albums = match mpd.browse_albums_batch(chunk).await {
-                            Ok(a) => a,
+                        // Step 1: Get all album names (single fast command).
+                        let album_names = match mpd.list_album_names().await {
+                            Ok(names) => names,
                             Err(e) => {
-                                tracing::error!("MPD browse_albums_batch failed: {e}");
-                                break;
+                                tracing::error!("MPD list_album_names failed: {e}");
+                                _ = emitter
+                                    .send(cosmic::Action::App(Message::LibraryLoadComplete))
+                                    .await;
+                                return;
                             }
                         };
 
-                        // Fetch cover art for this batch in parallel.
-                        let prov = Arc::clone(&provider);
-                        let cover_tasks: Vec<_> = albums
-                            .iter()
-                            .map(|album| {
-                                let key =
-                                    crate::library::CoverArt::album_key(&album.artist, &album.name);
-                                let prov2 = Arc::clone(&prov);
-                                let hint = album.cover_hint();
-                                tokio::task::spawn_blocking(move || {
-                                    let result = prov2.get_cover_art(&hint);
-                                    (key, result)
-                                })
-                            })
-                            .collect();
+                        tracing::info!(
+                            "MPD incremental load: {} albums in batches of {BATCH_SIZE}",
+                            album_names.len()
+                        );
 
-                        let mut cover_images = HashMap::new();
-                        let mut cover_art_bytes = HashMap::new();
-                        for task in cover_tasks {
-                            if let Ok((key, Ok(Some(bytes)))) = task.await {
-                                let handle = widget::icon::from_raster_bytes(bytes.clone());
-                                cover_images.insert(key.clone(), handle);
-                                cover_art_bytes.insert(key, bytes);
-                            }
-                        }
-
-                        _ = emitter
-                            .send(cosmic::Action::App(Message::LibraryBatch {
-                                albums,
-                                cover_images,
-                                cover_art_bytes,
-                            }))
-                            .await;
-                    }
-                }
-
-                crate::provider::ProviderType::Subsonic => {
-                    // Find the matching SubsonicProvider by id.
-                    let subsonic = match subsonic_providers.iter().find(|p| p.id() == active_id) {
-                        Some(p) => Arc::clone(p),
-                        None => return,
-                    };
-
-                    tracing::info!("Subsonic incremental load: batches of {BATCH_SIZE}");
-
-                    let mut offset: i32 = 0;
-                    let page_size = BATCH_SIZE as i32;
-
-                    loop {
-                        let (albums, has_more) =
-                            match subsonic.browse_albums_page(offset, page_size).await {
-                                Ok(result) => result,
+                        // Step 2: Process in batches.
+                        for chunk in album_names.chunks(BATCH_SIZE) {
+                            let albums = match mpd.browse_albums_batch(chunk).await {
+                                Ok(a) => a,
                                 Err(e) => {
-                                    tracing::error!("Subsonic browse_albums_page failed: {e}");
+                                    tracing::error!("MPD browse_albums_batch failed: {e}");
                                     break;
                                 }
                             };
 
-                        if albums.is_empty() {
-                            break;
-                        }
-
-                        let batch_count = albums.len();
-
-                        // Fetch cover art for this batch in parallel.
-                        let prov = Arc::clone(&provider);
-                        let cover_tasks: Vec<_> = albums
-                            .iter()
-                            .map(|album| {
-                                let key =
-                                    crate::library::CoverArt::album_key(&album.artist, &album.name);
-                                let prov2 = Arc::clone(&prov);
-                                let hint = album.cover_hint();
-                                tokio::task::spawn_blocking(move || {
-                                    let result = prov2.get_cover_art(&hint);
-                                    (key, result)
+                            // Fetch cover art for this batch in parallel.
+                            let prov = Arc::clone(&provider);
+                            let cover_tasks: Vec<_> = albums
+                                .iter()
+                                .map(|album| {
+                                    let key = crate::library::CoverArt::album_key(
+                                        &album.artist,
+                                        &album.name,
+                                    );
+                                    let prov2 = Arc::clone(&prov);
+                                    let hint = album.cover_hint();
+                                    tokio::task::spawn_blocking(move || {
+                                        let result = prov2.get_cover_art(&hint);
+                                        (key, result)
+                                    })
                                 })
-                            })
-                            .collect();
+                                .collect();
 
-                        let mut cover_images = HashMap::new();
-                        let mut cover_art_bytes = HashMap::new();
-                        for task in cover_tasks {
-                            if let Ok((key, Ok(Some(bytes)))) = task.await {
-                                let handle = widget::icon::from_raster_bytes(bytes.clone());
-                                cover_images.insert(key.clone(), handle);
-                                cover_art_bytes.insert(key, bytes);
+                            let mut cover_images = HashMap::new();
+                            let mut cover_art_bytes = HashMap::new();
+                            for task in cover_tasks {
+                                if let Ok((key, Ok(Some(bytes)))) = task.await {
+                                    let handle = widget::icon::from_raster_bytes(bytes.clone());
+                                    cover_images.insert(key.clone(), handle);
+                                    cover_art_bytes.insert(key, bytes);
+                                }
                             }
+
+                            _ = emitter
+                                .send(cosmic::Action::App(Message::LibraryBatch {
+                                    albums,
+                                    cover_images,
+                                    cover_art_bytes,
+                                }))
+                                .await;
                         }
+                    }
 
-                        tracing::debug!("Subsonic batch: offset={offset}, albums={batch_count}");
+                    crate::provider::ProviderType::Subsonic => {
+                        // Find the matching SubsonicProvider by id.
+                        let subsonic = match subsonic_providers.iter().find(|p| p.id() == active_id)
+                        {
+                            Some(p) => Arc::clone(p),
+                            None => return,
+                        };
 
-                        _ = emitter
-                            .send(cosmic::Action::App(Message::LibraryBatch {
-                                albums,
-                                cover_images,
-                                cover_art_bytes,
-                            }))
-                            .await;
+                        tracing::info!("Subsonic incremental load: batches of {BATCH_SIZE}");
 
-                        if !has_more {
-                            break;
+                        let mut offset: i32 = 0;
+                        let page_size = BATCH_SIZE as i32;
+
+                        loop {
+                            let (albums, has_more) =
+                                match subsonic.browse_albums_page(offset, page_size).await {
+                                    Ok(result) => result,
+                                    Err(e) => {
+                                        tracing::error!("Subsonic browse_albums_page failed: {e}");
+                                        break;
+                                    }
+                                };
+
+                            if albums.is_empty() {
+                                break;
+                            }
+
+                            let batch_count = albums.len();
+
+                            // Fetch cover art for this batch in parallel.
+                            let prov = Arc::clone(&provider);
+                            let cover_tasks: Vec<_> = albums
+                                .iter()
+                                .map(|album| {
+                                    let key = crate::library::CoverArt::album_key(
+                                        &album.artist,
+                                        &album.name,
+                                    );
+                                    let prov2 = Arc::clone(&prov);
+                                    let hint = album.cover_hint();
+                                    tokio::task::spawn_blocking(move || {
+                                        let result = prov2.get_cover_art(&hint);
+                                        (key, result)
+                                    })
+                                })
+                                .collect();
+
+                            let mut cover_images = HashMap::new();
+                            let mut cover_art_bytes = HashMap::new();
+                            for task in cover_tasks {
+                                if let Ok((key, Ok(Some(bytes)))) = task.await {
+                                    let handle = widget::icon::from_raster_bytes(bytes.clone());
+                                    cover_images.insert(key.clone(), handle);
+                                    cover_art_bytes.insert(key, bytes);
+                                }
+                            }
+
+                            tracing::debug!(
+                                "Subsonic batch: offset={offset}, albums={batch_count}"
+                            );
+
+                            _ = emitter
+                                .send(cosmic::Action::App(Message::LibraryBatch {
+                                    albums,
+                                    cover_images,
+                                    cover_art_bytes,
+                                }))
+                                .await;
+
+                            if !has_more {
+                                break;
+                            }
+                            offset += page_size;
                         }
-                        offset += page_size;
+                    }
+
+                    crate::provider::ProviderType::Local => {
+                        // Should not reach here — local uses reload_library_local.
+                        unreachable!("Local provider should not use incremental reload");
                     }
                 }
 
-                crate::provider::ProviderType::Local => {
-                    // Should not reach here — local uses reload_library_local.
-                    unreachable!("Local provider should not use incremental reload");
-                }
-            }
-
-            _ = emitter
-                .send(cosmic::Action::App(Message::LibraryLoadComplete))
-                .await;
-        });
+                _ = emitter
+                    .send(cosmic::Action::App(Message::LibraryLoadComplete))
+                    .await;
+            },
+        );
 
         cosmic::task::stream(stream)
     }
@@ -3753,9 +4123,13 @@ impl AppModel {
             .remove_by_type(crate::provider::ProviderType::Subsonic);
         self.subsonic_providers.clear();
 
-        // Re-create from config
+        // Re-create from config (clone first: iterating `&self.config...`
+        // while calling `self.push_toast()` inside the loop would otherwise
+        // hold an immutable borrow of `self` across a mutable one).
         let rt_handle = tokio::runtime::Handle::current();
-        for entry in &self.config.subsonic_servers {
+        let mut toast_tasks = Vec::new();
+        let subsonic_servers = self.config.subsonic_servers.clone();
+        for entry in &subsonic_servers {
             let subsonic_config: SubsonicConfig = entry.clone().into();
             match SubsonicProvider::new(subsonic_config, rt_handle.clone()) {
                 Ok(provider) => {
@@ -3766,6 +4140,11 @@ impl AppModel {
                 }
                 Err(e) => {
                     tracing::error!("Failed to create Subsonic provider '{}': {e}", entry.name);
+                    toast_tasks.push(self.push_toast(widget::toaster::Toast::new(fl!(
+                        "toast-provider-connect-failed",
+                        provider = entry.name.clone(),
+                        reason = e.to_string()
+                    ))));
                 }
             }
         }
@@ -3783,7 +4162,7 @@ impl AppModel {
 
         // For Subsonic providers, we can reload the library immediately
         // since they connect on demand (no idle subscription).
-        if self
+        let reload_task = if self
             .registry
             .active()
             .is_some_and(|p| p.provider_type() == crate::provider::ProviderType::Subsonic)
@@ -3791,7 +4170,10 @@ impl AppModel {
             self.reload_library()
         } else {
             Task::none()
-        }
+        };
+        toast_tasks.push(reload_task);
+
+        Task::batch(toast_tasks)
     }
 
     /// Re-initialize the Local provider with the current `config.music_dirs`.
@@ -3978,6 +4360,94 @@ impl AppModel {
         }
     }
 
+    /// Recomputes the search-filtered library caches from `library_search`.
+    ///
+    /// Called whenever the query changes and whenever the underlying library
+    /// data is reloaded or re-sorted, so the filtered caches — and the index
+    /// maps that translate a filtered position back to its index in the
+    /// corresponding unfiltered vector — never go stale. When the query is
+    /// empty the caches are cleared; `view()` then reads directly from the
+    /// unfiltered vectors.
+    fn refresh_search_filter(&mut self) {
+        let query = self.library_search.trim().to_lowercase();
+
+        self.filtered_albums.clear();
+        self.filtered_album_map.clear();
+        self.filtered_artists.clear();
+        self.filtered_artist_map.clear();
+        self.filtered_tracks.clear();
+        self.filtered_track_map.clear();
+        self.filtered_playlists.clear();
+        self.filtered_playlist_map.clear();
+        self.filtered_genres.clear();
+        self.filtered_genre_map.clear();
+
+        if query.is_empty() {
+            return;
+        }
+
+        for (i, album) in self.all_albums.iter().enumerate() {
+            if album.name.to_lowercase().contains(&query)
+                || album.artist.to_lowercase().contains(&query)
+            {
+                self.filtered_albums.push(album.clone());
+                self.filtered_album_map.push(i);
+            }
+        }
+
+        for (i, artist) in self.all_artists.iter().enumerate() {
+            if artist.name.to_lowercase().contains(&query) {
+                self.filtered_artists.push(artist.clone());
+                self.filtered_artist_map.push(i);
+            }
+        }
+
+        for (i, track) in self.all_tracks.iter().enumerate() {
+            if track.title.to_lowercase().contains(&query)
+                || track.artist.to_lowercase().contains(&query)
+                || track.album.to_lowercase().contains(&query)
+            {
+                self.filtered_tracks.push(track.clone());
+                self.filtered_track_map.push(i);
+            }
+        }
+
+        for (i, playlist) in self.playlists.iter().enumerate() {
+            if playlist.name.to_lowercase().contains(&query) {
+                self.filtered_playlists.push(playlist.clone());
+                self.filtered_playlist_map.push(i);
+            }
+        }
+
+        for (i, genre) in self.all_genres.iter().enumerate() {
+            if genre.to_lowercase().contains(&query) {
+                self.filtered_genres.push(genre.clone());
+                self.filtered_genre_map.push(i);
+            }
+        }
+    }
+
+    /// Pushes a toast notification, mapping its auto-dismiss timer task into
+    /// the `cosmic::Action`-wrapped message type `update()` returns.
+    fn push_toast(
+        &mut self,
+        toast: widget::toaster::Toast<Message>,
+    ) -> Task<cosmic::Action<Message>> {
+        self.toasts.push(toast).map(cosmic::Action::App)
+    }
+
+    /// Exit visualizer fullscreen if active: restore the COSMIC header bar and
+    /// nav sidebar. No-op when not in fullscreen. Called whenever the expanded
+    /// now-playing view is left or the visualizer is turned off.
+    #[cfg(feature = "visualizer")]
+    fn exit_viz_fullscreen(&mut self) {
+        if self.viz_fullscreen {
+            self.viz_fullscreen = false;
+            self.core.window.show_headerbar = true;
+            self.core.nav_bar_set_toggled(self.viz_prev_nav_active);
+        }
+    }
+
     /// Trigger blur computation for the current track if the album changed.
     ///
     /// Checks if the current track's album key differs from the cached blurred
@@ -4096,6 +4566,7 @@ pub enum MenuAction {
     Providers,
     ScanLibrary,
     AddMusicDir,
+    Search,
     Quit,
 }
 
@@ -4109,7 +4580,32 @@ impl menu::action::MenuAction for MenuAction {
             MenuAction::Providers => Message::ToggleContextPage(ContextPage::Providers),
             MenuAction::ScanLibrary => Message::ScanLibrary,
             MenuAction::AddMusicDir => Message::AddMusicDir,
+            MenuAction::Search => Message::ToggleLibrarySearch,
             MenuAction::Quit => Message::Quit,
         }
     }
+}
+
+/// Builds the map of global keyboard shortcuts to menu actions.
+///
+/// Consumed both by the menu bar (to display the shortcut label next to
+/// each item) and by the keyboard subscription in `subscription()` (to
+/// actually trigger the action when the shortcut is pressed).
+fn key_binds() -> HashMap<menu::KeyBind, MenuAction> {
+    let mut key_binds = HashMap::new();
+    key_binds.insert(
+        menu::KeyBind {
+            modifiers: vec![menu::key_bind::Modifier::Ctrl],
+            key: cosmic::iced::keyboard::Key::Character("f".into()),
+        },
+        MenuAction::Search,
+    );
+    key_binds
+}
+
+/// Translates a position in a search-filtered list back to its index in
+/// the corresponding unfiltered library vector. Passthrough when `map` is
+/// `None` (search inactive or the query is empty).
+fn unfilter_index(map: Option<&[usize]>, i: usize) -> usize {
+    map.map_or(i, |m| m[i])
 }

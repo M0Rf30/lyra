@@ -9,10 +9,14 @@
 use std::borrow::Cow;
 
 use cosmic::iced::alignment::{Horizontal, Vertical};
+use cosmic::iced::core::Background;
 use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
+use cosmic::widget::button::Style as ButtonStyle;
 use cosmic::widget::tooltip::Position as TooltipPosition;
+
+use crate::fl;
 
 /// Concrete text widget type returned by `cosmic::widget::text::*` helpers.
 pub type Text<'a> = cosmic::iced::widget::Text<'a, cosmic::Theme, cosmic::Renderer>;
@@ -78,6 +82,17 @@ pub fn duration_cell<'a, M: 'a>(total_secs: u64) -> cosmic::Element<'a, M> {
         .into()
 }
 
+/// Wrap `content` in a clipped, width-filling, vertically-centered
+/// container so single-line cell text (which never wraps) can never paint
+/// past the column boundary its parent row assigns it.
+pub fn clipped_cell<'a, M: 'a>(content: cosmic::Element<'a, M>) -> cosmic::Element<'a, M> {
+    widget::container(content)
+        .width(Length::Fill)
+        .align_y(Vertical::Center)
+        .clip(true)
+        .into()
+}
+
 /// Compact interactive five-star rating (roughly 100px wide).
 ///
 /// Clicking a star sets the rating; clicking the current rating clears it
@@ -105,10 +120,78 @@ pub fn star_rating<'a, M: Clone + 'static>(
     row.into()
 }
 
+/// Button class for the favorite heart: `Button::Icon`'s built-in
+/// `selected()` flag never actually recolors the icon (its style always
+/// discards the resolved icon color unless the button is disabled), so both
+/// states render identically. This custom class controls the color
+/// directly: muted when not favorited, accent-tinted when favorited.
+fn favorite_button_class(is_favorite: bool) -> cosmic::theme::Button {
+    cosmic::theme::Button::Custom {
+        active: Box::new(move |_focused, theme| {
+            let cosmic = theme.cosmic();
+            let color = if is_favorite {
+                cosmic.accent_color()
+            } else {
+                cosmic.icon_button.on_disabled
+            };
+            ButtonStyle {
+                background: None,
+                text_color: Some(color.into()),
+                icon_color: Some(color.into()),
+                border_radius: cosmic.corner_radii.radius_s.into(),
+                ..ButtonStyle::new()
+            }
+        }),
+        hovered: Box::new(move |_focused, theme| {
+            let cosmic = theme.cosmic();
+            let comp = &cosmic.icon_button;
+            let color = if is_favorite {
+                cosmic.accent_color()
+            } else {
+                comp.on
+            };
+            ButtonStyle {
+                background: Some(Background::Color(comp.hover.into())),
+                text_color: Some(color.into()),
+                icon_color: Some(color.into()),
+                border_radius: cosmic.corner_radii.radius_s.into(),
+                ..ButtonStyle::new()
+            }
+        }),
+        pressed: Box::new(move |_focused, theme| {
+            let cosmic = theme.cosmic();
+            let comp = &cosmic.icon_button;
+            let color = if is_favorite {
+                cosmic.accent_color()
+            } else {
+                comp.on
+            };
+            ButtonStyle {
+                background: Some(Background::Color(comp.pressed.into())),
+                text_color: Some(color.into()),
+                icon_color: Some(color.into()),
+                border_radius: cosmic.corner_radii.radius_s.into(),
+                ..ButtonStyle::new()
+            }
+        }),
+        disabled: Box::new(|theme| {
+            let cosmic = theme.cosmic();
+            let comp = &cosmic.icon_button;
+            ButtonStyle {
+                background: None,
+                text_color: Some(comp.on_disabled.into()),
+                icon_color: Some(comp.on_disabled.into()),
+                border_radius: cosmic.corner_radii.radius_s.into(),
+                ..ButtonStyle::new()
+            }
+        }),
+    }
+}
+
 /// Heart-shaped favorite toggle with a tooltip.
 ///
-/// Accent-tinted when favorited, dim otherwise — visually distinct from the
-/// star rating so the two can never be confused.
+/// Accent-tinted when favorited, visibly muted otherwise — the off state is
+/// never confusable with the on state, and never relies on hover alone.
 pub fn favorite_button<'a, M: Clone + 'static>(
     is_favorite: bool,
     on_toggle: M,
@@ -116,13 +199,14 @@ pub fn favorite_button<'a, M: Clone + 'static>(
     let button = widget::button::icon(widget::icon::from_name("emblem-favorite-symbolic").size(16))
         .padding(4)
         .selected(is_favorite)
+        .class(favorite_button_class(is_favorite))
         .on_press(on_toggle);
     widget::tooltip(
         button,
         widget::text::caption(if is_favorite {
-            "Remove from favorites"
+            fl!("favorite-remove")
         } else {
-            "Add to favorites"
+            fl!("favorite-add")
         }),
         TooltipPosition::Top,
     )

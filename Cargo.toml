@@ -59,10 +59,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ashpd = { version = "0.13", features = ["file_chooser"] }
 
 # Credential storage (system keyring)
-# keyring 4 is a keyring-core rewrite: no cargo features; backends (kernel keyutils
-# + D-Bus secret service with crypto-rust) are unconditional per-target deps.
-keyring = "4"
+# keyring 4 is a thin facade re-exporting keyring-core; on Linux it only wires up
+# the D-Bus secret service backend, not the kernel keyutils one. We depend on
+# keyring-core directly and pick a default store ourselves (see src/credentials.rs),
+# preferring kernel keyutils and falling back to the D-Bus secret service, matching
+# legacy keyring v3 behavior.
 keyring-core = "1"
+linux-keyutils-keyring-store = "1"
+zbus-secret-service-keyring-store = { version = "1", features = ["rt-tokio-crypto-rust"] }
 
 # Misc
 open = "5"

@@ -2,9 +2,12 @@
 
 //! Artists view - list of artists with album sub-views.
 
-use crate::library::{Artist, CoverArt};
+use crate::fl;
+use crate::library::{Album, Artist, CoverArt};
 use crate::views::common;
+use crate::views::list_row_button_class;
 use cosmic::iced::alignment::{Horizontal, Vertical};
+use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
@@ -32,8 +35,8 @@ pub fn artist_list_view<'a>(
     if artists.is_empty() {
         return common::empty_state(
             "system-users-symbolic",
-            "No artists found",
-            "Artists will appear here once your library is scanned",
+            fl!("no-artists"),
+            fl!("artists-empty-hint"),
         );
     }
 
@@ -49,28 +52,22 @@ pub fn artist_list_view<'a>(
                     .into()
             };
 
+        let info = widget::Column::new()
+            .push(common::cell_text(artist.name.as_str()))
+            .push(common::cell_caption(artist_summary(artist)))
+            .spacing(2);
+
         let row = widget::button::custom(
             widget::Row::new()
                 .push(avatar)
-                .push(
-                    widget::Column::new()
-                        .push(common::cell_text(artist.name.as_str()))
-                        .push(common::cell_caption(format!(
-                            "{} album{}, {} track{}",
-                            artist.album_count(),
-                            if artist.album_count() == 1 { "" } else { "s" },
-                            artist.track_count(),
-                            if artist.track_count() == 1 { "" } else { "s" }
-                        )))
-                        .spacing(2),
-                )
+                .push(common::clipped_cell(info.into()))
                 .spacing(14)
                 .align_y(Alignment::Center)
                 .padding([10, 8]),
         )
         .on_press(ArtistMessage::SelectArtist(index))
         .width(Length::Fill)
-        .class(cosmic::theme::Button::Text);
+        .class(list_row_button_class(false));
 
         list = list.push(row);
     }
@@ -97,24 +94,18 @@ pub fn artist_detail_view<'a>(
                 .into()
         };
 
+    let header_info = widget::Column::new()
+        .push(widget::text::title1(artist.name.as_str()).wrapping(Wrapping::None))
+        .push(common::cell_caption(artist_summary(artist)))
+        .spacing(4);
+
     let header = widget::Row::new()
         .push(
             widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
                 .on_press(ArtistMessage::BackToList),
         )
         .push(avatar)
-        .push(
-            widget::Column::new()
-                .push(widget::text::title1(artist.name.as_str()))
-                .push(widget::text::caption(format!(
-                    "{} album{}, {} track{}",
-                    artist.album_count(),
-                    if artist.album_count() == 1 { "" } else { "s" },
-                    artist.track_count(),
-                    if artist.track_count() == 1 { "" } else { "s" }
-                )))
-                .spacing(4),
-        )
+        .push(common::clipped_cell(header_info.into()))
         .spacing(16)
         .align_y(Alignment::Center);
 
@@ -131,6 +122,10 @@ pub fn artist_detail_view<'a>(
                     .into()
             };
 
+        let album_info = widget::Column::new()
+            .push(widget::text::title4(album.name.as_str()).wrapping(Wrapping::None))
+            .push(common::cell_caption(album_track_summary(album)));
+
         let album_header = widget::Row::new()
             .push(
                 widget::container(album_art)
@@ -139,21 +134,9 @@ pub fn artist_detail_view<'a>(
                     .align_x(Horizontal::Center)
                     .align_y(Vertical::Center),
             )
+            .push(common::clipped_cell(album_info.into()))
             .push(
-                widget::Column::new()
-                    .push(widget::text::title4(album.name.as_str()))
-                    .push(widget::text::caption({
-                        let n = album.track_count();
-                        let track_word = if n == 1 { "track" } else { "tracks" };
-                        if album.year > 0 {
-                            format!("{} · {n} {track_word}", album.year)
-                        } else {
-                            format!("{n} {track_word}")
-                        }
-                    })),
-            )
-            .push(
-                widget::button::suggested("Play")
+                widget::button::suggested(fl!("play"))
                     .on_press(ArtistMessage::PlayArtistAlbum(artist_index, album_idx)),
             )
             .spacing(12)
@@ -193,7 +176,12 @@ pub fn artist_detail_view<'a>(
             } else {
                 widget::Space::new().width(Length::Shrink).into()
             };
-            let genre_col = widget::container(genre_widget).width(130);
+            let genre_col = widget::container(common::clipped_cell(genre_widget)).width(130);
+
+            let title_col = widget::container(common::clipped_cell(
+                common::cell_text(track.title.as_str()).into(),
+            ))
+            .width(Length::FillPortion(4));
 
             let row = widget::button::custom(
                 widget::Row::new()
@@ -202,18 +190,19 @@ pub fn artist_detail_view<'a>(
                             .width(40)
                             .align_x(Horizontal::Center),
                     )
-                    .push(common::cell_text(track.title.as_str()).width(Length::FillPortion(4)))
+                    .push(title_col)
                     .push(heart_btn)
                     .push(rating_row)
                     .push(genre_col)
                     .push(common::duration_cell(track.duration.as_secs()))
                     .spacing(8)
+                    .width(Length::Fill)
                     .align_y(Alignment::Center)
                     .padding(4),
             )
             .on_press(ArtistMessage::PlayTrack(artist_index, album_idx, track_idx))
             .width(Length::Fill)
-            .class(cosmic::theme::Button::Text);
+            .class(list_row_button_class(is_playing));
 
             track_list = track_list.push(row);
         }
@@ -225,4 +214,36 @@ pub fn artist_detail_view<'a>(
     widget::scrollable(widget::container(content).padding(16).width(Length::Fill))
         .height(Length::Fill)
         .into()
+}
+
+/// Localized "N albums, M tracks" summary line for an artist.
+fn artist_summary(artist: &Artist) -> String {
+    let albums = artist.album_count();
+    let tracks = artist.track_count();
+    let album_str = if albums == 1 {
+        fl!("artist-album-count-one", count = albums.to_string())
+    } else {
+        fl!("artist-album-count-other", count = albums.to_string())
+    };
+    let track_str = if tracks == 1 {
+        fl!("artist-track-count-one", count = tracks.to_string())
+    } else {
+        fl!("artist-track-count-other", count = tracks.to_string())
+    };
+    format!("{album_str}, {track_str}")
+}
+
+/// Localized "{year} · N tracks" (or just "N tracks") summary for an album.
+fn album_track_summary(album: &Album) -> String {
+    let n = album.track_count();
+    let track_str = if n == 1 {
+        fl!("artist-track-count-one", count = n.to_string())
+    } else {
+        fl!("artist-track-count-other", count = n.to_string())
+    };
+    if album.year > 0 {
+        format!("{} · {}", album.year, track_str)
+    } else {
+        track_str
+    }
 }

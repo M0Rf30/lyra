@@ -10,7 +10,7 @@
 
 use cosmic::iced::widget::shader;
 use cosmic::iced::{Rectangle, mouse};
-use cosmic::iced_wgpu::wgpu;
+use cosmic::iced::wgpu;
 use std::sync::{Arc, Mutex};
 
 /// Shared frame buffer: the render subscription writes RGBA pixels here,
@@ -90,23 +90,27 @@ pub struct VizPrimitive {
 }
 
 /// Persistent GPU resources stored across frames in iced's `Storage`.
-struct VizPipeline {
+pub struct VizPipeline {
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     pipeline: wgpu::RenderPipeline,
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
+    tex_width: u32,
+    tex_height: u32,
     /// Last generation that was uploaded, to skip redundant uploads.
     last_generation: u64,
 }
 
 impl VizPipeline {
-    fn new(device: &wgpu::Device, format: wgpu::TextureFormat, width: u32, height: u32) -> Self {
-        // --- Shader module (inline WGSL) ---
-        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("viz_shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_WGSL.into()),
-        });
-
-        // --- Texture for the visualizer frame ---
+    /// Create the texture, its view, and the bind group that references it.
+    fn create_texture(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::BindGroup) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("viz_texture"),
             size: wgpu::Extent3d {
@@ -124,6 +128,68 @@ impl VizPipeline {
 
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("viz_bg"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+
+        (texture, bind_group)
+    }
+
+    /// Re-allocate the GPU texture at a new size, forcing a re-upload on the
+    /// next `prepare()` call.
+    fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        let (texture, bind_group) =
+            Self::create_texture(device, &self.bind_group_layout, &self.sampler, width, height);
+        self.texture = texture;
+        self.bind_group = bind_group;
+        self.tex_width = width;
+        self.tex_height = height;
+        self.last_generation = u64::MAX; // force re-upload into the fresh texture
+    }
+
+    /// Upload new pixel data to the GPU texture.
+    fn upload(&mut self, queue: &wgpu::Queue, pixels: &[u8], width: u32, height: u32) {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+}
+
+impl shader::Pipeline for VizPipeline {
+    fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        // --- Shader module (inline WGSL) ---
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("viz_shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADER_WGSL.into()),
+        });
+
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("viz_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -131,7 +197,7 @@ impl VizPipeline {
             ..Default::default()
         });
 
-        // --- Bind group layout + bind group ---
+        // --- Bind group layout ---
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("viz_bgl"),
             entries: &[
@@ -154,26 +220,15 @@ impl VizPipeline {
             ],
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("viz_bg"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
+        // --- Placeholder 1x1 texture (resized to the real size on first `prepare()`) ---
+        let (texture, bind_group) =
+            Self::create_texture(&device, &bind_group_layout, &sampler, 1, 1);
 
         // --- Pipeline layout + render pipeline ---
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viz_pl"),
             bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -181,13 +236,13 @@ impl VizPipeline {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader_module,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader_module,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::REPLACE),
@@ -201,57 +256,40 @@ impl VizPipeline {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
         Self {
+            bind_group_layout,
+            sampler,
             pipeline,
             texture,
             bind_group,
+            tex_width: 1,
+            tex_height: 1,
             last_generation: u64::MAX, // force first upload
         }
-    }
-
-    /// Upload new pixel data to the GPU texture.
-    fn upload(&mut self, queue: &wgpu::Queue, pixels: &[u8], width: u32, height: u32) {
-        queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            pixels,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * width),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
     }
 }
 
 impl shader::Primitive for VizPrimitive {
+    type Pipeline = VizPipeline;
+
     fn prepare(
         &self,
+        pipeline: &mut Self::Pipeline,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        format: wgpu::TextureFormat,
-        storage: &mut shader::Storage,
         _bounds: &Rectangle,
         _viewport: &shader::Viewport,
     ) {
-        if !storage.has::<VizPipeline>() {
-            storage.store(VizPipeline::new(device, format, self.width, self.height));
+        if self.width > 0
+            && self.height > 0
+            && (pipeline.tex_width != self.width || pipeline.tex_height != self.height)
+        {
+            pipeline.resize(device, self.width, self.height);
         }
-
-        let pipeline = storage.get_mut::<VizPipeline>().unwrap();
 
         // Only re-upload if the generation changed
         if pipeline.last_generation != self.generation && !self.pixels.is_empty() {
@@ -262,17 +300,16 @@ impl shader::Primitive for VizPrimitive {
 
     fn render(
         &self,
+        pipeline: &Self::Pipeline,
         encoder: &mut wgpu::CommandEncoder,
-        storage: &shader::Storage,
         target: &wgpu::TextureView,
         clip_bounds: &Rectangle<u32>,
     ) {
-        let pipeline = storage.get::<VizPipeline>().unwrap();
-
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("viz_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     // Don't clear — we're drawing into the iced compositor's target
@@ -283,6 +320,7 @@ impl shader::Primitive for VizPrimitive {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         pass.set_scissor_rect(

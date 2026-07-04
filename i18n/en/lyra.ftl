@@ -69,3 +69,53 @@ transcoding-bitrate = Max Bitrate
 transcoding-format = Format
 transcoding-original = Original
 transcoding-bandwidth-estimate = Estimated bandwidth savings: ~{ $percent }%
+
+# RowFoundation
+favorite-add = Add to favorites
+favorite-remove = Remove from favorites
+
+# CompactBar
+no-track-playing = No track playing
+show-now-playing = Show now playing
+
+# AlbumsView
+albums-empty-hint = Add music directories in Settings to get started
+play-album = Play Album
+album-tooltip = { $title } — { $artist }
+
+# ExpandedView
+expanded-collapse = Back to library
+expanded-empty-hint = Choose a song from your library to start listening
+
+# SmallViews
+artists-empty-hint = Artists will appear here once your library is scanned
+artist-album-count-one = { $count } album
+artist-album-count-other = { $count } albums
+artist-track-count-one = { $count } track
+artist-track-count-other = { $count } tracks
+genres-empty-hint = Genres will appear once your library is scanned.
+no-tracks-found = No tracks found
+genre-empty-hint = No tracks found for this genre.
+genre-track-count-one = { $count } track
+genre-track-count-other = { $count } tracks
+new-playlist-placeholder = New playlist name...
+playlist-name-placeholder = Playlist name...
+playlists-empty-hint = Create a playlist to organize your music
+delete-playlist-tooltip = Delete playlist
+back-to-playlists = Back to playlists
+remove-from-playlist = Remove from playlist
+playlist-empty-hint = Add tracks from the Songs view.
+playlist-track-count-one = { $count } track
+playlist-track-count-other = { $count } tracks
+
+# AppShell
+search-library = Search library
+toast-provider-connect-failed = Failed to connect to { $provider }: { $reason }
+
+# SongsTable
+songs-column-number = #
+songs-column-title = Title
+songs-column-artist = Artist
+songs-column-album = Album
+songs-column-duration = Duration
+songs-add-to-playlist = Add to "{ $playlist }"

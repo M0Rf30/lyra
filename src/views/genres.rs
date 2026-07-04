@@ -2,10 +2,13 @@
 
 //! Genres view - grid of all genres; clicking one shows filtered tracks.
 
+use crate::fl;
 use crate::library::Track;
 use crate::views::card_button_class;
 use crate::views::common;
+use crate::views::list_row_button_class;
 use cosmic::iced::alignment::{Horizontal, Vertical};
+use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
@@ -26,8 +29,8 @@ pub fn genre_grid_view(genres: &[String]) -> cosmic::Element<'_, GenreMessage> {
     if genres.is_empty() {
         return common::empty_state(
             "audio-x-generic-symbolic",
-            "No genres found",
-            "Genres will appear once your library is scanned.",
+            fl!("no-genres"),
+            fl!("genres-empty-hint"),
         );
     }
 
@@ -47,13 +50,20 @@ pub fn genre_grid_view(genres: &[String]) -> cosmic::Element<'_, GenreMessage> {
                 .class(cosmic::theme::Container::Card)
                 .into();
 
+            let label = widget::container(common::clipped_cell(
+                common::cell_text(genre.as_str())
+                    .width(140)
+                    .align_x(Horizontal::Center)
+                    .into(),
+            ))
+            .width(140)
+            .height(Length::Fixed(20.0))
+            .align_x(Horizontal::Center)
+            .align_y(Vertical::Center);
+
             let card = widget::Column::new()
                 .push(icon_container)
-                .push(
-                    common::cell_text(common::truncate_str(genre, 24))
-                        .width(140)
-                        .align_x(Horizontal::Center),
-                )
+                .push(label)
                 .spacing(6)
                 .align_x(Alignment::Center);
 
@@ -91,36 +101,47 @@ pub fn genre_detail_view<'a>(
                 .on_press(GenreMessage::BackToGrid),
         )
         .push(detail_icon)
-        .push(
+        .push(common::clipped_cell(
             widget::Column::new()
-                .push(widget::text::title1(genre_name))
-                .push(widget::text::caption(format!(
-                    "{} track{}",
-                    tracks.len(),
-                    if tracks.len() == 1 { "" } else { "s" }
-                )))
-                .spacing(4),
-        )
+                .push(widget::text::title1(genre_name).wrapping(Wrapping::None))
+                .push(common::cell_caption(genre_track_count_label(tracks.len())))
+                .spacing(4)
+                .into(),
+        ))
         .spacing(16)
         .align_y(Alignment::Center);
 
     let mut track_list = widget::Column::new().spacing(1);
 
     for (index, track) in tracks.iter().enumerate() {
+        let title_col = widget::container(common::clipped_cell(
+            common::cell_text(track.title.as_str()).into(),
+        ))
+        .width(Length::FillPortion(4));
+        let artist_col = widget::container(common::clipped_cell(
+            common::cell_text(track.artist.as_str()).into(),
+        ))
+        .width(Length::FillPortion(3));
+        let album_col = widget::container(common::clipped_cell(
+            common::cell_text(track.album.as_str()).into(),
+        ))
+        .width(Length::FillPortion(3));
+
         let row = widget::button::custom(
             widget::Row::new()
                 .push(common::cell_text(format!("{}", index + 1)).width(40))
-                .push(common::cell_text(track.title.as_str()).width(Length::FillPortion(4)))
-                .push(common::cell_text(track.artist.as_str()).width(Length::FillPortion(3)))
-                .push(common::cell_text(track.album.as_str()).width(Length::FillPortion(3)))
+                .push(title_col)
+                .push(artist_col)
+                .push(album_col)
                 .push(common::duration_cell(track.duration.as_secs()))
                 .spacing(8)
+                .width(Length::Fill)
                 .align_y(Alignment::Center)
                 .padding([4, 8]),
         )
         .on_press(GenreMessage::PlayTrack(index))
         .width(Length::Fill)
-        .class(cosmic::theme::Button::Text);
+        .class(list_row_button_class(false));
 
         track_list = track_list.push(row);
     }
@@ -128,8 +149,8 @@ pub fn genre_detail_view<'a>(
     if tracks.is_empty() {
         track_list = track_list.push(common::empty_state(
             "audio-x-generic-symbolic",
-            "No tracks found",
-            "No tracks found for this genre.",
+            fl!("no-tracks-found"),
+            fl!("genre-empty-hint"),
         ));
     }
 
@@ -175,5 +196,14 @@ fn genre_icon_name(genre: &str) -> &'static str {
         "weather-clear-symbolic"
     } else {
         "audio-x-generic-symbolic"
+    }
+}
+
+/// Localized "N tracks" label used in the genre detail header.
+fn genre_track_count_label(count: usize) -> String {
+    if count == 1 {
+        fl!("genre-track-count-one", count = count.to_string())
+    } else {
+        fl!("genre-track-count-other", count = count.to_string())
     }
 }

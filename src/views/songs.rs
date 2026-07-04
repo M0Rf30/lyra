@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0
 
+use crate::fl;
 use crate::library::{Playlist, Track};
-use crate::views::common;
+use crate::views::{common, list_row_button_class};
+use cosmic::cosmic_theme::palette::WithAlpha;
 use cosmic::iced::alignment::Horizontal;
 use cosmic::iced::{Alignment, Length, Size};
 use cosmic::prelude::*;
@@ -24,6 +26,130 @@ const ARTIST_BREAKPOINT: f32 = 640.0;
 const ALBUM_RATING_BREAKPOINT: f32 = 900.0;
 /// Minimum responsive width (px) at which the Genre column appears.
 const GENRE_BREAKPOINT: f32 = 1100.0;
+
+/// Spacing between adjacent columns, identical in the header and every row.
+const COLUMN_SPACING: f32 = 8.0;
+/// Leading (left) edge padding for the header and every row.
+const ROW_PADDING_LEFT: f32 = 8.0;
+
+// --- Row layout model & column-width arithmetic ----------------------------
+//
+// `build_header`/`build_row` each build one `widget::Row` with
+// `width(Length::Fill)`, `spacing(COLUMN_SPACING)` and left/right padding.
+// The `.width(Length::Fill)` on the row itself is load-bearing and must
+// never be removed: iced's flex layout (`iced::core::layout::flex::resolve`)
+// only distributes `FillPortion` children proportionally in its third pass
+// when the row's own main-axis length is *not* `Shrink`; a bare
+// `Row::new()` defaults to `Length::Shrink`, which silently turns every
+// `FillPortion` title/artist/album cell into "shrink to intrinsic content,
+// capped at whatever space is left" instead of "take a fair share of the
+// row". That is what let a long title/album steal width meant for the
+// columns after it, squeezing rating/add/duration and (without a clipping
+// container) letting text paint straight through the neighboring cell — the
+// screenshotted overflow bug. `Length::Fill` restores proportional
+// distribution; `common::clipped_cell` (via `fill_column` below) is the
+// second, independent safety net so even a fair share that's still narrower
+// than the text can never bleed past its own cell.
+//
+// With that fixed, iced's flex algorithm gives every *fixed*-width column
+// (num/genre/heart/rating/add/duration) its full declared width before
+// splitting whatever remains across the `FillPortion(4/3/3)` title/artist/
+// album cells, and clamps that remainder at 0 rather than letting it go
+// negative — so the only way rating/add/duration could ever be pushed past
+// the right edge is `fixed columns + spacing + padding` exceeding the width
+// available inside the row. Checking that at each breakpoint's lower bound
+// is sufficient: within a regime the fixed cost is constant while width can
+// only grow towards the next breakpoint, so the lower bound is always the
+// worst case (except regime "< 640", whose worst case is width -> 0, far
+// below any usable window). The right-edge padding includes a `space_s`
+// gutter (8/16/24px depending on interface density) reserved for the
+// vertical scrollbar, which `iced::widget::scrollable` overlays on top of
+// content instead of reserving layout space for (see `Scrollbar::layout`,
+// which positions it at `bounds.x + bounds.width - scrollbar_width`) —
+// without the gutter the bar would sit on top of the duration column.
+//
+// | width | columns shown                       | fixed+spacing+padding* | remaining fill |
+// |------:|--------------------------------------|------------------------:|---------------:|
+// |   640 | num,title,artist,heart,add,duration  |   168 + 40 + 32 = 240    | 400 (~57px/portion of 7) |
+// |   900 | + album, rating                      |   280 + 56 + 32 = 368    | 532 (~53px/portion of 10) |
+// |  1100 | + genre                              |   410 + 64 + 32 = 506    | 594 (~59px/portion of 10) |
+// |  1920 | (same columns as 1100)               |   410 + 64 + 32 = 506    | 1414 (~141px/portion of 10) |
+//
+// (* padding = ROW_PADDING_LEFT + ROW_PADDING_RIGHT = 8 + (8 + space_s) = 32
+// at the default "Standard" density's space_s=16; "remaining fill" only
+// shrinks by at most 8px more at "Spacious" density's space_s=24 (vs. the
+// Standard-density figures tabulated above), e.g. 400 -> 392 at 640px —
+// still comfortably positive.) Every row above stays
+// far from zero, so rating/add/duration are never squeezed or pushed past
+// the right edge at any audited width: the current widths and breakpoints
+// need no adjustment, only the row/clip fixes described above.
+fn row_padding_right() -> f32 {
+    ROW_PADDING_LEFT + f32::from(cosmic::theme::active().cosmic().spacing.space_s)
+}
+
+/// Column cell that claims a proportional share of the row's width via an
+/// outer `FillPortion` container, then clips its content with
+/// [`common::clipped_cell`] so long text can never bleed into the next
+/// column. `clipped_cell` fixes its own container to `Length::Fill`, so the
+/// portion ratio has to be established one level up, around it.
+fn fill_column<'a>(
+    portion: u16,
+    content: impl Into<cosmic::Element<'a, SongMessage>>,
+) -> cosmic::Element<'a, SongMessage> {
+    widget::container(common::clipped_cell(content.into()))
+        .width(Length::FillPortion(portion))
+        .into()
+}
+
+/// Alpha applied to secondary cell text (artist/album) so the title reads as
+/// the primary label and artist/album recede into a supporting role.
+/// `Component::on`/accent colors are opaque, so `with_alpha` (which sets the
+/// channel directly rather than multiplying it) is all that's needed.
+const SECONDARY_TEXT_ALPHA: f32 = 0.7;
+
+/// Secondary cell text color for a row that isn't playing: the normal
+/// on-surface color at reduced alpha.
+fn secondary_text_style(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
+    let cosmic = theme.cosmic();
+    cosmic::iced::widget::text::Style {
+        color: Some(
+            cosmic
+                .background(false)
+                .component
+                .on
+                .with_alpha(SECONDARY_TEXT_ALPHA)
+                .into(),
+        ),
+        ..Default::default()
+    }
+}
+
+/// Secondary cell text color for the currently-playing row: the accent
+/// color at the same reduced alpha, so artist/album stay tonally in step
+/// with the accent-tinted title instead of reading as disconnected from the
+/// highlight.
+fn secondary_text_style_playing(theme: &cosmic::Theme) -> cosmic::iced::widget::text::Style {
+    let cosmic = theme.cosmic();
+    cosmic::iced::widget::text::Style {
+        color: Some(
+            cosmic
+                .accent_color()
+                .with_alpha(SECONDARY_TEXT_ALPHA)
+                .into(),
+        ),
+        ..Default::default()
+    }
+}
+
+/// Secondary (dimmer) single-line cell text for the artist/album columns:
+/// same `body` size/weight as the title, but visually recedes behind it.
+fn secondary_cell_text<'a>(content: &'a str, is_playing: bool) -> common::Text<'a> {
+    common::cell_text(content).class(cosmic::theme::Text::Custom(if is_playing {
+        secondary_text_style_playing
+    } else {
+        secondary_text_style
+    }))
+}
 
 #[derive(Debug, Clone)]
 pub enum SongMessage {
@@ -135,6 +261,7 @@ pub fn songs_list_view<'a>(
             let show_album = size.width >= ALBUM_RATING_BREAKPOINT;
             let show_rating = size.width >= ALBUM_RATING_BREAKPOINT;
             let show_genre = size.width >= GENRE_BREAKPOINT;
+            let row_padding_right = row_padding_right();
 
             let header = build_header(
                 current_sort,
@@ -143,6 +270,7 @@ pub fn songs_list_view<'a>(
                 show_album,
                 show_rating,
                 show_genre,
+                row_padding_right,
             );
 
             let mut track_list = widget::Column::new().spacing(2);
@@ -159,6 +287,7 @@ pub fn songs_list_view<'a>(
                     show_album,
                     show_rating,
                     show_genre,
+                    row_padding_right,
                 ));
             }
 
@@ -192,52 +321,65 @@ fn build_header<'a>(
     show_album: bool,
     show_rating: bool,
     show_genre: bool,
+    row_padding_right: f32,
 ) -> cosmic::Element<'a, SongMessage> {
     let mut row = widget::Row::new()
-        .spacing(8)
+        // Load-bearing: see the row layout note above `row_padding_right`.
+        .width(Length::Fill)
+        .spacing(COLUMN_SPACING)
         .align_y(Alignment::Center)
-        .padding([4, 8]);
-
-    row = row.push(widget::Space::new().width(NUM_WIDTH));
+        .padding([4.0, row_padding_right, 4.0, ROW_PADDING_LEFT]);
 
     row = row.push(
+        widget::container(common::cell_text(fl!("songs-column-number")))
+            .width(NUM_WIDTH)
+            .align_x(Horizontal::Center)
+            // A single "#" can never realistically overflow 40px, but every
+            // no-wrap cell gets a clip so none can, on principle.
+            .clip(true),
+    );
+
+    row = row.push(fill_column(
+        4,
         widget::button::custom(common::cell_text(sort_label(
-            "Title",
+            &fl!("songs-column-title"),
             SortField::Title,
             current_sort,
             sort_descending,
         )))
         .on_press(SongMessage::SortBy(SortField::Title))
-        .width(Length::FillPortion(4))
-        .class(cosmic::theme::Button::Text),
-    );
+        .width(Length::Fill)
+        .class(list_row_button_class(false)),
+    ));
 
     if show_artist {
-        row = row.push(
+        row = row.push(fill_column(
+            3,
             widget::button::custom(common::cell_text(sort_label(
-                "Artist",
+                &fl!("songs-column-artist"),
                 SortField::Artist,
                 current_sort,
                 sort_descending,
             )))
             .on_press(SongMessage::SortBy(SortField::Artist))
-            .width(Length::FillPortion(3))
-            .class(cosmic::theme::Button::Text),
-        );
+            .width(Length::Fill)
+            .class(list_row_button_class(false)),
+        ));
     }
 
     if show_album {
-        row = row.push(
+        row = row.push(fill_column(
+            3,
             widget::button::custom(common::cell_text(sort_label(
-                "Album",
+                &fl!("songs-column-album"),
                 SortField::Album,
                 current_sort,
                 sort_descending,
             )))
             .on_press(SongMessage::SortBy(SortField::Album))
-            .width(Length::FillPortion(3))
-            .class(cosmic::theme::Button::Text),
-        );
+            .width(Length::Fill)
+            .class(list_row_button_class(false)),
+        ));
     }
 
     if show_genre {
@@ -255,16 +397,21 @@ fn build_header<'a>(
     row = row.push(
         widget::container(
             widget::button::custom(common::cell_text(sort_label(
-                "Duration",
+                &fl!("songs-column-duration"),
                 SortField::Duration,
                 current_sort,
                 sort_descending,
             )))
             .on_press(SongMessage::SortBy(SortField::Duration))
-            .class(cosmic::theme::Button::Text),
+            .class(list_row_button_class(false)),
         )
         .width(common::DURATION_WIDTH)
-        .align_x(Horizontal::Right),
+        .align_x(Horizontal::Right)
+        // Manual clip (rather than `fill_column`/`clipped_cell`, which
+        // always left-aligns) so a long localized "Duration" label plus its
+        // sort arrow can never paint past this fixed-width column while
+        // staying right-aligned, matching the data rows' duration cells.
+        .clip(true),
     );
 
     row.into()
@@ -282,6 +429,7 @@ fn build_row<'a>(
     show_album: bool,
     show_rating: bool,
     show_genre: bool,
+    row_padding_right: f32,
 ) -> cosmic::Element<'a, SongMessage> {
     let num_col: cosmic::Element<'a, SongMessage> = if is_playing {
         widget::icon::from_name("media-playback-start-symbolic")
@@ -291,33 +439,48 @@ fn build_row<'a>(
         common::cell_text(format!("{}", original_index + 1)).into()
     };
 
-    let mut row = widget::Row::new().spacing(8).align_y(Alignment::Center);
+    let mut row = widget::Row::new()
+        // Load-bearing: see the row layout note above `row_padding_right`.
+        .width(Length::Fill)
+        .spacing(COLUMN_SPACING)
+        .align_y(Alignment::Center);
 
     row = row.push(
         widget::container(num_col)
             .width(NUM_WIDTH)
-            .align_x(Horizontal::Center),
+            .align_x(Horizontal::Center)
+            // See the matching header cell: clipped on principle, even
+            // though the play icon and a formatted position number are
+            // always well within 40px in practice.
+            .clip(true),
     );
 
-    row = row.push(common::cell_text(track.title.as_str()).width(Length::FillPortion(4)));
+    row = row.push(fill_column(4, common::cell_text(track.title.as_str())));
 
     if show_artist {
-        row = row.push(common::cell_text(track.artist.as_str()).width(Length::FillPortion(3)));
+        row = row.push(fill_column(
+            3,
+            secondary_cell_text(track.artist.as_str(), is_playing),
+        ));
     }
 
     if show_album {
-        row = row.push(common::cell_text(track.album.as_str()).width(Length::FillPortion(3)));
+        row = row.push(fill_column(
+            3,
+            secondary_cell_text(track.album.as_str(), is_playing),
+        ));
     }
 
     if show_genre {
         let genre_col: cosmic::Element<'a, SongMessage> = if track.genre.is_empty() {
             widget::Space::new().width(GENRE_WIDTH).into()
         } else {
-            widget::container(
+            widget::container(common::clipped_cell(
                 widget::button::custom(common::cell_caption(track.genre.as_str()))
                     .on_press(SongMessage::FilterByGenre(track.genre.clone()))
-                    .class(cosmic::theme::Button::Standard),
-            )
+                    .class(cosmic::theme::Button::Standard)
+                    .into(),
+            ))
             .width(GENRE_WIDTH)
             .into()
         };
@@ -355,10 +518,14 @@ fn build_row<'a>(
 
     row = row.push(common::duration_cell(track.duration.as_secs()));
 
-    widget::button::custom(row.padding([6, 8]))
+    widget::button::custom(row.padding([6.0, row_padding_right, 6.0, ROW_PADDING_LEFT]))
         .on_press(SongMessage::PlayTrack(original_index))
         .width(Length::Fill)
-        .class(cosmic::theme::Button::Text)
+        // The row already carries its own padding above; zero the button's
+        // own default 5px padding so it doesn't silently add to the
+        // column-width arithmetic documented above `row_padding_right`.
+        .padding(0)
+        .class(list_row_button_class(is_playing))
         .into()
 }
 
@@ -374,7 +541,10 @@ fn playlist_dropdown_button<'a>(
             .on_press(SongMessage::AddToPlaylist(source_uri, playlist.id.clone()));
         widget::tooltip(
             button,
-            widget::text::caption(format!("Add to \"{}\"", playlist.name)),
+            widget::text::caption(fl!(
+                "songs-add-to-playlist",
+                playlist = playlist.name.as_str()
+            )),
             widget::tooltip::Position::Top,
         )
         .into()

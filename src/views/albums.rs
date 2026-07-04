@@ -2,11 +2,13 @@
 
 //! Albums grid view - displays album covers in a responsive grid (Lollypop-style).
 
+use crate::fl;
 use crate::library::{Album, CoverArt, Playlist};
-use crate::views::card_button_class;
 use crate::views::common;
+use crate::views::{card_button_class, list_row_button_class};
 use cosmic::iced::alignment::{Horizontal, Vertical};
-use cosmic::iced::{Alignment, Length};
+use cosmic::iced::core::text::Wrapping;
+use cosmic::iced::{Alignment, Length, Padding};
 use cosmic::prelude::*;
 use cosmic::widget;
 
@@ -31,6 +33,35 @@ pub enum AlbumMessage {
     AddToPlaylist(String, String),
 }
 
+/// Card artwork/label width — the grid, art frame, and clipped labels all
+/// share this so a card's cover and its two-line caption line up exactly.
+const CARD_WIDTH: f32 = 160.0;
+
+/// Fixed height for the two-line label block under each card: body
+/// line-height (21px) + caption line-height (17px) + 2px inter-line spacing.
+/// A constant height (rather than sizing to content) is what keeps every
+/// card in a row the same height, whether or not the artist line has text.
+const CARD_LABEL_HEIGHT: f32 = 40.0;
+
+/// Fixed width for genre chip buttons so a row of chips lines up neatly.
+const GENRE_CHIP_WIDTH: f32 = 130.0;
+
+/// Extra right-hand padding so the scrollbar gutter doesn't visually eat
+/// into the grid's margin, keeping perceived left/right whitespace symmetric.
+const SCROLLBAR_CLEARANCE: f32 = 16.0;
+
+/// Caption-styled, single-line text dimmed to the theme's secondary
+/// (neutral_7) color — used for artist subtitles under a bolder title so the
+/// two lines read with clear hierarchy instead of matching weight and color.
+fn secondary_caption<'a>(content: impl Into<std::borrow::Cow<'a, str>> + 'a) -> common::Text<'a> {
+    common::cell_caption(content).class(cosmic::theme::Text::Custom(|theme| {
+        cosmic::iced::widget::text::Style {
+            color: Some(theme.cosmic().palette.neutral_7.into()),
+            ..Default::default()
+        }
+    }))
+}
+
 /// Render the album grid view.
 pub fn album_grid_view<'a>(
     albums: &'a [Album],
@@ -39,8 +70,8 @@ pub fn album_grid_view<'a>(
     if albums.is_empty() {
         return common::empty_state(
             "folder-music-symbolic",
-            "No albums found",
-            "Add music directories in Settings to get started",
+            fl!("no-albums"),
+            fl!("albums-empty-hint"),
         );
     }
 
@@ -58,49 +89,96 @@ pub fn album_grid_view<'a>(
                             .size(64)
                             .into();
                     widget::container(placeholder_icon)
-                        .width(160)
-                        .height(160)
+                        .width(CARD_WIDTH)
+                        .height(CARD_WIDTH)
                         .align_x(Horizontal::Center)
                         .align_y(Vertical::Center)
                         .class(cosmic::theme::Container::Card)
                         .into()
                 };
 
+            // A missing or title-echoing artist still reserves the caption
+            // line's height (a non-breaking space) so every card's label
+            // block is exactly two lines tall and rows stay aligned.
+            let has_distinct_artist = !album.artist.trim().is_empty()
+                && !album.artist.trim().eq_ignore_ascii_case(album.name.trim());
+            let artist_display = if has_distinct_artist {
+                album.artist.as_str()
+            } else {
+                "\u{a0}"
+            };
+
+            let label_block = widget::container(
+                widget::Column::new()
+                    .push(
+                        widget::container(common::clipped_cell(
+                            common::cell_text(album.name.as_str()).into(),
+                        ))
+                        .width(CARD_WIDTH),
+                    )
+                    .push(
+                        widget::container(common::clipped_cell(
+                            secondary_caption(artist_display).into(),
+                        ))
+                        .width(CARD_WIDTH),
+                    )
+                    .spacing(2),
+            )
+            .height(Length::Fixed(CARD_LABEL_HEIGHT));
+
             let album_card = widget::Column::new()
                 .push(
                     widget::container(art_widget)
-                        .width(160)
-                        .height(160)
+                        .width(CARD_WIDTH)
+                        .height(CARD_WIDTH)
                         .align_x(Horizontal::Center)
                         .align_y(Vertical::Center),
                 )
-                .push(
-                    widget::Column::new()
-                        .push(common::cell_text(common::truncate_str(&album.name, 28)).width(160))
-                        .push(
-                            common::cell_caption(common::truncate_str(&album.artist, 28))
-                                .width(160),
-                        )
-                        .spacing(2),
-                )
+                .push(label_block)
                 .spacing(8);
 
-            widget::button::custom(album_card)
-                .on_press(AlbumMessage::SelectAlbum(index))
-                .padding(8)
-                .class(card_button_class())
-                .into()
+            let tooltip_label = if has_distinct_artist {
+                fl!(
+                    "album-tooltip",
+                    title = album.name.clone(),
+                    artist = album.artist.clone()
+                )
+            } else {
+                album.name.clone()
+            };
+
+            widget::tooltip(
+                widget::button::custom(album_card)
+                    .on_press(AlbumMessage::SelectAlbum(index))
+                    .padding(8)
+                    .class(card_button_class()),
+                widget::text::caption(tooltip_label),
+                widget::tooltip::Position::Top,
+            )
+            .into()
         })
         .collect();
+
+    let spacing = cosmic::theme::active().cosmic().spacing;
 
     let grid = widget::flex_row(cards)
         .column_spacing(20)
         .row_spacing(20)
-        .width(Length::Fill);
+        .width(Length::Fill)
+        .justify_content(widget::JustifyContent::Center);
 
-    widget::scrollable(widget::container(grid).padding(16).width(Length::Fill))
-        .height(Length::Fill)
-        .into()
+    widget::scrollable(
+        widget::container(grid)
+            .padding(Padding {
+                top: f32::from(spacing.space_m),
+                right: f32::from(spacing.space_m) + SCROLLBAR_CLEARANCE,
+                bottom: f32::from(spacing.space_m),
+                left: f32::from(spacing.space_m),
+            })
+            .width(Length::Fill),
+    )
+    .height(Length::Fill)
+    .into()
 }
 
 pub fn album_detail_view<'a>(
@@ -139,40 +217,58 @@ pub fn album_detail_view<'a>(
         if track_count == 1 { "" } else { "s" }
     );
     let duration_label = common::format_duration_coarse(album.total_duration().as_secs());
+    let spacing = cosmic::theme::active().cosmic().spacing;
 
-    let mut meta_col = widget::Column::new()
-        .push(widget::text::title2(album.name.as_str()))
-        .push(
-            widget::text::body(album.artist.as_str()).class(cosmic::theme::Text::Custom(|theme| {
+    let title_line = widget::container(common::clipped_cell(
+        widget::text::title2(album.name.as_str())
+            .wrapping(Wrapping::None)
+            .into(),
+    ))
+    .width(Length::Fill);
+
+    let artist_line = widget::container(common::clipped_cell(
+        widget::text::body(album.artist.as_str())
+            .wrapping(Wrapping::None)
+            .class(cosmic::theme::Text::Custom(|theme| {
                 cosmic::iced::widget::text::Style {
                     color: Some(theme.cosmic().palette.neutral_7.into()),
                     ..Default::default()
                 }
-            })),
-        )
+            }))
+            .into(),
+    ))
+    .width(Length::Fill);
+
+    let mut meta_col = widget::Column::new()
+        .push(title_line)
+        .push(artist_line)
         .push(common::cell_caption(format!(
             "{track_label} \u{b7} {duration_label}"
         )))
         .push(
-            widget::button::suggested("Play Album").on_press(AlbumMessage::PlayAlbum(album_index)),
+            widget::button::suggested(fl!("play-album"))
+                .on_press(AlbumMessage::PlayAlbum(album_index)),
         )
+        .width(Length::Fill)
         .spacing(8);
 
     // Task 103: Genre chips in album header
     if !genres.is_empty() {
-        let mut genre_row = widget::Row::new().spacing(4).align_y(Alignment::Center);
+        let mut genre_row = widget::Row::new()
+            .spacing(spacing.space_xs)
+            .align_y(Alignment::Center);
         for genre in genres {
             // Use the owned String for both the message and the label.
             let label = genre.clone();
             genre_row = genre_row.push(
-                widget::button::custom(common::cell_caption(label))
+                widget::button::custom(common::clipped_cell(common::cell_caption(label).into()))
                     .on_press(AlbumMessage::FilterByGenre(genre))
-                    .class(cosmic::theme::Button::Standard),
+                    .class(cosmic::theme::Button::Standard)
+                    .width(GENRE_CHIP_WIDTH),
             );
         }
         meta_col = meta_col.push(genre_row);
     }
-
     let header = widget::Row::new()
         .push(common::icon_button(
             "go-previous-symbolic",
@@ -218,15 +314,15 @@ pub fn album_detail_view<'a>(
 
         // Task 103: Genre chip per track, fixed-width so columns stay aligned.
         let genre_widget: cosmic::Element<'_, AlbumMessage> = if !track.genre.is_empty() {
-            widget::container(
-                widget::button::custom(common::cell_caption(track.genre.as_str()))
-                    .on_press(AlbumMessage::FilterByGenre(track.genre.clone()))
-                    .class(cosmic::theme::Button::Standard),
-            )
-            .width(130)
+            widget::button::custom(common::clipped_cell(
+                common::cell_caption(track.genre.as_str()).into(),
+            ))
+            .on_press(AlbumMessage::FilterByGenre(track.genre.clone()))
+            .class(cosmic::theme::Button::Standard)
+            .width(GENRE_CHIP_WIDTH)
             .into()
         } else {
-            widget::Space::new().width(130).into()
+            widget::Space::new().width(GENRE_CHIP_WIDTH).into()
         };
 
         // Task 98: Add to playlist button - honest about its destination, or
@@ -254,20 +350,31 @@ pub fn album_detail_view<'a>(
                         .width(40)
                         .align_x(Horizontal::Center),
                 )
-                .push(common::cell_text(track.title.as_str()).width(Length::FillPortion(4)))
-                .push(common::cell_text(track.artist.as_str()).width(Length::FillPortion(3)))
+                .push(
+                    widget::container(common::clipped_cell(
+                        common::cell_text(track.title.as_str()).into(),
+                    ))
+                    .width(Length::FillPortion(4)),
+                )
+                .push(
+                    widget::container(common::clipped_cell(
+                        common::cell_text(track.artist.as_str()).into(),
+                    ))
+                    .width(Length::FillPortion(3)),
+                )
                 .push(heart_btn)
                 .push(rating_row)
                 .push(genre_widget)
                 .push(playlist_btn)
                 .push(common::duration_cell(track.duration.as_secs()))
                 .spacing(8)
+                .width(Length::Fill)
                 .align_y(Alignment::Center)
                 .padding(4),
         )
         .on_press(AlbumMessage::PlayTrack(album_index, track_idx))
         .width(Length::Fill)
-        .class(cosmic::theme::Button::Text);
+        .class(list_row_button_class(is_playing));
 
         track_list = track_list.push(row);
     }
