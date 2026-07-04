@@ -1,10 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0
 
 use crate::library::{Playlist, Track};
-use cosmic::iced::alignment::{Horizontal, Vertical};
-use cosmic::iced::{Alignment, Length};
+use crate::views::common;
+use cosmic::iced::alignment::Horizontal;
+use cosmic::iced::{Alignment, Length, Size};
 use cosmic::prelude::*;
 use cosmic::widget;
+
+/// Fixed width of the leading track-number / now-playing indicator column.
+const NUM_WIDTH: f32 = 40.0;
+/// Fixed width of the genre chip column.
+const GENRE_WIDTH: f32 = 130.0;
+/// Fixed width of the favorite-heart column.
+const HEART_WIDTH: f32 = 32.0;
+/// Fixed width of the star-rating column.
+const RATING_WIDTH: f32 = 112.0;
+/// Fixed width of the add-to-playlist column.
+const ADD_WIDTH: f32 = 32.0;
+
+/// Minimum responsive width (px) at which the Artist column appears.
+const ARTIST_BREAKPOINT: f32 = 640.0;
+/// Minimum responsive width (px) at which the Album and Rating columns appear.
+const ALBUM_RATING_BREAKPOINT: f32 = 900.0;
+/// Minimum responsive width (px) at which the Genre column appears.
+const GENRE_BREAKPOINT: f32 = 1100.0;
 
 #[derive(Debug, Clone)]
 pub enum SongMessage {
@@ -35,6 +54,14 @@ pub fn songs_list_view<'a>(
     playlists: &'a [Playlist],
     current_track_id: Option<i64>,
 ) -> cosmic::Element<'a, SongMessage> {
+    if tracks.is_empty() {
+        return common::empty_state(
+            "audio-x-generic-symbolic",
+            "No songs found",
+            "Scan your library from File > Rescan",
+        );
+    }
+
     let filtered: Vec<(usize, &Track)> = tracks
         .iter()
         .enumerate()
@@ -51,22 +78,7 @@ pub fn songs_list_view<'a>(
         })
         .collect();
 
-    if tracks.is_empty() {
-        return widget::container(
-            widget::Column::new()
-                .push(widget::icon::from_name("audio-x-generic-symbolic").size(64))
-                .push(widget::text::title3("No songs found"))
-                .spacing(12)
-                .align_x(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Horizontal::Center)
-        .align_y(Vertical::Center)
-        .into();
-    }
-
-    // Filter bar: Favorites toggle + genre filter indicator
+    // Filter bar: Favorites toggle + genre filter indicator + track count.
     let mut filter_bar = widget::Row::new().spacing(8).align_y(Alignment::Center);
 
     let fav_icon = if favorites_filter {
@@ -102,199 +114,272 @@ pub fn songs_list_view<'a>(
         filter_bar = filter_bar.push(genre_chip);
     }
 
-    filter_bar = filter_bar
-        .push(widget::text::caption(format!("{} tracks", filtered.len())).width(Length::Fill));
+    filter_bar = filter_bar.push(
+        common::cell_caption(format!(
+            "{} track{}",
+            filtered.len(),
+            if filtered.len() == 1 { "" } else { "s" }
+        ))
+        .width(Length::Fill),
+    );
 
-    // Column headers — the leading 40px column mirrors the track number / play icon column.
-    let header = widget::Row::new()
-        .push(widget::Space::new().width(40))
-        .push(
-            widget::button::custom(widget::text(sort_label(
-                "Title",
-                SortField::Title,
+    let table_area: cosmic::Element<'a, SongMessage> = if filtered.is_empty() {
+        common::empty_state(
+            "edit-find-symbolic",
+            "No matching tracks",
+            "Try clearing the favorites or genre filter",
+        )
+    } else {
+        widget::responsive(move |size: Size| {
+            let show_artist = size.width >= ARTIST_BREAKPOINT;
+            let show_album = size.width >= ALBUM_RATING_BREAKPOINT;
+            let show_rating = size.width >= ALBUM_RATING_BREAKPOINT;
+            let show_genre = size.width >= GENRE_BREAKPOINT;
+
+            let header = build_header(
                 current_sort,
                 sort_descending,
-            )))
-            .on_press(SongMessage::SortBy(SortField::Title))
-            .width(Length::FillPortion(3))
-            .class(cosmic::theme::Button::Text),
-        )
-        .push(
-            widget::button::custom(widget::text(sort_label(
+                show_artist,
+                show_album,
+                show_rating,
+                show_genre,
+            );
+
+            let mut track_list = widget::Column::new().spacing(2);
+            for &(original_index, track) in &filtered {
+                let track_id = track.id.to_string();
+                let is_playing = current_track_id == Some(track.id);
+                track_list = track_list.push(build_row(
+                    original_index,
+                    track,
+                    track_id,
+                    is_playing,
+                    playlists,
+                    show_artist,
+                    show_album,
+                    show_rating,
+                    show_genre,
+                ));
+            }
+
+            widget::Column::new()
+                .push(header)
+                .push(widget::divider::horizontal::default())
+                .push(
+                    widget::scrollable(widget::container(track_list).width(Length::Fill))
+                        .height(Length::Fill),
+                )
+                .spacing(4)
+                .into()
+        })
+        .into()
+    };
+
+    widget::Column::new()
+        .push(filter_bar)
+        .push(table_area)
+        .padding(16)
+        .spacing(4)
+        .into()
+}
+
+/// Build the column header row. Uses the exact same fixed widths /
+/// `FillPortion`s as [`build_row`] so labels line up with their values.
+fn build_header<'a>(
+    current_sort: SortField,
+    sort_descending: bool,
+    show_artist: bool,
+    show_album: bool,
+    show_rating: bool,
+    show_genre: bool,
+) -> cosmic::Element<'a, SongMessage> {
+    let mut row = widget::Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .padding([4, 8]);
+
+    row = row.push(widget::Space::new().width(NUM_WIDTH));
+
+    row = row.push(
+        widget::button::custom(common::cell_text(sort_label(
+            "Title",
+            SortField::Title,
+            current_sort,
+            sort_descending,
+        )))
+        .on_press(SongMessage::SortBy(SortField::Title))
+        .width(Length::FillPortion(4))
+        .class(cosmic::theme::Button::Text),
+    );
+
+    if show_artist {
+        row = row.push(
+            widget::button::custom(common::cell_text(sort_label(
                 "Artist",
                 SortField::Artist,
                 current_sort,
                 sort_descending,
             )))
             .on_press(SongMessage::SortBy(SortField::Artist))
-            .width(Length::FillPortion(2))
+            .width(Length::FillPortion(3))
             .class(cosmic::theme::Button::Text),
-        )
-        .push(
-            widget::button::custom(widget::text(sort_label(
+        );
+    }
+
+    if show_album {
+        row = row.push(
+            widget::button::custom(common::cell_text(sort_label(
                 "Album",
                 SortField::Album,
                 current_sort,
                 sort_descending,
             )))
             .on_press(SongMessage::SortBy(SortField::Album))
-            .width(Length::FillPortion(2))
+            .width(Length::FillPortion(3))
             .class(cosmic::theme::Button::Text),
-        )
-        .push(
-            widget::button::custom(widget::text(sort_label(
+        );
+    }
+
+    if show_genre {
+        row = row.push(widget::Space::new().width(GENRE_WIDTH));
+    }
+
+    row = row.push(widget::Space::new().width(HEART_WIDTH));
+
+    if show_rating {
+        row = row.push(widget::Space::new().width(RATING_WIDTH));
+    }
+
+    row = row.push(widget::Space::new().width(ADD_WIDTH));
+
+    row = row.push(
+        widget::container(
+            widget::button::custom(common::cell_text(sort_label(
                 "Duration",
                 SortField::Duration,
                 current_sort,
                 sort_descending,
             )))
             .on_press(SongMessage::SortBy(SortField::Duration))
-            .width(64)
             .class(cosmic::theme::Button::Text),
         )
-        .push(widget::Space::new().width(Length::Shrink))
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .padding([4, 8]);
+        .width(common::DURATION_WIDTH)
+        .align_x(Horizontal::Right),
+    );
 
-    if filtered.is_empty() {
-        let message = if favorites_filter {
-            "No favorites yet — click the heart on any track to add one"
-        } else {
-            "No tracks match the current filter"
-        };
-        return widget::Column::new()
-            .push(filter_bar)
-            .push(header)
-            .push(widget::divider::horizontal::default())
-            .push(
-                widget::container(
-                    widget::Column::new()
-                        .push(widget::icon::from_name("edit-find-symbolic").size(48))
-                        .push(widget::text::title3(message))
-                        .spacing(12)
-                        .align_x(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(Horizontal::Center)
-                .align_y(Vertical::Center),
-            )
-            .padding(16)
-            .spacing(4)
-            .into();
-    }
-
-    let mut track_list = widget::Column::new().spacing(2);
-
-    for (original_index, track) in &filtered {
-        let track_id = track.id.to_string();
-        let is_playing = current_track_id == Some(track.id);
-
-        let num_col: cosmic::Element<'_, SongMessage> = if is_playing {
-            widget::icon::from_name("media-playback-start-symbolic")
-                .size(14)
-                .into()
-        } else {
-            widget::text(format!("{}", original_index + 1)).into()
-        };
-
-        let fav_icon_name = if track.is_favorite {
-            "emblem-favorite-symbolic"
-        } else {
-            "non-starred-symbolic"
-        };
-        let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(16))
-            .on_press(SongMessage::ToggleFavorite(track_id.clone()));
-
-        let rating_row = star_rating_widget(track_id.clone(), track.rating);
-
-        let genre_widget: cosmic::Element<'_, SongMessage> = if !track.genre.is_empty() {
-            widget::button::custom(widget::text::caption(&track.genre))
-                .on_press(SongMessage::FilterByGenre(track.genre.clone()))
-                .class(cosmic::theme::Button::Standard)
-                .into()
-        } else {
-            widget::Space::new().width(0).into()
-        };
-
-        let playlist_btn: cosmic::Element<'_, SongMessage> = if !playlists.is_empty() {
-            let source_uri = track.source_uri.clone();
-            let pl_ids: Vec<String> = playlists.iter().map(|p| p.id.clone()).collect();
-            playlist_dropdown_button(source_uri, &pl_ids)
-        } else {
-            widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16)).into()
-        };
-
-        let row = widget::button::custom(
-            widget::Row::new()
-                .push(
-                    widget::container(num_col)
-                        .width(40)
-                        .align_x(Horizontal::Center),
-                )
-                .push(widget::text(track.title.as_str()).width(Length::FillPortion(3)))
-                .push(widget::text(track.artist.as_str()).width(Length::FillPortion(2)))
-                .push(widget::text(track.album.as_str()).width(Length::FillPortion(2)))
-                .push(widget::text(track.duration_string()).width(64))
-                .push(heart_btn)
-                .push(rating_row)
-                .push(genre_widget)
-                .push(playlist_btn)
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .padding([6, 8]),
-        )
-        .on_press(SongMessage::PlayTrack(*original_index))
-        .width(Length::Fill)
-        .class(cosmic::theme::Button::Text);
-
-        track_list = track_list.push(row);
-    }
-
-    widget::Column::new()
-        .push(filter_bar)
-        .push(header)
-        .push(widget::divider::horizontal::default())
-        .push(
-            widget::scrollable(widget::container(track_list).width(Length::Fill))
-                .height(Length::Fill),
-        )
-        .padding(16)
-        .spacing(4)
-        .into()
-}
-
-pub fn star_rating_widget<'a>(
-    track_id: String,
-    current_rating: Option<u8>,
-) -> cosmic::Element<'a, SongMessage> {
-    let rating = current_rating.unwrap_or(0);
-    let mut row = widget::Row::new().spacing(0).align_y(Alignment::Center);
-    for star in 1u8..=5 {
-        let icon_name = if star <= rating {
-            "starred-symbolic"
-        } else {
-            "non-starred-symbolic"
-        };
-        let new_rating = if star == rating { 0 } else { star };
-        let btn = widget::button::icon(widget::icon::from_name(icon_name).size(14))
-            .on_press(SongMessage::SetRating(track_id.clone(), new_rating));
-        row = row.push(btn);
-    }
     row.into()
 }
 
-fn playlist_dropdown_button<'a>(
-    source_uri: String,
-    ids: &[String],
+/// Build a single track row. Column widths mirror [`build_header`] exactly.
+#[allow(clippy::too_many_arguments)]
+fn build_row<'a>(
+    original_index: usize,
+    track: &'a Track,
+    track_id: String,
+    is_playing: bool,
+    playlists: &'a [Playlist],
+    show_artist: bool,
+    show_album: bool,
+    show_rating: bool,
+    show_genre: bool,
 ) -> cosmic::Element<'a, SongMessage> {
-    if let Some(first_id) = ids.first() {
-        widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16))
-            .on_press(SongMessage::AddToPlaylist(source_uri, first_id.clone()))
+    let num_col: cosmic::Element<'a, SongMessage> = if is_playing {
+        widget::icon::from_name("media-playback-start-symbolic")
+            .size(14)
             .into()
     } else {
-        widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16)).into()
+        common::cell_text(format!("{}", original_index + 1)).into()
+    };
+
+    let mut row = widget::Row::new().spacing(8).align_y(Alignment::Center);
+
+    row = row.push(
+        widget::container(num_col)
+            .width(NUM_WIDTH)
+            .align_x(Horizontal::Center),
+    );
+
+    row = row.push(common::cell_text(track.title.as_str()).width(Length::FillPortion(4)));
+
+    if show_artist {
+        row = row.push(common::cell_text(track.artist.as_str()).width(Length::FillPortion(3)));
+    }
+
+    if show_album {
+        row = row.push(common::cell_text(track.album.as_str()).width(Length::FillPortion(3)));
+    }
+
+    if show_genre {
+        let genre_col: cosmic::Element<'a, SongMessage> = if track.genre.is_empty() {
+            widget::Space::new().width(GENRE_WIDTH).into()
+        } else {
+            widget::container(
+                widget::button::custom(common::cell_caption(track.genre.as_str()))
+                    .on_press(SongMessage::FilterByGenre(track.genre.clone()))
+                    .class(cosmic::theme::Button::Standard),
+            )
+            .width(GENRE_WIDTH)
+            .into()
+        };
+        row = row.push(genre_col);
+    }
+
+    row = row.push(
+        widget::container(common::favorite_button(
+            track.is_favorite,
+            SongMessage::ToggleFavorite(track_id.clone()),
+        ))
+        .width(HEART_WIDTH)
+        .align_x(Horizontal::Center),
+    );
+
+    if show_rating {
+        let rating_track_id = track_id.clone();
+        row = row.push(
+            widget::container(common::star_rating(track.rating, move |r| {
+                SongMessage::SetRating(rating_track_id.clone(), r)
+            }))
+            .width(RATING_WIDTH)
+            .align_x(Horizontal::Center),
+        );
+    }
+
+    row = row.push(
+        widget::container(playlist_dropdown_button(
+            track.source_uri.clone(),
+            playlists,
+        ))
+        .width(ADD_WIDTH)
+        .align_x(Horizontal::Center),
+    );
+
+    row = row.push(common::duration_cell(track.duration.as_secs()));
+
+    widget::button::custom(row.padding([6, 8]))
+        .on_press(SongMessage::PlayTrack(original_index))
+        .width(Length::Fill)
+        .class(cosmic::theme::Button::Text)
+        .into()
+}
+
+/// Add-to-playlist button. Adds to the first playlist (existing behavior),
+/// honestly labelled via tooltip with that playlist's name. Renders empty
+/// space instead of a dead button when there are no playlists yet.
+fn playlist_dropdown_button<'a>(
+    source_uri: String,
+    playlists: &[Playlist],
+) -> cosmic::Element<'a, SongMessage> {
+    if let Some(playlist) = playlists.first() {
+        let button = widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16))
+            .on_press(SongMessage::AddToPlaylist(source_uri, playlist.id.clone()));
+        widget::tooltip(
+            button,
+            widget::text::caption(format!("Add to \"{}\"", playlist.name)),
+            widget::tooltip::Position::Top,
+        )
+        .into()
+    } else {
+        widget::Space::new().width(ADD_WIDTH).into()
     }
 }
 

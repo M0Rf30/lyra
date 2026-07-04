@@ -2,6 +2,7 @@
 
 pub mod albums;
 pub mod artists;
+pub mod common;
 pub mod equalizer;
 pub mod genres;
 pub mod lyrics;

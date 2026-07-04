@@ -6,8 +6,8 @@
 
 use crate::library::{LyricLine, Lyrics};
 use cosmic::iced::alignment::{Horizontal, Vertical};
-use cosmic::iced::{Alignment, Length};
 use cosmic::iced::core::Color;
+use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
 use std::time::Duration;

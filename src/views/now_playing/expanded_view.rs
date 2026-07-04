@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0
 
-use super::{NowPlayingMessage, format_time, truncate_str};
+use super::{NowPlayingMessage, format_time};
 use crate::config::RepeatMode;
 use crate::library::Track;
 use crate::player::PlaybackState;
+use crate::views::common;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::widget::Stack;
 use cosmic::iced::{Alignment, Color, Length};
@@ -48,10 +49,15 @@ pub fn expanded_now_playing<'a>(
     let cover_col: cosmic::Element<'_, NowPlayingMessage> = if let Some(handle) = cover_art {
         widget::container(
             widget::icon::icon(handle.clone())
-                .content_fit(cosmic::iced::ContentFit::Cover)
+                .content_fit(cosmic::iced::ContentFit::Contain)
                 .width(Length::Fill)
                 .height(Length::Fill),
         )
+        .padding(32)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Horizontal::Center)
+        .align_y(Vertical::Center)
         .class(cosmic::theme::Container::custom(|theme| {
             let cosmic = theme.cosmic();
             cosmic::iced::widget::container::Style {
@@ -68,8 +74,6 @@ pub fn expanded_now_playing<'a>(
                 ..Default::default()
             }
         }))
-        .width(Length::Fill)
-        .height(Length::Fill)
         .into()
     } else {
         widget::container(widget::icon::from_name("media-optical-cd-audio-symbolic").size(160))
@@ -100,23 +104,45 @@ pub fn expanded_now_playing<'a>(
 
     let repeat_icon = repeat_mode.icon_name();
 
-    let collapse_btn = widget::button::icon(widget::icon::from_name("go-down-symbolic").size(24))
-        .on_press(NowPlayingMessage::Collapse);
+    let collapse_btn = common::icon_button(
+        "go-down-symbolic",
+        24,
+        "Collapse",
+        NowPlayingMessage::Collapse,
+    );
 
     let mut right_col = widget::Column::new().spacing(0);
 
     let top_bar = widget::Row::new()
-        .push(widget::Space::new().width(Length::Fill).height(Length::Shrink))
+        .push(
+            widget::Space::new()
+                .width(Length::Fill)
+                .height(Length::Shrink),
+        )
         .push(collapse_btn)
         .align_y(Alignment::Center);
     right_col = right_col.push(top_bar);
 
-    right_col = right_col.push(widget::Space::new().width(Length::Shrink).height(Length::Fill));
+    right_col = right_col.push(
+        widget::Space::new()
+            .width(Length::Shrink)
+            .height(Length::Fill),
+    );
 
     if let Some(track) = current_track {
-        right_col = right_col
-            .push(widget::text::title2(truncate_str(&track.title, 40)))
-            .push(widget::Space::new().width(Length::Shrink).height(Length::Fixed(6.0)));
+        let title_row = widget::Row::new()
+            .push(widget::text::title2(common::truncate_str(&track.title, 70)))
+            .push(common::favorite_button(
+                track.is_favorite,
+                NowPlayingMessage::ToggleFavorite(track.id.to_string()),
+            ))
+            .spacing(12)
+            .align_y(Alignment::Center);
+        right_col = right_col.push(title_row).push(
+            widget::Space::new()
+                .width(Length::Shrink)
+                .height(Length::Fixed(6.0)),
+        );
 
         let mut sub_parts: Vec<String> = Vec::new();
         if !track.artist.is_empty() {
@@ -140,7 +166,11 @@ pub fn expanded_now_playing<'a>(
         right_col = right_col.push(widget::text::title2("No track playing"));
     }
 
-    right_col = right_col.push(widget::Space::new().width(Length::Shrink).height(Length::Fixed(24.0)));
+    right_col = right_col.push(
+        widget::Space::new()
+            .width(Length::Shrink)
+            .height(Length::Fixed(24.0)),
+    );
 
     let seek_bar = widget::Row::new()
         .push(widget::text::body(format_time(display_position)))
@@ -155,29 +185,52 @@ pub fn expanded_now_playing<'a>(
         .align_y(Alignment::Center);
     right_col = right_col.push(seek_bar);
 
-    right_col = right_col.push(widget::Space::new().width(Length::Shrink).height(Length::Fixed(16.0)));
+    right_col = right_col.push(
+        widget::Space::new()
+            .width(Length::Shrink)
+            .height(Length::Fixed(16.0)),
+    );
 
+    let play_label: &'static str = if state == PlaybackState::Playing {
+        "Pause"
+    } else {
+        "Play"
+    };
+    let shuffle_btn = widget::tooltip(
+        widget::button::icon(widget::icon::from_name(shuffle_icon).size(24))
+            .selected(shuffle)
+            .on_press(NowPlayingMessage::ToggleShuffle),
+        widget::text::caption("Shuffle"),
+        cosmic::widget::tooltip::Position::Top,
+    );
+    let repeat_btn = widget::tooltip(
+        widget::button::icon(widget::icon::from_name(repeat_icon).size(24))
+            .selected(repeat_mode != RepeatMode::None)
+            .on_press(NowPlayingMessage::CycleRepeat),
+        widget::text::caption("Repeat"),
+        cosmic::widget::tooltip::Position::Top,
+    );
     let transport = widget::Row::new()
-        .push(
-            widget::button::icon(widget::icon::from_name(shuffle_icon).size(24))
-                .on_press(NowPlayingMessage::ToggleShuffle),
-        )
-        .push(
-            widget::button::icon(widget::icon::from_name("media-skip-backward-symbolic").size(28))
-                .on_press(NowPlayingMessage::Previous),
-        )
-        .push(
-            widget::button::icon(widget::icon::from_name(play_icon).size(36))
-                .on_press(NowPlayingMessage::TogglePlayback),
-        )
-        .push(
-            widget::button::icon(widget::icon::from_name("media-skip-forward-symbolic").size(28))
-                .on_press(NowPlayingMessage::Next),
-        )
-        .push(
-            widget::button::icon(widget::icon::from_name(repeat_icon).size(24))
-                .on_press(NowPlayingMessage::CycleRepeat),
-        )
+        .push(shuffle_btn)
+        .push(common::icon_button(
+            "media-skip-backward-symbolic",
+            28,
+            "Previous",
+            NowPlayingMessage::Previous,
+        ))
+        .push(common::icon_button(
+            play_icon,
+            36,
+            play_label,
+            NowPlayingMessage::TogglePlayback,
+        ))
+        .push(common::icon_button(
+            "media-skip-forward-symbolic",
+            28,
+            "Next",
+            NowPlayingMessage::Next,
+        ))
+        .push(repeat_btn)
         .spacing(8)
         .align_y(Alignment::Center);
 
@@ -187,20 +240,36 @@ pub fn expanded_now_playing<'a>(
             .width(Length::Fill),
     );
 
-    right_col = right_col.push(widget::Space::new().width(Length::Shrink).height(Length::Fixed(16.0)));
+    right_col = right_col.push(
+        widget::Space::new()
+            .width(Length::Shrink)
+            .height(Length::Fixed(16.0)),
+    );
+
+    let volume_icon_name = if volume <= 0.0 {
+        "audio-volume-muted-symbolic"
+    } else if volume < 0.33 {
+        "audio-volume-low-symbolic"
+    } else if volume < 0.66 {
+        "audio-volume-medium-symbolic"
+    } else {
+        "audio-volume-high-symbolic"
+    };
 
     #[allow(unused_mut)]
     let mut bottom_row = widget::Row::new()
-        .push(widget::icon::from_name("audio-volume-high-symbolic").size(20))
+        .push(widget::icon::from_name(volume_icon_name).size(20))
         .push(
             widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
                 .step(0.01)
                 .width(Length::Fill),
         )
-        .push(
-            widget::button::icon(widget::icon::from_name("view-list-lyrics-symbolic").size(24))
-                .on_press(NowPlayingMessage::ShowLyrics),
-        );
+        .push(common::icon_button(
+            "view-list-lyrics-symbolic",
+            24,
+            "Lyrics",
+            NowPlayingMessage::ShowLyrics,
+        ));
 
     #[cfg(feature = "visualizer")]
     {
@@ -221,12 +290,16 @@ pub fn expanded_now_playing<'a>(
 
     right_col = right_col.push(bottom_row.spacing(10).align_y(Alignment::Center));
 
-    right_col = right_col.push(widget::Space::new().width(Length::Shrink).height(Length::Fill));
+    right_col = right_col.push(
+        widget::Space::new()
+            .width(Length::Shrink)
+            .height(Length::Fill),
+    );
 
     let right_panel = widget::container(right_col.width(Length::Fill))
         .padding([20, 28, 28, 28])
         .width(Length::FillPortion(1))
-        .height(Length::Fixed(800.0))
+        .height(Length::Fill)
         .class(cosmic::theme::Container::custom(|_| {
             cosmic::iced::widget::container::Style {
                 background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.72).into()),
@@ -237,12 +310,12 @@ pub fn expanded_now_playing<'a>(
 
     let left_panel = widget::container(cover_col)
         .width(Length::FillPortion(1))
-        .height(Length::Fixed(800.0));
+        .height(Length::Fill);
 
     let two_col = widget::Row::new()
         .push(left_panel)
         .push(right_panel)
-        .height(Length::Fixed(800.0))
+        .height(Length::Fill)
         .width(Length::Fill);
 
     #[cfg(feature = "visualizer")]
@@ -258,7 +331,7 @@ pub fn expanded_now_playing<'a>(
                 };
 
                 let overlay_col = widget::Column::new()
-                    .push(widget::text::title3(truncate_str(&track.title, 40)))
+                    .push(widget::text::title3(common::truncate_str(&track.title, 40)))
                     .push(
                         widget::text::body(subtitle).class(cosmic::theme::Text::Custom(|theme| {
                             cosmic::iced::widget::text::Style {
@@ -299,7 +372,7 @@ pub fn expanded_now_playing<'a>(
                 let positioned = widget::container(overlay_pill)
                     .padding([24, 0, 0, 24])
                     .width(Length::Fill)
-                    .height(Length::Fixed(800.0));
+                    .height(Length::Fill);
 
                 Some(positioned.into())
             } else {
@@ -315,14 +388,14 @@ pub fn expanded_now_playing<'a>(
             Arc::clone(&viz_frame_buf),
         ))
         .width(Length::Fill)
-        .height(Length::Fixed(800.0));
+        .height(Length::Fill);
         Some(shader.into())
     } else {
         blurred_cover.map(|h| {
             let el: cosmic::Element<'_, NowPlayingMessage> = widget::icon::icon(h.clone())
                 .content_fit(cosmic::iced::ContentFit::Cover)
                 .width(Length::Fill)
-                .height(Length::Fixed(800.0))
+                .height(Length::Fill)
                 .into();
             el
         })
@@ -333,7 +406,7 @@ pub fn expanded_now_playing<'a>(
         let el: cosmic::Element<'_, NowPlayingMessage> = widget::icon::icon(h.clone())
             .content_fit(cosmic::iced::ContentFit::Cover)
             .width(Length::Fill)
-            .height(Length::Fixed(800.0))
+            .height(Length::Fill)
             .into();
         el
     });
@@ -342,7 +415,7 @@ pub fn expanded_now_playing<'a>(
         let black_base: cosmic::Element<'_, NowPlayingMessage> =
             widget::container(widget::Space::new().width(0).height(0))
                 .width(Length::Fill)
-                .height(Length::Fixed(800.0))
+                .height(Length::Fill)
                 .class(cosmic::theme::Container::custom(|_theme| {
                     cosmic::iced::widget::container::Style {
                         background: Some(Color::BLACK.into()),
@@ -362,9 +435,13 @@ pub fn expanded_now_playing<'a>(
         #[cfg(feature = "visualizer")]
         if visualizer_active {
             let dbl_click_cap: cosmic::Element<'_, NowPlayingMessage> = widget::mouse_area(
-                widget::container(widget::Space::new().width(Length::Fill).height(Length::Fixed(800.0)))
-                    .width(Length::Fill)
-                    .height(Length::Fixed(800.0)),
+                widget::container(
+                    widget::Space::new()
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill),
             )
             .on_double_press(NowPlayingMessage::ToggleVizFullscreen)
             .into();

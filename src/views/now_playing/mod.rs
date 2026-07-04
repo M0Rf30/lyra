@@ -48,20 +48,12 @@ pub enum NowPlayingMessage {
     ToggleVizFullscreen,
 }
 
-/// Format a duration as M:SS.
+/// Format a duration as `H:MM:SS` / `M:SS`.
 pub fn format_time(d: Duration) -> String {
-    let total = d.as_secs();
-    let min = total / 60;
-    let sec = total % 60;
-    format!("{min}:{sec:02}")
+    super::common::format_duration(d.as_secs())
 }
 
-/// Truncate a string to `max_chars` and add "..." if it exceeds the limit.
+/// Truncate a string to `max_chars`, appending `…` if it exceeds the limit.
 pub fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
-        format!("{truncated}...")
-    }
+    super::common::truncate_str(s, max_chars)
 }

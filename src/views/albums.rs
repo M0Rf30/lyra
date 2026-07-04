@@ -4,6 +4,7 @@
 
 use crate::library::{Album, CoverArt, Playlist};
 use crate::views::card_button_class;
+use crate::views::common;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -36,21 +37,11 @@ pub fn album_grid_view<'a>(
     cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
 ) -> cosmic::Element<'a, AlbumMessage> {
     if albums.is_empty() {
-        return widget::container(
-            widget::Column::new()
-                .push(widget::icon::from_name("folder-music-symbolic").size(64))
-                .push(widget::text::title3("No albums found"))
-                .push(widget::text(
-                    "Add music directories in Settings to get started",
-                ))
-                .spacing(12)
-                .align_x(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Horizontal::Center)
-        .align_y(Vertical::Center)
-        .into();
+        return common::empty_state(
+            "folder-music-symbolic",
+            "No albums found",
+            "Add music directories in Settings to get started",
+        );
     }
 
     let cards: Vec<cosmic::Element<'_, AlbumMessage>> = albums
@@ -85,8 +76,11 @@ pub fn album_grid_view<'a>(
                 )
                 .push(
                     widget::Column::new()
-                        .push(widget::text(truncate_str(&album.name, 22)).width(160))
-                        .push(widget::text::caption(truncate_str(&album.artist, 26)).width(160))
+                        .push(common::cell_text(common::truncate_str(&album.name, 28)).width(160))
+                        .push(
+                            common::cell_caption(common::truncate_str(&album.artist, 28))
+                                .width(160),
+                        )
                         .spacing(2),
                 )
                 .spacing(8);
@@ -139,13 +133,25 @@ pub fn album_detail_view<'a>(
         g
     };
 
+    let track_count = album.track_count();
+    let track_label = format!(
+        "{track_count} track{}",
+        if track_count == 1 { "" } else { "s" }
+    );
+    let duration_label = common::format_duration_coarse(album.total_duration().as_secs());
+
     let mut meta_col = widget::Column::new()
-        .push(widget::text::title1(album.name.as_str()))
-        .push(widget::text::title3(album.artist.as_str()))
-        .push(widget::text::caption(format!(
-            "{} tracks  -  {}",
-            album.track_count(),
-            format_duration(album.total_duration())
+        .push(widget::text::title2(album.name.as_str()))
+        .push(
+            widget::text::body(album.artist.as_str()).class(cosmic::theme::Text::Custom(|theme| {
+                cosmic::iced::widget::text::Style {
+                    color: Some(theme.cosmic().palette.neutral_7.into()),
+                    ..Default::default()
+                }
+            })),
+        )
+        .push(common::cell_caption(format!(
+            "{track_label} \u{b7} {duration_label}"
         )))
         .push(
             widget::button::suggested("Play Album").on_press(AlbumMessage::PlayAlbum(album_index)),
@@ -159,7 +165,7 @@ pub fn album_detail_view<'a>(
             // Use the owned String for both the message and the label.
             let label = genre.clone();
             genre_row = genre_row.push(
-                widget::button::custom(widget::text::caption(label))
+                widget::button::custom(common::cell_caption(label))
                     .on_press(AlbumMessage::FilterByGenre(genre))
                     .class(cosmic::theme::Button::Standard),
             );
@@ -168,10 +174,12 @@ pub fn album_detail_view<'a>(
     }
 
     let header = widget::Row::new()
-        .push(
-            widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
-                .on_press(AlbumMessage::BackToGrid),
-        )
+        .push(common::icon_button(
+            "go-previous-symbolic",
+            16,
+            "Back to albums",
+            AlbumMessage::BackToGrid,
+        ))
         .push(
             widget::container(art_widget)
                 .width(160)
@@ -194,41 +202,49 @@ pub fn album_detail_view<'a>(
                 .size(14)
                 .into()
         } else {
-            widget::text(format!("{}", track.track_number)).into()
+            common::cell_text(format!("{}", track.track_number)).into()
         };
 
-        let fav_icon_name = if track.is_favorite {
-            "emblem-favorite-symbolic"
-        } else {
-            "non-starred-symbolic"
-        };
-        let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(16))
-            .on_press(AlbumMessage::ToggleFavorite(track_id.clone()));
+        let heart_btn = common::favorite_button(
+            track.is_favorite,
+            AlbumMessage::ToggleFavorite(track_id.clone()),
+        );
 
-        // Task 102: Star rating widget
-        let rating_row = album_star_rating(track_id.clone(), track.rating);
+        // Task 102: Star rating widget, fixed-width so columns stay aligned.
+        let rating_row = widget::container(common::star_rating(track.rating, move |r| {
+            AlbumMessage::SetRating(track_id.clone(), r)
+        }))
+        .width(112);
 
-        // Task 103: Genre chip per track
+        // Task 103: Genre chip per track, fixed-width so columns stay aligned.
         let genre_widget: cosmic::Element<'_, AlbumMessage> = if !track.genre.is_empty() {
-            widget::button::custom(widget::text::caption(&track.genre))
-                .on_press(AlbumMessage::FilterByGenre(track.genre.clone()))
-                .class(cosmic::theme::Button::Standard)
-                .into()
+            widget::container(
+                widget::button::custom(common::cell_caption(track.genre.as_str()))
+                    .on_press(AlbumMessage::FilterByGenre(track.genre.clone()))
+                    .class(cosmic::theme::Button::Standard),
+            )
+            .width(130)
+            .into()
         } else {
-            widget::Space::new().width(0).into()
+            widget::Space::new().width(130).into()
         };
 
-        // Task 98: Add to playlist button
+        // Task 98: Add to playlist button - honest about its destination, or
+        // absent entirely when there is nowhere to add to.
         let playlist_btn: cosmic::Element<'_, AlbumMessage> =
             if let Some(first_pl) = playlists.first() {
-                widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16))
-                    .on_press(AlbumMessage::AddToPlaylist(
-                        track.source_uri.clone(),
-                        first_pl.id.clone(),
-                    ))
-                    .into()
+                widget::tooltip(
+                    widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16))
+                        .on_press(AlbumMessage::AddToPlaylist(
+                            track.source_uri.clone(),
+                            first_pl.id.clone(),
+                        )),
+                    widget::text::caption(format!("Add to \"{}\"", first_pl.name)),
+                    widget::tooltip::Position::Top,
+                )
+                .into()
             } else {
-                widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16)).into()
+                widget::Space::new().width(32).height(32).into()
             };
 
         let row = widget::button::custom(
@@ -238,13 +254,13 @@ pub fn album_detail_view<'a>(
                         .width(40)
                         .align_x(Horizontal::Center),
                 )
-                .push(widget::text(track.title.as_str()).width(Length::Fill))
-                .push(widget::text(track.artist.as_str()).width(200))
-                .push(widget::text(track.duration_string()).width(60))
+                .push(common::cell_text(track.title.as_str()).width(Length::FillPortion(4)))
+                .push(common::cell_text(track.artist.as_str()).width(Length::FillPortion(3)))
                 .push(heart_btn)
                 .push(rating_row)
                 .push(genre_widget)
                 .push(playlist_btn)
+                .push(common::duration_cell(track.duration.as_secs()))
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .padding(4),
@@ -266,47 +282,4 @@ pub fn album_detail_view<'a>(
     )
     .height(Length::Fill)
     .into()
-}
-
-/// Star rating widget for album detail tracks (1-5 stars).
-fn album_star_rating<'a>(
-    track_id: String,
-    current_rating: Option<u8>,
-) -> cosmic::Element<'a, AlbumMessage> {
-    let rating = current_rating.unwrap_or(0);
-    let mut row = widget::Row::new().spacing(0).align_y(Alignment::Center);
-
-    for star in 1u8..=5 {
-        let icon_name = if star <= rating {
-            "starred-symbolic"
-        } else {
-            "non-starred-symbolic"
-        };
-        let new_rating = if star == rating { 0 } else { star };
-        let btn = widget::button::icon(widget::icon::from_name(icon_name).size(14))
-            .on_press(AlbumMessage::SetRating(track_id.clone(), new_rating));
-        row = row.push(btn);
-    }
-
-    row.into()
-}
-
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-        format!("{truncated}\u{2026}")
-    }
-}
-
-fn format_duration(d: std::time::Duration) -> String {
-    let total_secs = d.as_secs();
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    if hours > 0 {
-        format!("{hours}h {minutes}m")
-    } else {
-        format!("{minutes}m")
-    }
 }

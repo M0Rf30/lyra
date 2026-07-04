@@ -501,7 +501,7 @@ impl MusicProvider for MpdProvider {
                     artist_albums.push(album);
                 }
 
-                artist_albums.sort_by(|a, b| a.year.cmp(&b.year));
+                artist_albums.sort_by_key(|a| a.year);
 
                 artists.push(Artist {
                     name: artist_name.clone(),

@@ -3213,6 +3213,7 @@ fn mpd_idle_stream(key: &MpdIdleKey) -> impl Stream<Item = Message> + use<> {
 /// Uses notify::RecommendedWatcher to watch music_dirs recursively.
 /// Debounces events with a 2-second quiet timer before emitting
 /// Message::FilesChanged with the collected paths.
+#[allow(clippy::ptr_arg)] // must match `fn(&D) -> S` where D = Vec<PathBuf> (Subscription::run_with)
 fn fs_watcher_stream(music_dirs: &Vec<PathBuf>) -> impl Stream<Item = Message> + use<> {
     let music_dirs = music_dirs.clone();
     cosmic::iced::stream::channel(4, move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
@@ -3973,9 +3974,7 @@ impl AppModel {
             songs::SortField::Title => self.all_tracks.sort_by(|a, b| a.title.cmp(&b.title)),
             songs::SortField::Artist => self.all_tracks.sort_by(|a, b| a.artist.cmp(&b.artist)),
             songs::SortField::Album => self.all_tracks.sort_by(|a, b| a.album.cmp(&b.album)),
-            songs::SortField::Duration => {
-                self.all_tracks.sort_by(|a, b| a.duration.cmp(&b.duration))
-            }
+            songs::SortField::Duration => self.all_tracks.sort_by_key(|a| a.duration),
         }
     }
 

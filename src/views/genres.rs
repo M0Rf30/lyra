@@ -4,6 +4,7 @@
 
 use crate::library::Track;
 use crate::views::card_button_class;
+use crate::views::common;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -23,18 +24,11 @@ pub enum GenreMessage {
 /// Render the genre grid view.
 pub fn genre_grid_view(genres: &[String]) -> cosmic::Element<'_, GenreMessage> {
     if genres.is_empty() {
-        return widget::container(
-            widget::Column::new()
-                .push(widget::icon::from_name("audio-x-generic-symbolic").size(64))
-                .push(widget::text::title3("No genres found"))
-                .spacing(12)
-                .align_x(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Horizontal::Center)
-        .align_y(Vertical::Center)
-        .into();
+        return common::empty_state(
+            "audio-x-generic-symbolic",
+            "No genres found",
+            "Genres will appear once your library is scanned.",
+        );
     }
 
     let cards: Vec<cosmic::Element<'_, GenreMessage>> = genres
@@ -56,7 +50,7 @@ pub fn genre_grid_view(genres: &[String]) -> cosmic::Element<'_, GenreMessage> {
             let card = widget::Column::new()
                 .push(icon_container)
                 .push(
-                    widget::text(truncate_str(genre, 22))
+                    common::cell_text(common::truncate_str(genre, 24))
                         .width(140)
                         .align_x(Horizontal::Center),
                 )
@@ -100,7 +94,11 @@ pub fn genre_detail_view<'a>(
         .push(
             widget::Column::new()
                 .push(widget::text::title1(genre_name))
-                .push(widget::text::caption(format!("{} tracks", tracks.len())))
+                .push(widget::text::caption(format!(
+                    "{} track{}",
+                    tracks.len(),
+                    if tracks.len() == 1 { "" } else { "s" }
+                )))
                 .spacing(4),
         )
         .spacing(16)
@@ -111,11 +109,11 @@ pub fn genre_detail_view<'a>(
     for (index, track) in tracks.iter().enumerate() {
         let row = widget::button::custom(
             widget::Row::new()
-                .push(widget::text(format!("{}", index + 1)).width(40))
-                .push(widget::text(track.title.as_str()).width(Length::Fill))
-                .push(widget::text(track.artist.as_str()).width(200))
-                .push(widget::text(track.album.as_str()).width(200))
-                .push(widget::text(track.duration_string()).width(80))
+                .push(common::cell_text(format!("{}", index + 1)).width(40))
+                .push(common::cell_text(track.title.as_str()).width(Length::FillPortion(4)))
+                .push(common::cell_text(track.artist.as_str()).width(Length::FillPortion(3)))
+                .push(common::cell_text(track.album.as_str()).width(Length::FillPortion(3)))
+                .push(common::duration_cell(track.duration.as_secs()))
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .padding([4, 8]),
@@ -128,8 +126,11 @@ pub fn genre_detail_view<'a>(
     }
 
     if tracks.is_empty() {
-        track_list = track_list
-            .push(widget::container(widget::text("No tracks found for this genre.")).padding(16));
+        track_list = track_list.push(common::empty_state(
+            "audio-x-generic-symbolic",
+            "No tracks found",
+            "No tracks found for this genre.",
+        ));
     }
 
     widget::scrollable(
@@ -174,14 +175,5 @@ fn genre_icon_name(genre: &str) -> &'static str {
         "weather-clear-symbolic"
     } else {
         "audio-x-generic-symbolic"
-    }
-}
-
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-        format!("{truncated}\u{2026}")
     }
 }

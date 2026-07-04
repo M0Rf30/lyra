@@ -72,10 +72,17 @@ pub struct Track {
 }
 
 impl Track {
-    /// Format duration as MM:SS.
+    /// Format duration as `H:MM:SS` when at least an hour, otherwise `M:SS`.
     pub fn duration_string(&self) -> String {
         let secs = self.duration.as_secs();
-        format!("{}:{:02}", secs / 60, secs % 60)
+        let hours = secs / 3600;
+        let minutes = (secs % 3600) / 60;
+        let seconds = secs % 60;
+        if hours > 0 {
+            format!("{hours}:{minutes:02}:{seconds:02}")
+        } else {
+            format!("{minutes}:{seconds:02}")
+        }
     }
 
     /// Sort tracks by disc number, then track number.

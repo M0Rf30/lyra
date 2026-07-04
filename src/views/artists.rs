@@ -3,6 +3,7 @@
 //! Artists view - list of artists with album sub-views.
 
 use crate::library::{Artist, CoverArt};
+use crate::views::common;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
@@ -29,18 +30,11 @@ pub fn artist_list_view<'a>(
     artist_avatars: &'a std::collections::HashMap<String, widget::icon::Handle>,
 ) -> cosmic::Element<'a, ArtistMessage> {
     if artists.is_empty() {
-        return widget::container(
-            widget::Column::new()
-                .push(widget::icon::from_name("system-users-symbolic").size(64))
-                .push(widget::text::title3("No artists found"))
-                .spacing(12)
-                .align_x(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Horizontal::Center)
-        .align_y(Vertical::Center)
-        .into();
+        return common::empty_state(
+            "system-users-symbolic",
+            "No artists found",
+            "Artists will appear here once your library is scanned",
+        );
     }
 
     let mut list = widget::Column::new().spacing(2);
@@ -60,11 +54,13 @@ pub fn artist_list_view<'a>(
                 .push(avatar)
                 .push(
                     widget::Column::new()
-                        .push(widget::text(artist.name.as_str()))
-                        .push(widget::text::caption(format!(
-                            "{} albums, {} tracks",
+                        .push(common::cell_text(artist.name.as_str()))
+                        .push(common::cell_caption(format!(
+                            "{} album{}, {} track{}",
                             artist.album_count(),
-                            artist.track_count()
+                            if artist.album_count() == 1 { "" } else { "s" },
+                            artist.track_count(),
+                            if artist.track_count() == 1 { "" } else { "s" }
                         )))
                         .spacing(2),
                 )
@@ -111,9 +107,11 @@ pub fn artist_detail_view<'a>(
             widget::Column::new()
                 .push(widget::text::title1(artist.name.as_str()))
                 .push(widget::text::caption(format!(
-                    "{} albums, {} tracks",
+                    "{} album{}, {} track{}",
                     artist.album_count(),
-                    artist.track_count()
+                    if artist.album_count() == 1 { "" } else { "s" },
+                    artist.track_count(),
+                    if artist.track_count() == 1 { "" } else { "s" }
                 )))
                 .spacing(4),
         )
@@ -144,16 +142,15 @@ pub fn artist_detail_view<'a>(
             .push(
                 widget::Column::new()
                     .push(widget::text::title4(album.name.as_str()))
-                    .push(widget::text::caption(format!(
-                        "{}  -  {} tracks",
+                    .push(widget::text::caption({
+                        let n = album.track_count();
+                        let track_word = if n == 1 { "track" } else { "tracks" };
                         if album.year > 0 {
-                            album.year.to_string()
+                            format!("{} · {n} {track_word}", album.year)
                         } else {
-                            String::new()
-                        },
-                        album.track_count()
-                    )))
-                    .spacing(2),
+                            format!("{n} {track_word}")
+                        }
+                    })),
             )
             .push(
                 widget::button::suggested("Play")
@@ -174,40 +171,42 @@ pub fn artist_detail_view<'a>(
                     .size(14)
                     .into()
             } else {
-                widget::text(format!("{}", track.track_number)).into()
+                common::cell_text(format!("{}", track.track_number)).into()
             };
 
-            let fav_icon_name = if track.is_favorite {
-                "emblem-favorite-symbolic"
-            } else {
-                "non-starred-symbolic"
-            };
-            let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(16))
-                .on_press(ArtistMessage::ToggleFavorite(track_id.clone()));
+            let heart_btn = common::favorite_button(
+                track.is_favorite,
+                ArtistMessage::ToggleFavorite(track_id.clone()),
+            );
 
-            let rating_row = artist_star_rating(track_id, track.rating);
+            let rating_row = widget::container(common::star_rating(track.rating, {
+                let track_id = track_id.clone();
+                move |r| ArtistMessage::SetRating(track_id.clone(), r)
+            }))
+            .width(112);
 
             let genre_widget: cosmic::Element<'_, ArtistMessage> = if !track.genre.is_empty() {
-                widget::button::custom(widget::text::caption(&track.genre))
+                widget::button::custom(common::cell_caption(track.genre.as_str()))
                     .on_press(ArtistMessage::FilterByGenre(track.genre.clone()))
                     .class(cosmic::theme::Button::Standard)
                     .into()
             } else {
-                widget::Space::new().width(0).into()
+                widget::Space::new().width(Length::Shrink).into()
             };
+            let genre_col = widget::container(genre_widget).width(130);
 
             let row = widget::button::custom(
                 widget::Row::new()
                     .push(
                         widget::container(num_col)
-                            .width(32)
+                            .width(40)
                             .align_x(Horizontal::Center),
                     )
-                    .push(widget::text(track.title.as_str()).width(Length::Fill))
-                    .push(widget::text(track.duration_string()).width(60))
+                    .push(common::cell_text(track.title.as_str()).width(Length::FillPortion(4)))
                     .push(heart_btn)
                     .push(rating_row)
-                    .push(genre_widget)
+                    .push(genre_col)
+                    .push(common::duration_cell(track.duration.as_secs()))
                     .spacing(8)
                     .align_y(Alignment::Center)
                     .padding(4),
@@ -226,27 +225,4 @@ pub fn artist_detail_view<'a>(
     widget::scrollable(widget::container(content).padding(16).width(Length::Fill))
         .height(Length::Fill)
         .into()
-}
-
-/// Star rating widget for artist detail tracks (1-5 stars).
-fn artist_star_rating<'a>(
-    track_id: String,
-    current_rating: Option<u8>,
-) -> cosmic::Element<'a, ArtistMessage> {
-    let rating = current_rating.unwrap_or(0);
-    let mut row = widget::Row::new().spacing(0).align_y(Alignment::Center);
-
-    for star in 1u8..=5 {
-        let icon_name = if star <= rating {
-            "starred-symbolic"
-        } else {
-            "non-starred-symbolic"
-        };
-        let new_rating = if star == rating { 0 } else { star };
-        let btn = widget::button::icon(widget::icon::from_name(icon_name).size(14))
-            .on_press(ArtistMessage::SetRating(track_id.clone(), new_rating));
-        row = row.push(btn);
-    }
-
-    row.into()
 }
