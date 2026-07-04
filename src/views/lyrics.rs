@@ -7,7 +7,7 @@
 use crate::library::{LyricLine, Lyrics};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::{Alignment, Length};
-use cosmic::iced_core::Color;
+use cosmic::iced::core::Color;
 use cosmic::prelude::*;
 use cosmic::widget;
 use std::time::Duration;
@@ -47,7 +47,7 @@ pub fn lyrics_view<'a>(
     is_loading: bool,
     playback_position: Duration,
 ) -> cosmic::Element<'a, LyricsMessage> {
-    let header = widget::column()
+    let header = widget::Column::new()
         .push(widget::text::title4(track_title))
         .push(widget::text::caption(track_artist))
         .spacing(4);
@@ -61,7 +61,7 @@ pub fn lyrics_view<'a>(
         match lyrics_data {
             Lyrics::Synced(lines) => {
                 let current_idx = find_current_line_index(lines, playback_position);
-                let mut col = widget::column().spacing(4);
+                let mut col = widget::Column::new().spacing(4);
                 for (i, line) in lines.iter().enumerate() {
                     let is_current = current_idx == Some(i);
                     col = col.push(synced_line_widget(line, is_current));
@@ -78,7 +78,7 @@ pub fn lyrics_view<'a>(
         }
     } else {
         widget::container(
-            widget::column()
+            widget::Column::new()
                 .push(widget::text("No lyrics available"))
                 .push(
                     widget::button::suggested("Search Online").on_press(LyricsMessage::FetchLyrics),
@@ -91,7 +91,7 @@ pub fn lyrics_view<'a>(
         .into()
     };
 
-    widget::column()
+    widget::Column::new()
         .push(header)
         .push(widget::divider::horizontal::default())
         .push(content)
@@ -118,7 +118,7 @@ fn synced_line_widget(line: &LyricLine, is_current: bool) -> cosmic::Element<'_,
         Color::from_rgba(0.6, 0.6, 0.6, 0.7) // dimmed
     };
 
-    widget::row()
+    widget::Row::new()
         .push(widget::text::caption(timestamp).class(cosmic::theme::Text::Color(color)))
         .push(widget::text(&line.text).class(cosmic::theme::Text::Color(color)))
         .spacing(8)

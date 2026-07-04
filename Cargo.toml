@@ -8,7 +8,7 @@ repository = "https://github.com/M0Rf30/lyra"
 
 [dependencies]
 # COSMIC / UI framework
-libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "384e8f6", features = [
+libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "ee5d965", features = [
     "about",
     "tokio",
     "wayland",
@@ -21,7 +21,7 @@ tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 
 # Audio playback
-rodio = { version = "0.21", features = ["symphonia-all"] }
+rodio = { version = "0.22", features = ["symphonia-all"] }
 
 # MPD protocol client
 mpd_client = "1.4"
@@ -33,7 +33,7 @@ opensubsonic = { git = "https://github.com/M0Rf30/opensubsonic-rs.git" }
 lofty = { git = "https://github.com/M0Rf30/lofty-rs.git", branch = "feat/dsd-support" }
 
 # Database for music library
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Lyrics fetching and AutoEQ profile fetching
 reqwest = { version = "0.13", features = ["blocking", "json", "rustls"], default-features = false }
@@ -56,11 +56,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # XDG Desktop Portal (directory picker)
-ashpd = "0.12"
+ashpd = { version = "0.13", features = ["file_chooser"] }
 
 # Credential storage (system keyring)
-# linux-native-sync-persistent = kernel keyring (persistent) + D-Bus secret service fallback
-keyring = { version = "3", features = ["linux-native-sync-persistent", "sync-secret-service", "crypto-rust"] }
+# keyring 4 is a keyring-core rewrite: no cargo features; backends (kernel keyutils
+# + D-Bus secret service with crypto-rust) are unconditional per-target deps.
+keyring = "4"
+keyring-core = "1"
 
 # Misc
 open = "5"
@@ -68,7 +70,7 @@ dirs = "6"
 walkdir = "2"
 chrono = "0.4"
 urlencoding = "2"
-md5 = "0.7"
+md5 = "0.8"
 thiserror = "2"
 
 # Optional: tokio-console support for runtime introspection
@@ -78,7 +80,7 @@ console-subscriber = { version = "0.5", optional = true }
 projectm = { version = "3.1", optional = true, default-features = false, features = ["static"] }
 glutin = { version = "0.32", optional = true }
 gl = { version = "0.14", optional = true }
-regex = "1.12.3"
+regex = "1.12.4"
 
 [features]
 default = []
@@ -86,7 +88,7 @@ tokio-console = ["dep:console-subscriber"]
 visualizer = ["dep:projectm", "dep:glutin", "dep:gl"]
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "db_grouping"
@@ -101,26 +103,33 @@ inherits = "release"
 debug = true
 strip = false
 
-# Patch symphonia to M0Rf30 fork for DSD/DSF/DFF support.
-# rodio's `symphonia-all` enables `all-codecs` + `all-formats`, which in the
-# fork includes the `dsd` feature (symphonia-codec-dsd + symphonia-format-dsd).
-[patch.crates-io]
-symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-core = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-metadata = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-bundle-flac = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-bundle-mp3 = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-codec-aac = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-codec-adpcm = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-codec-alac = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-codec-pcm = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-codec-vorbis = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-format-caf = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-format-isomp4 = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-format-mkv = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-format-ogg = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-format-riff = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-symphonia-utils-xiph = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# Patch symphonia to M0Rf30 fork for DSD/DSF/DFF support -- CURRENTLY DISABLED.
+# The fork's `dsd-support` branch is rebased on ~216 unreleased upstream commits
+# past the real symphonia 0.5.5 tag, which already redesigned `symphonia-core`
+# (codecs::Decoder split into codecs::audio::AudioDecoder/subtitle/video, and
+# `probe` moved out of core entirely). rodio 0.22 was built against the old
+# unified 0.5.5 API, so enabling this patch makes rodio fail to compile even
+# though the fork's own workspace now builds fine standalone (version was
+# bumped down to 0.5.9 so Cargo *would* select it -- see M0Rf30/Symphonia
+# commit 7fc3ad9). Re-enabling DSD support requires porting the two DSD
+# commits (a2796cc, e0649c9) onto the actual v0.5.5 core API, not just a
+# version-string fix. Until then, real crates.io symphonia 0.5.5 is used
+# (no DSD/DSF/DFF playback).
+# [patch.crates-io]
+# symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# symphonia-core = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# symphonia-metadata = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# symphonia-bundle-flac = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# symphonia-bundle-mp3 = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# symphonia-codec-aac = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# symphonia-codec-adpcm = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# symphonia-codec-alac = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# symphonia-codec-pcm = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# symphonia-codec-vorbis = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# symphonia-format-isomp4 = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# symphonia-format-mkv = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# symphonia-format-ogg = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
+# symphonia-format-riff = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
 
 # Uncomment to test a locally-cloned libcosmic
 # [patch.'https://github.com/pop-os/libcosmic']

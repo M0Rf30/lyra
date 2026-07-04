@@ -256,7 +256,7 @@ pub struct EqSource<S: Source<Item = f32>> {
     /// Indexed as `states[band][channel]`.
     states: Vec<Vec<BiquadState>>,
     /// Number of audio channels.
-    channels: u16,
+    channels: std::num::NonZero<u16>,
     /// Current sample index within a frame (for interleaved channel tracking).
     channel_idx: u16,
 }
@@ -266,7 +266,7 @@ impl<S: Source<Item = f32>> EqSource<S> {
     pub fn new(inner: S, coeffs: SharedCoeffs, bypass: Arc<AtomicBool>) -> Self {
         let channels = inner.channels();
         let states = (0..NUM_BANDS)
-            .map(|_| vec![BiquadState::default(); channels as usize])
+            .map(|_| vec![BiquadState::default(); channels.get() as usize])
             .collect();
 
         Self {
@@ -298,12 +298,12 @@ impl<S: Source<Item = f32>> Iterator for EqSource<S> {
 
         // Bypass: pass through unchanged.
         if self.bypass.load(Ordering::Relaxed) {
-            self.channel_idx = (self.channel_idx + 1) % self.channels;
+            self.channel_idx = (self.channel_idx + 1) % self.channels.get();
             return Some(sample);
         }
 
         let ch = self.channel_idx as usize;
-        self.channel_idx = (self.channel_idx + 1) % self.channels;
+        self.channel_idx = (self.channel_idx + 1) % self.channels.get();
 
         // Cascade through all 10 bands.
         let mut out = sample;
@@ -325,11 +325,11 @@ impl<S: Source<Item = f32>> Source for EqSource<S> {
         self.inner.current_span_len()
     }
 
-    fn channels(&self) -> u16 {
+    fn channels(&self) -> std::num::NonZero<u16> {
         self.inner.channels()
     }
 
-    fn sample_rate(&self) -> u32 {
+    fn sample_rate(&self) -> std::num::NonZero<u32> {
         self.inner.sample_rate()
     }
 

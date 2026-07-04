@@ -5,7 +5,7 @@
 use crate::fl;
 use crate::provider::ProviderType;
 use cosmic::iced::Alignment;
-use cosmic::iced_core::Color;
+use cosmic::iced::core::Color;
 use cosmic::prelude::*;
 use cosmic::widget;
 
@@ -220,7 +220,7 @@ pub fn providers_view<'a>(
     replay_gain_mode: crate::config::ReplayGainMode,
     active_provider_type: Option<ProviderType>,
 ) -> cosmic::Element<'a, ProvidersMessage> {
-    let mut col = widget::column().spacing(16).padding(16);
+    let mut col = widget::Column::new().spacing(16).padding(16);
 
     // ── Playback settings (Task 107, 108) ──────────────────────────────────
     col = col.push(widget::text::title4(fl!("playback-settings")));
@@ -239,11 +239,11 @@ pub fn providers_view<'a>(
         };
 
         col = col.push(
-            widget::column()
+            widget::Column::new()
                 .push(
-                    widget::row()
+                    widget::Row::new()
                         .push(widget::text::body(fl!("crossfade-duration")))
-                        .push(widget::horizontal_space())
+                        .push(widget::space::horizontal())
                         .push(widget::text::caption(crossfade_label)),
                 )
                 .push(
@@ -270,7 +270,7 @@ pub fn providers_view<'a>(
             (ReplayGainMode::Auto, fl!("replay-gain-auto")),
         ];
 
-        let mut mode_row = widget::row().spacing(8).align_y(Alignment::Center);
+        let mut mode_row = widget::Row::new().spacing(8).align_y(Alignment::Center);
         mode_row = mode_row.push(widget::text::body(fl!("replay-gain")));
         for (mode, label) in modes {
             let btn = if mode == replay_gain_mode {
@@ -293,7 +293,7 @@ pub fn providers_view<'a>(
     } else {
         for (i, dir) in music_dirs.iter().enumerate() {
             col = col.push(
-                widget::row()
+                widget::Row::new()
                     .push(
                         widget::text::body(dir.to_string_lossy()).width(cosmic::iced::Length::Fill),
                     )
@@ -334,7 +334,7 @@ pub fn providers_view<'a>(
 
     // Add buttons
     col = col.push(
-        widget::row()
+        widget::Row::new()
             .push(widget::button::text(fl!("add-mpd-server")).on_press(ProvidersMessage::AddMpd))
             .push(
                 widget::button::text(fl!("add-subsonic-server"))
@@ -366,7 +366,7 @@ fn mpd_server_card<'a>(
         .on_input(move |v| ProvidersMessage::EditPassword(index, v))
         .password();
 
-    let mut action_buttons = widget::row().spacing(8).align_y(Alignment::Center);
+    let mut action_buttons = widget::Row::new().spacing(8).align_y(Alignment::Center);
     action_buttons = action_buttons
         .push(widget::button::standard(fl!("save")).on_press(ProvidersMessage::Save(index)));
     action_buttons = action_buttons.push(
@@ -377,18 +377,18 @@ fn mpd_server_card<'a>(
         action_buttons = action_buttons.push(status_label(status));
     }
 
-    let buttons = widget::row()
+    let buttons = widget::Row::new()
         .push(action_buttons)
-        .push(widget::horizontal_space())
+        .push(widget::space::horizontal())
         .push(widget::button::destructive(fl!("remove")).on_press(ProvidersMessage::Remove(index)))
         .align_y(Alignment::Center);
 
-    widget::column()
+    widget::Column::new()
         .push(widget::text::title4(format!("MPD: {}", &server.name)))
         .push(name_input)
         .push(host_input)
         .push(
-            widget::row()
+            widget::Row::new()
                 .push(port_input)
                 .push(password_input)
                 .spacing(8),
@@ -424,7 +424,7 @@ fn subsonic_server_card<'a>(
         .on_toggle(move |v| ProvidersMessage::SubsonicToggleCerts(index, v));
 
     // Save + Test Connection on the left, Remove pushed to the right
-    let mut action_buttons = widget::row().spacing(8).align_y(Alignment::Center);
+    let mut action_buttons = widget::Row::new().spacing(8).align_y(Alignment::Center);
     action_buttons = action_buttons.push(
         widget::button::standard(fl!("save")).on_press(ProvidersMessage::SubsonicSave(index)),
     );
@@ -436,9 +436,9 @@ fn subsonic_server_card<'a>(
         action_buttons = action_buttons.push(status_label(status));
     }
 
-    let buttons = widget::row()
+    let buttons = widget::Row::new()
         .push(action_buttons)
-        .push(widget::horizontal_space())
+        .push(widget::space::horizontal())
         .push(
             widget::button::destructive(fl!("remove"))
                 .on_press(ProvidersMessage::SubsonicRemove(index)),
@@ -498,7 +498,7 @@ fn subsonic_server_card<'a>(
     let format_row = widget::flex_row(format_children).spacing(4);
 
     // Task 110: Bandwidth savings estimate
-    let mut transcoding_col = widget::column()
+    let mut transcoding_col = widget::Column::new()
         .push(widget::text::title4(fl!("transcoding")))
         .push(bitrate_row)
         .push(format_row)
@@ -513,12 +513,12 @@ fn subsonic_server_card<'a>(
         )));
     }
 
-    widget::column()
+    widget::Column::new()
         .push(widget::text::title4(format!("Subsonic: {}", &server.name)))
         .push(name_input)
         .push(url_input)
         .push(
-            widget::row()
+            widget::Row::new()
                 .push(username_input)
                 .push(password_input)
                 .spacing(8),

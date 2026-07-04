@@ -37,7 +37,7 @@ pub fn album_grid_view<'a>(
 ) -> cosmic::Element<'a, AlbumMessage> {
     if albums.is_empty() {
         return widget::container(
-            widget::column()
+            widget::Column::new()
                 .push(widget::icon::from_name("folder-music-symbolic").size(64))
                 .push(widget::text::title3("No albums found"))
                 .push(widget::text(
@@ -75,7 +75,7 @@ pub fn album_grid_view<'a>(
                         .into()
                 };
 
-            let album_card = widget::column()
+            let album_card = widget::Column::new()
                 .push(
                     widget::container(art_widget)
                         .width(160)
@@ -84,7 +84,7 @@ pub fn album_grid_view<'a>(
                         .align_y(Vertical::Center),
                 )
                 .push(
-                    widget::column()
+                    widget::Column::new()
                         .push(widget::text(truncate_str(&album.name, 22)).width(160))
                         .push(widget::text::caption(truncate_str(&album.artist, 26)).width(160))
                         .spacing(2),
@@ -139,7 +139,7 @@ pub fn album_detail_view<'a>(
         g
     };
 
-    let mut meta_col = widget::column()
+    let mut meta_col = widget::Column::new()
         .push(widget::text::title1(album.name.as_str()))
         .push(widget::text::title3(album.artist.as_str()))
         .push(widget::text::caption(format!(
@@ -154,7 +154,7 @@ pub fn album_detail_view<'a>(
 
     // Task 103: Genre chips in album header
     if !genres.is_empty() {
-        let mut genre_row = widget::row().spacing(4).align_y(Alignment::Center);
+        let mut genre_row = widget::Row::new().spacing(4).align_y(Alignment::Center);
         for genre in genres {
             // Use the owned String for both the message and the label.
             let label = genre.clone();
@@ -167,7 +167,7 @@ pub fn album_detail_view<'a>(
         meta_col = meta_col.push(genre_row);
     }
 
-    let header = widget::row()
+    let header = widget::Row::new()
         .push(
             widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
                 .on_press(AlbumMessage::BackToGrid),
@@ -183,7 +183,7 @@ pub fn album_detail_view<'a>(
         .spacing(16)
         .align_y(Alignment::Center);
 
-    let mut track_list = widget::column().spacing(2);
+    let mut track_list = widget::Column::new().spacing(2);
 
     for (track_idx, track) in album.tracks.iter().enumerate() {
         let track_id = track.id.to_string();
@@ -215,7 +215,7 @@ pub fn album_detail_view<'a>(
                 .class(cosmic::theme::Button::Standard)
                 .into()
         } else {
-            widget::Space::with_width(0).into()
+            widget::Space::new().width(0).into()
         };
 
         // Task 98: Add to playlist button
@@ -232,7 +232,7 @@ pub fn album_detail_view<'a>(
             };
 
         let row = widget::button::custom(
-            widget::row()
+            widget::Row::new()
                 .push(
                     widget::container(num_col)
                         .width(40)
@@ -257,7 +257,7 @@ pub fn album_detail_view<'a>(
     }
 
     widget::scrollable(
-        widget::column()
+        widget::Column::new()
             .push(header)
             .push(widget::divider::horizontal::default())
             .push(track_list)
@@ -274,7 +274,7 @@ fn album_star_rating<'a>(
     current_rating: Option<u8>,
 ) -> cosmic::Element<'a, AlbumMessage> {
     let rating = current_rating.unwrap_or(0);
-    let mut row = widget::row().spacing(0).align_y(Alignment::Center);
+    let mut row = widget::Row::new().spacing(0).align_y(Alignment::Center);
 
     for star in 1u8..=5 {
         let icon_name = if star <= rating {

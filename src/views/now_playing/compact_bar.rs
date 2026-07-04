@@ -65,7 +65,7 @@ pub fn playback_bar<'a>(
         let heart_btn = widget::button::icon(widget::icon::from_name(fav_icon_name).size(20))
             .on_press(NowPlayingMessage::ToggleFavorite(track.id.to_string()));
 
-        widget::row()
+        widget::Row::new()
             .push(
                 widget::container(art)
                     .width(60)
@@ -74,7 +74,7 @@ pub fn playback_bar<'a>(
                     .align_y(Vertical::Center),
             )
             .push(
-                widget::column()
+                widget::Column::new()
                     .push(widget::text::body(truncate_str(&track.title, 30)))
                     .push(widget::text::caption(truncate_str(&track.artist, 30)))
                     .spacing(2)
@@ -86,7 +86,7 @@ pub fn playback_bar<'a>(
             .width(Length::FillPortion(1))
             .into()
     } else {
-        widget::row()
+        widget::Row::new()
             .push(widget::icon::from_name("media-optical-cd-audio-symbolic").size(40))
             .push(widget::text::caption("No track playing"))
             .spacing(12)
@@ -110,7 +110,7 @@ pub fn playback_bar<'a>(
 
     let repeat_icon = repeat_mode.icon_name();
 
-    let transport = widget::row()
+    let transport = widget::Row::new()
         .push(
             widget::button::icon(widget::icon::from_name(shuffle_icon).size(24))
                 .on_press(NowPlayingMessage::ToggleShuffle),
@@ -135,7 +135,7 @@ pub fn playback_bar<'a>(
         .align_y(Alignment::Center);
 
     // --- Seek bar with time labels ---
-    let seek_bar = widget::row()
+    let seek_bar = widget::Row::new()
         .push(widget::text::caption(format_time(display_position)))
         .push(
             widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
@@ -151,7 +151,7 @@ pub fn playback_bar<'a>(
     // --- Right: volume + lyrics ---
     // FillPortion(1) matches the left section so center stays truly centered.
     let right_section = widget::container(
-        widget::row()
+        widget::Row::new()
             .push(widget::icon::from_name("audio-volume-high-symbolic").size(20))
             .push(
                 widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
@@ -168,7 +168,7 @@ pub fn playback_bar<'a>(
     .align_x(Horizontal::Right)
     .width(Length::FillPortion(1));
 
-    let center_section = widget::column()
+    let center_section = widget::Column::new()
         .push(transport)
         .push(seek_bar)
         .spacing(4)
@@ -177,7 +177,7 @@ pub fn playback_bar<'a>(
 
     let expandable_info = widget::mouse_area(track_info).on_press(NowPlayingMessage::ExpandToggle);
 
-    let controls_row = widget::row()
+    let controls_row = widget::Row::new()
         .push(expandable_info)
         .push(center_section)
         .push(right_section)

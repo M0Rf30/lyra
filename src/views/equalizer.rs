@@ -101,7 +101,7 @@ pub fn equalizer_view<'a>(
 
     let reset_btn = widget::button::text("Reset").on_press(EqualizerMessage::ResetPreset);
 
-    let toolbar_row = widget::row()
+    let toolbar_row = widget::Row::new()
         .push(save_btn)
         .push(delete_btn)
         .push(reset_btn)
@@ -117,7 +117,7 @@ pub fn equalizer_view<'a>(
         widget::button::standard("Save As")
     };
 
-    let save_as_row = widget::row()
+    let save_as_row = widget::Row::new()
         .push(save_as_input)
         .push(save_as_btn)
         .spacing(4)
@@ -147,12 +147,12 @@ pub fn equalizer_view<'a>(
             };
 
             // Build scrollable clickable list of matching profiles
-            let mut result_list = widget::column().spacing(1);
+            let mut result_list = widget::Column::new().spacing(1);
             for profile in &filtered {
                 let path = profile.path.clone();
                 let subtitle = format!("{} · {}", profile.type_, profile.source);
 
-                let row_content = widget::column()
+                let row_content = widget::Column::new()
                     .push(widget::text::body(&profile.name))
                     .push(widget::text::caption(subtitle))
                     .spacing(1);
@@ -172,7 +172,7 @@ pub fn equalizer_view<'a>(
             let refresh_btn = widget::button::text(format!("{} profiles", autoeq_profiles.len()))
                 .on_press(EqualizerMessage::FetchAutoEQ);
 
-            widget::column()
+            widget::Column::new()
                 .push(search_input)
                 .push(count_text)
                 .push(scrollable_results)
@@ -187,7 +187,7 @@ pub fn equalizer_view<'a>(
                 widget::button::text(format!("{} profiles loaded", autoeq_profiles.len()))
                     .on_press(EqualizerMessage::FetchAutoEQ);
 
-            widget::column()
+            widget::Column::new()
                 .push(search_input)
                 .push(hint)
                 .push(refresh_btn)
@@ -201,13 +201,13 @@ pub fn equalizer_view<'a>(
         } else {
             widget::button::text("Load AutoEQ Profiles").on_press(EqualizerMessage::FetchAutoEQ)
         };
-        widget::column().push(fetch_btn).spacing(4).into()
+        widget::Column::new().push(fetch_btn).spacing(4).into()
     };
 
     // --- Preamp slider ---
-    let preamp_row = widget::row()
+    let preamp_row = widget::Row::new()
         .push(widget::text::body("Preamp:"))
-        .push(widget::horizontal_space())
+        .push(widget::space::horizontal())
         .push(widget::text::body(format!("{:+.1} dB", preamp)))
         .spacing(8)
         .align_y(Alignment::Center);
@@ -215,7 +215,7 @@ pub fn equalizer_view<'a>(
     let preamp_slider =
         widget::slider(-20.0..=10.0, preamp, EqualizerMessage::SetPreamp).width(Length::Fill);
 
-    let preamp_control = widget::column()
+    let preamp_control = widget::Column::new()
         .push(preamp_row)
         .push(preamp_slider)
         .spacing(4);
@@ -223,7 +223,7 @@ pub fn equalizer_view<'a>(
     // --- 10-band vertical sliders ---
     // Each band column gets equal width via Length::Fill so they spread
     // evenly across the full panel width.
-    let mut band_row = widget::row().spacing(2).width(Length::Fill);
+    let mut band_row = widget::Row::new().spacing(2).width(Length::Fill);
 
     for (i, &gain) in bands.iter().enumerate().take(10) {
         let label = if i < BAND_LABELS.len() {
@@ -232,7 +232,7 @@ pub fn equalizer_view<'a>(
             "?"
         };
 
-        let slider_col = widget::column()
+        let slider_col = widget::Column::new()
             .push(widget::text::caption(format!("{:+.1}", gain)).size(10))
             .push(
                 widget::vertical_slider(-12.0..=12.0, gain, move |v| {
@@ -249,7 +249,7 @@ pub fn equalizer_view<'a>(
     }
 
     // --- Assemble layout ---
-    widget::column()
+    widget::Column::new()
         .push(toggle)
         .push(widget::divider::horizontal::default())
         .push(widget::text::title4("Preset"))
