@@ -32,6 +32,11 @@ const APP_ICON: &[u8] =
 /// focus it when the search bar is activated.
 const SEARCH_INPUT_ID: &str = "lyra-library-search";
 
+/// Frames of no mouse movement (at the visualizer's ~30fps render cadence)
+/// before the fullscreen HUD control card auto-hides. ~3 seconds.
+#[cfg(feature = "visualizer")]
+const VIZ_HUD_HOLD_FRAMES: u32 = 90;
+
 /// Main application model.
 pub struct AppModel {
     core: cosmic::Core,
@@ -207,6 +212,11 @@ pub struct AppModel {
     /// Decays to 0 over ~4 seconds after a track change.
     #[cfg(feature = "visualizer")]
     viz_metadata_opacity: f32,
+    /// Frames elapsed (~30fps) since the mouse last moved while the
+    /// visualizer is fullscreen. Drives HUD control-card auto-hide; see
+    /// `VIZ_HUD_HOLD_FRAMES`.
+    #[cfg(feature = "visualizer")]
+    viz_hud_idle_frames: u32,
 }
 
 /// All application messages.
@@ -447,6 +457,10 @@ pub enum Message {
     /// Toggle fullscreen for the visualizer window (on → off, off → on).
     #[cfg(feature = "visualizer")]
     ToggleVisualizerFullscreen,
+    /// Mouse moved while the visualizer is fullscreen — resets the HUD
+    /// control-card auto-hide idle counter.
+    #[cfg(feature = "visualizer")]
+    VizHudActivity,
 
     // Notifications
     /// A toast notification was dismissed (by timeout or user action).
@@ -850,6 +864,8 @@ impl cosmic::Application for AppModel {
             next_preset_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "visualizer")]
             viz_metadata_opacity: 0.0,
+            #[cfg(feature = "visualizer")]
+            viz_hud_idle_frames: 0,
         };
 
         app.rebuild_provider_list();
@@ -1434,6 +1450,8 @@ impl cosmic::Application for AppModel {
         // Main layout: content + optional scanning indicator + bottom playback bar
         // When expand_progress > 0, show expanded now-playing view replacing normal content
         let layout: Element<'_, Self::Message> = if self.expand_progress > 0.0 {
+            #[cfg(feature = "visualizer")]
+            let viz_hud_visible = self.viz_hud_idle_frames < VIZ_HUD_HOLD_FRAMES;
             // Expanded/animating: show expanded now-playing view
             let expanded = now_playing::expanded_view::expanded_now_playing(
                 self.current_track.as_ref(),
@@ -1458,6 +1476,8 @@ impl cosmic::Application for AppModel {
                 self.viz_metadata_opacity,
                 #[cfg(feature = "visualizer")]
                 self.viz_fullscreen,
+                #[cfg(feature = "visualizer")]
+                viz_hud_visible,
             )
             .map(map_now_playing_msg);
 
@@ -1628,6 +1648,23 @@ impl cosmic::Application for AppModel {
                     }
                 },
             ));
+        }
+
+        // Mouse movement while the visualizer is fullscreen resets the HUD
+        // control-card auto-hide idle counter (see `viz_hud_idle_frames`).
+        // Scoped to `viz_fullscreen` so ordinary app usage never emits this.
+        #[cfg(feature = "visualizer")]
+        if self.viz_fullscreen {
+            subs.push(cosmic::iced::event::listen_with(|event, _status, _id| {
+                if let cosmic::iced::Event::Mouse(cosmic::iced::mouse::Event::CursorMoved {
+                    ..
+                }) = event
+                {
+                    Some(Message::VizHudActivity)
+                } else {
+                    None
+                }
+            }));
         }
 
         // Space bar to toggle playback (unless captured by a text input widget)
@@ -3159,6 +3196,18 @@ impl cosmic::Application for AppModel {
                     self.viz_metadata_opacity =
                         (self.viz_metadata_opacity - (1.0 / 120.0)).max(0.0);
                 }
+
+                // Tick the HUD auto-hide idle counter (only while fullscreen —
+                // no point counting otherwise, and it avoids a stale huge
+                // count if fullscreen is re-entered much later).
+                if self.viz_fullscreen {
+                    self.viz_hud_idle_frames = self.viz_hud_idle_frames.saturating_add(1);
+                }
+            }
+
+            #[cfg(feature = "visualizer")]
+            Message::VizHudActivity => {
+                self.viz_hud_idle_frames = 0;
             }
 
             #[cfg(feature = "visualizer")]
@@ -3170,6 +3219,7 @@ impl cosmic::Application for AppModel {
                 // which COSMIC never draws, so it was a silent no-op.)
                 self.viz_fullscreen = !self.viz_fullscreen;
                 if self.viz_fullscreen {
+                    self.viz_hud_idle_frames = 0;
                     self.viz_prev_nav_active = self.core.nav_bar_active();
                     self.core.window.show_headerbar = false;
                     self.core.nav_bar_set_toggled(false);

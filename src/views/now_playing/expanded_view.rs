@@ -472,6 +472,11 @@ pub fn expanded_now_playing<'a>(
     #[cfg(feature = "visualizer")] viz_frame_buf: Arc<Mutex<super::viz_shader::VizFrameBuffer>>,
     #[cfg(feature = "visualizer")] viz_metadata_opacity: f32,
     #[cfg(feature = "visualizer")] viz_fullscreen: bool,
+    // Whether the fullscreen HUD control card should currently be shown.
+    // `false` once the mouse has been idle past `VIZ_HUD_HOLD_FRAMES`;
+    // only governs the control card — lyrics (if overlaid) are content,
+    // not chrome, and stay visible regardless.
+    #[cfg(feature = "visualizer")] viz_hud_visible: bool,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     let _ = expand_progress;
 
@@ -515,6 +520,11 @@ pub fn expanded_now_playing<'a>(
     let fullscreen_mode = viz_fullscreen && visualizer_active;
     #[cfg(not(feature = "visualizer"))]
     let fullscreen_mode = false;
+    // `viz_hud_visible` only exists as a real parameter behind the
+    // visualizer feature; the fullscreen-mode branch below is always dead
+    // (fullscreen_mode is always false here) but still needs to compile.
+    #[cfg(not(feature = "visualizer"))]
+    let viz_hud_visible = true;
 
     let content_layer: cosmic::Element<'_, NowPlayingMessage> = if fullscreen_mode {
         // --- Fullscreen: visualizer is full-bleed; everything else lives
@@ -633,7 +643,9 @@ pub fn expanded_now_playing<'a>(
         if lyrics_overlay_active {
             // Bottom padding leaves clearance for the control card, which
             // docks at the screen bottom via `align_y(Vertical::Bottom)`
-            // above — the lyrics layer must not sit underneath it.
+            // above — the lyrics layer must not sit underneath it. Lyrics
+            // are content, not chrome: they stay visible/readable regardless
+            // of `viz_hud_visible`, which only governs the control card.
             let lyrics_layer: cosmic::Element<'_, NowPlayingMessage> = widget::container(
                 crate::views::lyrics::lyrics_overlay_view::<NowPlayingMessage>(
                     lyrics,
@@ -648,9 +660,17 @@ pub fn expanded_now_playing<'a>(
             .padding([space_l, space_l, 220.0, space_l])
             .into();
 
-            Stack::new().push(lyrics_layer).push(card_layer).into()
-        } else {
+            if viz_hud_visible {
+                Stack::new().push(lyrics_layer).push(card_layer).into()
+            } else {
+                lyrics_layer
+            }
+        } else if viz_hud_visible {
             card_layer
+        } else {
+            // HUD auto-hidden, no lyrics: nothing on top of the visualizer —
+            // a zero-size element so it has no hit-testing footprint either.
+            widget::Space::new().width(0).height(0).into()
         }
     } else {
         // --- Non-fullscreen: existing 50/50 cover-art + controls split. ---
