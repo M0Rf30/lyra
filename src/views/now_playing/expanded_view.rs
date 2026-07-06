@@ -7,7 +7,7 @@ use crate::library::Track;
 use crate::player::PlaybackState;
 use crate::views::common;
 use cosmic::iced::alignment::{Horizontal, Vertical};
-use cosmic::iced::core::text::Wrapping;
+use cosmic::iced::core::text::{Ellipsize, EllipsizeHeightLimit, Wrapping};
 use cosmic::iced::widget::Stack;
 use cosmic::iced::{Alignment, Color, Length};
 use cosmic::prelude::*;
@@ -140,7 +140,7 @@ fn empty_expanded_view<'a>() -> cosmic::Element<'a, NowPlayingMessage> {
     // transport row: shuffle, previous, play, next, repeat.
     let transport = widget::Row::new()
         .push(transport_button::<NowPlayingMessage>(
-            "media-playlist-consecutive-symbolic",
+            "media-playlist-shuffle-symbolic",
             24,
             false,
             fl!("shuffle"),
@@ -238,11 +238,7 @@ fn transport_row<'a>(
     } else {
         "media-playback-start-symbolic"
     };
-    let shuffle_icon = if shuffle {
-        "media-playlist-shuffle-symbolic"
-    } else {
-        "media-playlist-consecutive-symbolic"
-    };
+    let shuffle_icon = "media-playlist-shuffle-symbolic";
     let repeat_icon = repeat_mode.icon_name();
     let play_label = if state == PlaybackState::Playing {
         fl!("pause")
@@ -321,7 +317,7 @@ fn utility_row<'a>(
         .push(
             widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
                 .step(0.01)
-                .width(Length::Fill),
+                .width(Length::Fixed(160.0)),
         )
         .push(transport_button(
             "view-list-lyrics-symbolic",
@@ -595,10 +591,13 @@ pub fn expanded_now_playing<'a>(
 
         // At the narrowest supported logical width (1280px) each 50/50 panel
         // gets ~640px before padding, ~575px after; at 1920px it's ~960px /
-        // ~895px. `clipped_cell` clips at whatever that actual pixel width
-        // turns out to be, so neither size (nor anything in between) needs a
-        // hand-tuned character budget the old truncation helper did.
-        let title_text = widget::text::title2(track.title.as_str()).wrapping(Wrapping::None);
+        // ~895px. The title wraps up to 2 lines at that width and only
+        // ellipsizes the 2nd line's tail if a 3rd would be needed (see
+        // `Ellipsize::End` below) — `clipped_cell`'s `.clip(true)` is just a
+        // defensive backstop now, not the primary truncation mechanism.
+        let title_text = widget::text::title1(track.title.as_str())
+            .wrapping(Wrapping::WordOrGlyph)
+            .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(2)));
         let title_text: cosmic::Element<'_, NowPlayingMessage> = if has_backdrop {
             title_text
                 .class(cosmic::theme::Text::Color(BACKDROP_TEXT))
@@ -613,7 +612,7 @@ pub fn expanded_now_playing<'a>(
                 NowPlayingMessage::ToggleFavorite(track.id.to_string()),
             ))
             .spacing(space_s)
-            .align_y(Alignment::Center);
+            .align_y(Alignment::Start);
         right_col = right_col.push(title_row).push(
             widget::Space::new()
                 .width(Length::Shrink)
@@ -696,7 +695,6 @@ pub fn expanded_now_playing<'a>(
         if has_backdrop {
             right_panel = right_panel.class(cosmic::theme::Container::custom(|_| {
                 cosmic::iced::widget::container::Style {
-                    background: Some(BACKDROP_SCRIM.into()),
                     text_color: Some(BACKDROP_TEXT),
                     ..Default::default()
                 }
@@ -822,6 +820,26 @@ pub fn expanded_now_playing<'a>(
                 .into();
 
         let mut stack_widget = Stack::new().push(black_base).push(bg_layer);
+
+        // Uniform full-bleed scrim: both panels must darken identically, or the
+        // seam between the (unscrimmed) art side and the (scrimmed) text side
+        // shows as a hard vertical cliff. Skipped in fullscreen-visualizer mode,
+        // which supplies its own scrim on just the control card and must stay
+        // vivid/unscrimmed behind it.
+        if !fullscreen_mode {
+            let scrim: cosmic::Element<'_, NowPlayingMessage> =
+                widget::container(widget::Space::new().width(0).height(0))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .class(cosmic::theme::Container::custom(|_theme| {
+                        cosmic::iced::widget::container::Style {
+                            background: Some(BACKDROP_SCRIM.into()),
+                            ..Default::default()
+                        }
+                    }))
+                    .into();
+            stack_widget = stack_widget.push(scrim);
+        }
 
         // The double-click-to-fullscreen detector is its own full-fill layer
         // pushed BENEATH the controls (never a `mouse_area` wrapping them):

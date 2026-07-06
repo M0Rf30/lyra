@@ -228,11 +228,11 @@ pub fn playback_bar<'a>(
         fl!("play")
     };
 
-    let shuffle_icon = if shuffle {
-        "media-playlist-shuffle-symbolic"
-    } else {
-        "media-playlist-consecutive-symbolic"
-    };
+    // A single glyph for both states: `toggle_icon_button` already conveys
+    // on/off via accent tint (`.selected(active)`). Swapping to an unrelated
+    // "sequential playback" arrow glyph for the off state reads as a stray,
+    // unrelated button next to the skip/play icons.
+    let shuffle_icon = "media-playlist-shuffle-symbolic";
     let repeat_icon = repeat_mode.icon_name();
     let repeat_active = repeat_mode != RepeatMode::None;
 
