@@ -137,6 +137,11 @@ pub struct AppModel {
     // Lyrics
     lyrics_text: Option<Lyrics>,
     lyrics_loading: bool,
+    /// When true and the expanded now-playing view is active, lyrics render
+    /// as an in-view overlay (over the cover art / visualizer) instead of
+    /// opening the generic context-drawer sidebar, keeping the immersive
+    /// full view intact.
+    lyrics_overlay_active: bool,
 
     // Equalizer
     eq_preset: Option<crate::player::equalizer::EqPreset>,
@@ -796,6 +801,7 @@ impl cosmic::Application for AppModel {
             text_input_focused: false,
             lyrics_text: None,
             lyrics_loading: false,
+            lyrics_overlay_active: false,
             eq_preset: None,
             preset_manager: {
                 let presets_dir = dirs::config_dir()
@@ -1441,6 +1447,9 @@ impl cosmic::Application for AppModel {
                 self.blurred_cover.as_ref(),
                 self.seeking_preview,
                 self.expand_progress,
+                self.lyrics_overlay_active,
+                self.lyrics_text.as_ref(),
+                self.lyrics_loading,
                 #[cfg(feature = "visualizer")]
                 self.visualizer_active,
                 #[cfg(feature = "visualizer")]
@@ -2319,13 +2328,22 @@ impl cosmic::Application for AppModel {
 
             // -- Lyrics --
             Message::ShowLyrics => {
-                self.context_page = ContextPage::Lyrics;
-                self.core.window.show_context = true;
-
-                // Try to load embedded lyrics
-                if let Some(ref track) = self.current_track {
+                // Try to load embedded lyrics, regardless of which
+                // presentation (overlay vs sidebar) ends up showing them.
+                if let Some(track) = &self.current_track {
                     self.lyrics_text = LyricsProvider::from_tags(&track.path)
                         .or_else(|| LyricsProvider::from_lrc_file(&track.path));
+                }
+
+                if self.expand_progress > 0.0 {
+                    // Expanded now-playing is active: toggle the in-view
+                    // overlay (drawn over the cover art / visualizer)
+                    // instead of opening the generic sidebar, which would
+                    // break the immersive full view.
+                    self.lyrics_overlay_active = !self.lyrics_overlay_active;
+                } else {
+                    self.context_page = ContextPage::Lyrics;
+                    self.core.window.show_context = true;
                 }
             }
 
@@ -3054,6 +3072,7 @@ impl cosmic::Application for AppModel {
                 self.expand_target = Some(0.0);
                 self.expand_anim_start = Some(std::time::Instant::now());
                 self.expand_anim_from = self.expand_progress;
+                self.lyrics_overlay_active = false;
                 // Leaving the expanded view must also leave fullscreen, else the
                 // header bar / nav sidebar would stay hidden with no visualizer.
                 #[cfg(feature = "visualizer")]
@@ -3315,6 +3334,7 @@ impl cosmic::Application for AppModel {
 
         // Collapse expanded now-playing view when navigating
         if self.expand_progress > 0.0 || self.expand_target.is_some() {
+            self.lyrics_overlay_active = false;
             self.expand_target = Some(0.0);
             self.expand_anim_start = Some(std::time::Instant::now());
             self.expand_anim_from = self.expand_progress;

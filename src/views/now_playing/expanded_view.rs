@@ -81,6 +81,25 @@ fn transport_button<'a, M: Clone + 'static>(
     widget::tooltip(button, widget::text::caption(label), TooltipPosition::Top).into()
 }
 
+/// Play/pause button rendered with `cosmic::theme::Button::Suggested`
+/// (COSMIC's filled/accent button class) so it reads as the ONE primary
+/// action in the transport row instead of a same-weight icon among the
+/// other four. `transport_button`'s shared signature has no class-override
+/// knob and backs four other buttons across three call sites in this file
+/// — rather than complicate it, this is a small dedicated variant used
+/// only for the play/pause button.
+fn play_pause_button<'a, M: Clone + 'static>(
+    icon_name: &'static str,
+    icon_size: u16,
+    label: String,
+    on_press: M,
+) -> cosmic::Element<'a, M> {
+    let button = widget::button::icon(widget::icon::from_name(icon_name).size(icon_size))
+        .class(cosmic::theme::Button::Suggested)
+        .on_press(on_press);
+    widget::tooltip(button, widget::text::caption(label), TooltipPosition::Top).into()
+}
+
 /// Standard collapse-to-compact-bar control, pinned top-right. 24px icon +
 /// `space_xs` padding on every side gives a >= 32px hit target (24 + 2×8 =
 /// 40px) — comfortably above the minimum, not just meeting it.
@@ -226,7 +245,12 @@ fn seek_bar_row<'a>(
 }
 
 /// Shuffle / previous / play-pause / next / repeat transport controls, in
-/// the same left-to-right order as the compact bar.
+/// the same left-to-right order as the compact bar. The prev/play/next
+/// "core" triplet stays tightly grouped; shuffle and repeat sit a much
+/// wider gap away on either side so they read as secondary controls, not
+/// same-weight siblings of the core triplet — and the play/pause button
+/// itself renders as the row's one primary/filled action via
+/// `play_pause_button` below.
 fn transport_row<'a>(
     state: PlaybackState,
     shuffle: bool,
@@ -246,14 +270,12 @@ fn transport_row<'a>(
         fl!("play")
     };
 
-    widget::Row::new()
-        .push(transport_button(
-            shuffle_icon,
-            24,
-            shuffle,
-            fl!("shuffle"),
-            Some(NowPlayingMessage::ToggleShuffle),
-        ))
+    // Wider than the core triplet's own `space_xxs` gap, so shuffle/repeat
+    // read as clearly-separate secondary controls instead of two more
+    // same-weight siblings of prev/play/next.
+    let group_gap = f32::from(cosmic::theme::active().cosmic().spacing.space_l);
+
+    let core = widget::Row::new()
         .push(transport_button(
             "media-skip-backward-symbolic",
             28,
@@ -261,12 +283,11 @@ fn transport_row<'a>(
             fl!("previous"),
             Some(NowPlayingMessage::Previous),
         ))
-        .push(transport_button(
+        .push(play_pause_button(
             play_icon,
             36,
-            false,
             play_label,
-            Some(NowPlayingMessage::TogglePlayback),
+            NowPlayingMessage::TogglePlayback,
         ))
         .push(transport_button(
             "media-skip-forward-symbolic",
@@ -275,6 +296,28 @@ fn transport_row<'a>(
             fl!("next"),
             Some(NowPlayingMessage::Next),
         ))
+        .spacing(space_xxs)
+        .align_y(Alignment::Center);
+
+    widget::Row::new()
+        .push(transport_button(
+            shuffle_icon,
+            24,
+            shuffle,
+            fl!("shuffle"),
+            Some(NowPlayingMessage::ToggleShuffle),
+        ))
+        .push(
+            widget::Space::new()
+                .width(Length::Fixed(group_gap))
+                .height(Length::Shrink),
+        )
+        .push(core)
+        .push(
+            widget::Space::new()
+                .width(Length::Fixed(group_gap))
+                .height(Length::Shrink),
+        )
         .push(transport_button(
             repeat_icon,
             24,
@@ -282,7 +325,69 @@ fn transport_row<'a>(
             fl!("repeat"),
             Some(NowPlayingMessage::CycleRepeat),
         ))
-        .spacing(space_xxs)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// Compact variant of `transport_row` for the fullscreen-visualizer HUD
+/// card: same shuffle/prev/play/next/repeat set, but at the bottom compact
+/// bar's icon scale (24/24/32/24/24, `spacing(4)`, see `compact_bar.rs`)
+/// instead of the hero layout's larger icons and wide grouping gaps — the
+/// HUD card sits over the visualizer and must stay visually light, not a
+/// shrunk copy of the two-panel layout's control cluster.
+fn compact_transport_row<'a>(
+    state: PlaybackState,
+    shuffle: bool,
+    repeat_mode: RepeatMode,
+) -> cosmic::Element<'a, NowPlayingMessage> {
+    let play_icon = if state == PlaybackState::Playing {
+        "media-playback-pause-symbolic"
+    } else {
+        "media-playback-start-symbolic"
+    };
+    let play_label = if state == PlaybackState::Playing {
+        fl!("pause")
+    } else {
+        fl!("play")
+    };
+
+    widget::Row::new()
+        .push(transport_button(
+            "media-playlist-shuffle-symbolic",
+            24,
+            shuffle,
+            fl!("shuffle"),
+            Some(NowPlayingMessage::ToggleShuffle),
+        ))
+        .push(transport_button(
+            "media-skip-backward-symbolic",
+            24,
+            false,
+            fl!("previous"),
+            Some(NowPlayingMessage::Previous),
+        ))
+        .push(transport_button(
+            play_icon,
+            32,
+            false,
+            play_label,
+            Some(NowPlayingMessage::TogglePlayback),
+        ))
+        .push(transport_button(
+            "media-skip-forward-symbolic",
+            24,
+            false,
+            fl!("next"),
+            Some(NowPlayingMessage::Next),
+        ))
+        .push(transport_button(
+            repeat_mode.icon_name(),
+            24,
+            repeat_mode != RepeatMode::None,
+            fl!("repeat"),
+            Some(NowPlayingMessage::CycleRepeat),
+        ))
+        .spacing(4)
         .align_y(Alignment::Center)
         .into()
 }
@@ -360,6 +465,9 @@ pub fn expanded_now_playing<'a>(
     blurred_cover: Option<&'a widget::icon::Handle>,
     seeking_preview: Option<f32>,
     expand_progress: f32,
+    lyrics_overlay_active: bool,
+    lyrics: Option<&'a crate::library::Lyrics>,
+    lyrics_loading: bool,
     #[cfg(feature = "visualizer")] visualizer_active: bool,
     #[cfg(feature = "visualizer")] viz_frame_buf: Arc<Mutex<super::viz_shader::VizFrameBuffer>>,
     #[cfg(feature = "visualizer")] viz_metadata_opacity: f32,
@@ -415,11 +523,11 @@ pub fn expanded_now_playing<'a>(
             widget::container(
                 widget::icon::icon(handle.clone())
                     .content_fit(cosmic::iced::ContentFit::Contain)
-                    .width(Length::Fixed(64.0))
-                    .height(Length::Fixed(64.0)),
+                    .width(Length::Fixed(48.0))
+                    .height(Length::Fixed(48.0)),
             )
-            .width(Length::Fixed(64.0))
-            .height(Length::Fixed(64.0))
+            .width(Length::Fixed(48.0))
+            .height(Length::Fixed(48.0))
             .clip(true)
             .class(cosmic::theme::Container::custom(|theme| {
                 let cosmic = theme.cosmic();
@@ -433,9 +541,9 @@ pub fn expanded_now_playing<'a>(
             }))
             .into()
         } else {
-            widget::container(widget::icon::from_name("media-optical-cd-audio-symbolic").size(48))
-                .width(Length::Fixed(64.0))
-                .height(Length::Fixed(64.0))
+            widget::container(widget::icon::from_name("media-optical-cd-audio-symbolic").size(36))
+                .width(Length::Fixed(48.0))
+                .height(Length::Fixed(48.0))
                 .align_x(Horizontal::Center)
                 .align_y(Vertical::Center)
                 .into()
@@ -475,11 +583,11 @@ pub fn expanded_now_playing<'a>(
             .push(thumb)
             .push(info_col)
             .push(collapse_button())
-            .spacing(space_m)
+            .spacing(space_s)
             .align_y(Alignment::Center);
 
         let transport_centered: cosmic::Element<'_, NowPlayingMessage> =
-            widget::container(transport_row(state, shuffle, repeat_mode, space_xxs))
+            widget::container(compact_transport_row(state, shuffle, repeat_mode))
                 .align_x(Horizontal::Center)
                 .width(Length::Fill)
                 .into();
@@ -497,11 +605,11 @@ pub fn expanded_now_playing<'a>(
             .push(seek_bar_row(display_position, duration, progress, space_s))
             .push(transport_centered)
             .push(utility_full)
-            .spacing(space_s);
+            .spacing(space_xs);
 
         let card = widget::container(card_col)
-            .padding(space_m)
-            .max_width(1100.0)
+            .padding(space_xs)
+            .max_width(680.0)
             .class(cosmic::theme::Container::custom(|_theme| {
                 cosmic::iced::widget::container::Style {
                     background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
@@ -514,13 +622,36 @@ pub fn expanded_now_playing<'a>(
                 }
             }));
 
-        widget::container(card)
+        let card_layer: cosmic::Element<'_, NowPlayingMessage> = widget::container(card)
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(Horizontal::Center)
             .align_y(Vertical::Bottom)
             .padding(space_l)
-            .into()
+            .into();
+
+        if lyrics_overlay_active {
+            // Bottom padding leaves clearance for the control card, which
+            // docks at the screen bottom via `align_y(Vertical::Bottom)`
+            // above — the lyrics layer must not sit underneath it.
+            let lyrics_layer: cosmic::Element<'_, NowPlayingMessage> = widget::container(
+                crate::views::lyrics::lyrics_overlay_view::<NowPlayingMessage>(
+                    lyrics,
+                    lyrics_loading,
+                    position,
+                    BACKDROP_TEXT,
+                    BACKDROP_SUBTEXT,
+                ),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding([space_l, space_l, 220.0, space_l])
+            .into();
+
+            Stack::new().push(lyrics_layer).push(card_layer).into()
+        } else {
+            card_layer
+        }
     } else {
         // --- Non-fullscreen: existing 50/50 cover-art + controls split. ---
         let cover_col: cosmic::Element<'_, NowPlayingMessage> = if let Some(handle) = cover_art {
@@ -662,11 +793,7 @@ pub fn expanded_now_playing<'a>(
                 .height(Length::Fixed(space_s)),
         );
 
-        right_col = right_col.push(
-            widget::container(transport_row(state, shuffle, repeat_mode, space_xxs))
-                .align_x(Horizontal::Center)
-                .width(Length::Fill),
-        );
+        right_col = right_col.push(transport_row(state, shuffle, repeat_mode, space_xxs));
 
         right_col = right_col.push(
             widget::Space::new()
@@ -703,7 +830,27 @@ pub fn expanded_now_playing<'a>(
         // Else: no override — the panel stays transparent and inherits the
         // plain theme surface painted by the outer container below.
 
-        let left_panel = widget::container(cover_col)
+        let (lyrics_text_color, lyrics_subtext_color) = if has_backdrop {
+            (BACKDROP_TEXT, BACKDROP_SUBTEXT)
+        } else {
+            let theme = cosmic::theme::active();
+            let cosmic = theme.cosmic();
+            (cosmic.on_bg_color().into(), cosmic.palette.neutral_7.into())
+        };
+        let left_panel_content: cosmic::Element<'_, NowPlayingMessage> = if lyrics_overlay_active
+        {
+            crate::views::lyrics::lyrics_overlay_view::<NowPlayingMessage>(
+                lyrics,
+                lyrics_loading,
+                position,
+                lyrics_text_color,
+                lyrics_subtext_color,
+            )
+        } else {
+            cover_col
+        };
+
+        let left_panel = widget::container(left_panel_content)
             .width(Length::FillPortion(1))
             .height(Length::Fill)
             .align_x(Horizontal::Center)

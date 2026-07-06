@@ -125,3 +125,90 @@ fn synced_line_widget(line: &LyricLine, is_current: bool) -> cosmic::Element<'_,
         .align_y(Alignment::Center)
         .into()
 }
+
+/// Render lyrics as an in-view overlay for the expanded now-playing view:
+/// no card/header chrome, transparent background (the cover-art or
+/// visualizer backdrop shows through), and caller-supplied colors so it can
+/// match whichever backdrop treatment is active (see
+/// `expanded_view::BACKDROP_TEXT`/`BACKDROP_SUBTEXT`). Unlike `lyrics_view`
+/// there's no "Search Online" affordance here — that stays on the sidebar
+/// panel reachable from the collapsed bar, keeping this overlay read-only
+/// and free of extra message plumbing.
+pub fn lyrics_overlay_view<'a, M: 'static>(
+    lyrics: Option<&'a Lyrics>,
+    is_loading: bool,
+    playback_position: Duration,
+    text_color: Color,
+    subtext_color: Color,
+) -> cosmic::Element<'a, M> {
+    let content: cosmic::Element<'_, M> = if is_loading {
+        widget::container(
+            widget::text("Loading lyrics…").class(cosmic::theme::Text::Color(subtext_color)),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Horizontal::Center)
+        .align_y(Vertical::Center)
+        .into()
+    } else if let Some(lyrics_data) = lyrics {
+        match lyrics_data {
+            Lyrics::Synced(lines) => {
+                let current_idx = find_current_line_index(lines, playback_position);
+                let mut col = widget::Column::new().spacing(10).width(Length::Fill);
+                for (i, line) in lines.iter().enumerate() {
+                    let is_current = current_idx == Some(i);
+                    col = col.push(overlay_line_widget(line, is_current, text_color, subtext_color));
+                }
+                widget::scrollable(widget::container(col).padding(24))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+            }
+            Lyrics::Unsynced(text) => widget::scrollable(
+                widget::container(
+                    widget::text(text.as_str())
+                        .class(cosmic::theme::Text::Color(text_color))
+                        .align_x(Horizontal::Center),
+                )
+                .width(Length::Fill)
+                .padding(24),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        }
+    } else {
+        widget::container(
+            widget::text("No lyrics available").class(cosmic::theme::Text::Color(subtext_color)),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Horizontal::Center)
+        .align_y(Vertical::Center)
+        .into()
+    };
+
+    content
+}
+
+/// Overlay variant of `synced_line_widget`: bigger, centered, and using
+/// caller-supplied colors instead of a fixed accent/dimmed pair, since this
+/// renders over arbitrary cover-art/visualizer backdrops rather than a flat
+/// theme surface.
+fn overlay_line_widget<'a, M: 'static>(
+    line: &LyricLine,
+    is_current: bool,
+    text_color: Color,
+    subtext_color: Color,
+) -> cosmic::Element<'a, M> {
+    let color = if is_current { text_color } else { subtext_color };
+    let text_widget = if is_current {
+        widget::text::title4(line.text.clone())
+    } else {
+        widget::text::body(line.text.clone())
+    };
+    widget::container(text_widget.class(cosmic::theme::Text::Color(color)))
+        .width(Length::Fill)
+        .align_x(Horizontal::Center)
+        .into()
+}
