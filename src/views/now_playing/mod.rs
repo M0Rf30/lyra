@@ -46,6 +46,14 @@ pub enum NowPlayingMessage {
     /// Double-click on visualizer background — toggle fullscreen.
     #[cfg(feature = "visualizer")]
     ToggleVizFullscreen,
+    /// Cursor entered the fullscreen HUD control card — keep it visible
+    /// regardless of mouse-idle time while the pointer is over it.
+    #[cfg(feature = "visualizer")]
+    VizHudPointerEnter,
+    /// Cursor left the fullscreen HUD control card — auto-hide idle
+    /// counting resumes.
+    #[cfg(feature = "visualizer")]
+    VizHudPointerExit,
 }
 
 /// Format a duration as `H:MM:SS` / `M:SS`.

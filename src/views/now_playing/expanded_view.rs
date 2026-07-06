@@ -632,7 +632,15 @@ pub fn expanded_now_playing<'a>(
                 }
             }));
 
-        let card_layer: cosmic::Element<'_, NowPlayingMessage> = widget::container(card)
+        #[cfg(feature = "visualizer")]
+        let card_hover_area: cosmic::Element<'_, NowPlayingMessage> = widget::mouse_area(card)
+            .on_enter(NowPlayingMessage::VizHudPointerEnter)
+            .on_exit(NowPlayingMessage::VizHudPointerExit)
+            .into();
+        #[cfg(not(feature = "visualizer"))]
+        let card_hover_area: cosmic::Element<'_, NowPlayingMessage> = card.into();
+
+        let card_layer: cosmic::Element<'_, NowPlayingMessage> = widget::container(card_hover_area)
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(Horizontal::Center)

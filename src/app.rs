@@ -217,6 +217,12 @@ pub struct AppModel {
     /// `VIZ_HUD_HOLD_FRAMES`.
     #[cfg(feature = "visualizer")]
     viz_hud_idle_frames: u32,
+    /// Whether the cursor is currently over the fullscreen HUD control
+    /// card. While true, the card stays visible regardless of
+    /// `viz_hud_idle_frames` (the user may be resting the pointer on a
+    /// slider/button without moving it).
+    #[cfg(feature = "visualizer")]
+    viz_hud_pointer_over: bool,
 }
 
 /// All application messages.
@@ -461,6 +467,12 @@ pub enum Message {
     /// control-card auto-hide idle counter.
     #[cfg(feature = "visualizer")]
     VizHudActivity,
+    /// Cursor entered/left the fullscreen HUD control card — see
+    /// `NowPlayingMessage::VizHudPointerEnter`/`VizHudPointerExit`.
+    #[cfg(feature = "visualizer")]
+    VizHudPointerEnter,
+    #[cfg(feature = "visualizer")]
+    VizHudPointerExit,
 
     // Notifications
     /// A toast notification was dismissed (by timeout or user action).
@@ -866,6 +878,8 @@ impl cosmic::Application for AppModel {
             viz_metadata_opacity: 0.0,
             #[cfg(feature = "visualizer")]
             viz_hud_idle_frames: 0,
+            #[cfg(feature = "visualizer")]
+            viz_hud_pointer_over: false,
         };
 
         app.rebuild_provider_list();
@@ -900,9 +914,12 @@ impl cosmic::Application for AppModel {
                 menu::items(
                     &self.key_binds,
                     vec![
+                        // `menu::Item::Divider` renders as a solid filled
+                        // block (not a thin line) in this pinned libcosmic
+                        // revision -- omitted rather than shipping a
+                        // visibly-broken separator.
                         menu::Item::Button(fl!("add-music-folder"), None, MenuAction::AddMusicDir),
                         menu::Item::Button(fl!("scan-library"), None, MenuAction::ScanLibrary),
-                        menu::Item::Divider,
                         menu::Item::Button(fl!("quit"), None, MenuAction::Quit),
                     ],
                 ),
@@ -913,10 +930,8 @@ impl cosmic::Application for AppModel {
                     &self.key_binds,
                     vec![
                         menu::Item::Button(fl!("search"), None, MenuAction::Search),
-                        menu::Item::Divider,
                         menu::Item::Button(fl!("equalizer"), None, MenuAction::Equalizer),
                         menu::Item::Button(fl!("providers"), None, MenuAction::Providers),
-                        menu::Item::Divider,
                         menu::Item::Button(fl!("about"), None, MenuAction::About),
                     ],
                 ),
@@ -1431,6 +1446,10 @@ impl cosmic::Application for AppModel {
             now_playing::NowPlayingMessage::ToggleVizFullscreen => {
                 Message::ToggleVisualizerFullscreen
             }
+            #[cfg(feature = "visualizer")]
+            now_playing::NowPlayingMessage::VizHudPointerEnter => Message::VizHudPointerEnter,
+            #[cfg(feature = "visualizer")]
+            now_playing::NowPlayingMessage::VizHudPointerExit => Message::VizHudPointerExit,
         };
 
         let bar = now_playing::compact_bar::playback_bar(
@@ -1451,7 +1470,8 @@ impl cosmic::Application for AppModel {
         // When expand_progress > 0, show expanded now-playing view replacing normal content
         let layout: Element<'_, Self::Message> = if self.expand_progress > 0.0 {
             #[cfg(feature = "visualizer")]
-            let viz_hud_visible = self.viz_hud_idle_frames < VIZ_HUD_HOLD_FRAMES;
+            let viz_hud_visible =
+                self.viz_hud_pointer_over || self.viz_hud_idle_frames < VIZ_HUD_HOLD_FRAMES;
             // Expanded/animating: show expanded now-playing view
             let expanded = now_playing::expanded_view::expanded_now_playing(
                 self.current_track.as_ref(),
@@ -3200,13 +3220,25 @@ impl cosmic::Application for AppModel {
                 // Tick the HUD auto-hide idle counter (only while fullscreen —
                 // no point counting otherwise, and it avoids a stale huge
                 // count if fullscreen is re-entered much later).
-                if self.viz_fullscreen {
+                if self.viz_fullscreen && !self.viz_hud_pointer_over {
                     self.viz_hud_idle_frames = self.viz_hud_idle_frames.saturating_add(1);
                 }
             }
 
             #[cfg(feature = "visualizer")]
             Message::VizHudActivity => {
+                self.viz_hud_idle_frames = 0;
+            }
+
+            #[cfg(feature = "visualizer")]
+            Message::VizHudPointerEnter => {
+                self.viz_hud_pointer_over = true;
+                self.viz_hud_idle_frames = 0;
+            }
+
+            #[cfg(feature = "visualizer")]
+            Message::VizHudPointerExit => {
+                self.viz_hud_pointer_over = false;
                 self.viz_hud_idle_frames = 0;
             }
 
