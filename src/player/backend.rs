@@ -2,7 +2,7 @@
 
 //! Playback backend trait definition.
 //!
-//! All audio playback implementations (local rodio, MPD, etc.) implement
+//! All audio playback implementations (local cpal-based, MPD, etc.) implement
 //! this trait. The trait is synchronous — for backends that need async I/O
 //! (like MPD), the implementation bridges to async internally.
 

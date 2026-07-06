@@ -7,7 +7,7 @@
 //! achieved by dropping the current connection and re-requesting with an
 //! appropriate `Range: bytes=N-` header.
 //!
-//! This allows rodio/symphonia to decode audio from a remote server with
+//! This allows symphonia to decode audio from a remote server with
 //! full seek support, as long as the server advertises `Accept-Ranges: bytes`
 //! (which Navidrome does for raw / cached-transcoded files).
 

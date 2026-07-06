@@ -20,8 +20,27 @@ libcosmic = { git = "https://github.com/pop-os/libcosmic.git", rev = "ee5d965", 
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 
-# Audio playback
-rodio = { version = "0.22", features = ["symphonia-all"] }
+# Audio playback engine — direct symphonia (DSD-capable fork) + cpal, no
+# rodio. See the removed patch-comment history: rodio's own transitive
+# symphonia dep (crates.io 0.5.5) cannot be patched to this fork in place
+# because the fork tracks the post-0.5.5 `symphonia-core` API redesign
+# (codecs::Decoder split into codecs::audio::AudioDecoder, `probe` moved
+# out of core) that rodio 0.22 doesn't compile against. Depending on the
+# fork directly (not via `[patch.crates-io]`) sidesteps that conflict
+# entirely, matching the working approach in the sibling `rmpd` project.
+symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "e0649c9c77e6104a03ac99ce4600fef420b62478", features = [
+    "all",
+    "dsd",
+] }
+cpal = "0.18"
+rubato = "3.0"
+audioadapter-buffers = "3.0"
+# Internal-only locks in the playback engine (e.g. the gapless/crossfade
+# look-ahead slot) that are always locked and immediately unwrapped, never
+# held across an `.await` — parking_lot's non-poisoning guards are the
+# better fit there. Not used for the visualizer's `PcmBuffer` mutex, whose
+# type is fixed by `Player`/`App`'s existing `std::sync::Mutex` signature.
+parking_lot = "0.12"
 
 # MPD protocol client
 mpd_client = "1.4"
@@ -107,33 +126,6 @@ inherits = "release"
 debug = true
 strip = false
 
-# Patch symphonia to M0Rf30 fork for DSD/DSF/DFF support -- CURRENTLY DISABLED.
-# The fork's `dsd-support` branch is rebased on ~216 unreleased upstream commits
-# past the real symphonia 0.5.5 tag, which already redesigned `symphonia-core`
-# (codecs::Decoder split into codecs::audio::AudioDecoder/subtitle/video, and
-# `probe` moved out of core entirely). rodio 0.22 was built against the old
-# unified 0.5.5 API, so enabling this patch makes rodio fail to compile even
-# though the fork's own workspace now builds fine standalone (version was
-# bumped down to 0.5.9 so Cargo *would* select it -- see M0Rf30/Symphonia
-# commit 7fc3ad9). Re-enabling DSD support requires porting the two DSD
-# commits (a2796cc, e0649c9) onto the actual v0.5.5 core API, not just a
-# version-string fix. Until then, real crates.io symphonia 0.5.5 is used
-# (no DSD/DSF/DFF playback).
-# [patch.crates-io]
-# symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-# symphonia-core = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-# symphonia-metadata = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-# symphonia-bundle-flac = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-# symphonia-bundle-mp3 = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-# symphonia-codec-aac = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-# symphonia-codec-adpcm = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-# symphonia-codec-alac = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-# symphonia-codec-pcm = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-# symphonia-codec-vorbis = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-# symphonia-format-isomp4 = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-# symphonia-format-mkv = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-# symphonia-format-ogg = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
-# symphonia-format-riff = { git = "https://github.com/M0Rf30/Symphonia.git", branch = "dsd-support" }
 
 # Uncomment to test a locally-cloned libcosmic
 # [patch.'https://github.com/pop-os/libcosmic']

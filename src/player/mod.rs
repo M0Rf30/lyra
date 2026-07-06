@@ -3,6 +3,7 @@
 //! Audio playback engine with pluggable backend support.
 
 pub mod backend;
+pub mod engine;
 pub mod eq_presets;
 pub mod eq_source;
 pub mod equalizer;
@@ -51,7 +52,7 @@ fn resolve_track_source(track: &Track) -> TrackSource {
 /// Which backend is currently active for playback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveBackend {
-    /// Local rodio-based playback (local files + HTTP streams).
+    /// Local cpal-based playback (local files + HTTP streams).
     Local,
     /// MPD server playback.
     Mpd,

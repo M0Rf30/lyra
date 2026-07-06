@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0
 
-//! 10-band parametric equalizer DSP implemented as a rodio `Source` adapter.
+//! 10-band parametric equalizer DSP implemented as an [`AudioFilter`].
 //!
 //! Uses cascaded second-order IIR (biquad) peaking-EQ filters, one per band.
 //! Coefficients and bypass state are shared via atomics so the audio thread
 //! never blocks on a mutex when the UI adjusts a slider.
+//!
+//! [`AudioFilter`]: crate::player::engine::filter::AudioFilter
 
-use rodio::Source;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
 
 use super::equalizer::BAND_FREQUENCIES;
 
@@ -241,15 +241,16 @@ impl EqController {
 }
 
 // ---------------------------------------------------------------------------
-// EqSource — audio-thread Source adapter
+// EqFilter — AudioFilter adapter
 // ---------------------------------------------------------------------------
 
-/// A `rodio::Source` adapter that applies a 10-band parametric EQ.
+/// An [`AudioFilter`](crate::player::engine::filter::AudioFilter) that applies
+/// a 10-band parametric EQ to a whole interleaved buffer per call.
 ///
 /// Reads coefficients from shared atomics (lock-free) and applies cascaded
-/// biquad filters to each sample. When bypassed, samples pass through unchanged.
-pub struct EqSource<S: Source<Item = f32>> {
-    inner: S,
+/// biquad filters to each sample. When bypassed, the buffer passes through
+/// unchanged.
+pub struct EqFilter {
     coeffs: SharedCoeffs,
     bypass: Arc<AtomicBool>,
     /// Per-band, per-channel filter state.
@@ -261,16 +262,18 @@ pub struct EqSource<S: Source<Item = f32>> {
     channel_idx: u16,
 }
 
-impl<S: Source<Item = f32>> EqSource<S> {
-    /// Wrap a source with the 10-band EQ.
-    pub fn new(inner: S, coeffs: SharedCoeffs, bypass: Arc<AtomicBool>) -> Self {
-        let channels = inner.channels();
+impl EqFilter {
+    /// Create a new EQ filter for a stream with the given channel count.
+    pub fn new(
+        channels: std::num::NonZero<u16>,
+        coeffs: SharedCoeffs,
+        bypass: Arc<AtomicBool>,
+    ) -> Self {
         let states = (0..NUM_BANDS)
             .map(|_| vec![BiquadState::default(); channels.get() as usize])
             .collect();
 
         Self {
-            inner,
             coeffs,
             bypass,
             states,
@@ -290,57 +293,36 @@ impl<S: Source<Item = f32>> EqSource<S> {
     }
 }
 
-impl<S: Source<Item = f32>> Iterator for EqSource<S> {
-    type Item = f32;
+impl crate::player::engine::filter::AudioFilter for EqFilter {
+    fn name(&self) -> &str {
+        "eq"
+    }
 
-    fn next(&mut self) -> Option<f32> {
-        let sample = self.inner.next()?;
-
+    fn apply(&mut self, buf: &mut [f32]) {
         // Bypass: pass through unchanged.
         if self.bypass.load(Ordering::Relaxed) {
+            return;
+        }
+
+        for sample in buf.iter_mut() {
+            let ch = self.channel_idx as usize;
             self.channel_idx = (self.channel_idx + 1) % self.channels.get();
-            return Some(sample);
+
+            // Cascade through all 10 bands.
+            let mut out = *sample;
+            for band_idx in 0..NUM_BANDS {
+                let c = BiquadCoeffs::load(&self.coeffs[band_idx]);
+                out = self.states[band_idx][ch].process(out, &c);
+            }
+            *sample = out;
         }
-
-        let ch = self.channel_idx as usize;
-        self.channel_idx = (self.channel_idx + 1) % self.channels.get();
-
-        // Cascade through all 10 bands.
-        let mut out = sample;
-        for band_idx in 0..NUM_BANDS {
-            let c = BiquadCoeffs::load(&self.coeffs[band_idx]);
-            out = self.states[band_idx][ch].process(out, &c);
-        }
-
-        Some(out)
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
-    }
-}
-
-impl<S: Source<Item = f32>> Source for EqSource<S> {
-    fn current_span_len(&self) -> Option<usize> {
-        self.inner.current_span_len()
-    }
-
-    fn channels(&self) -> std::num::NonZero<u16> {
-        self.inner.channels()
-    }
-
-    fn sample_rate(&self) -> std::num::NonZero<u32> {
-        self.inner.sample_rate()
-    }
-
-    fn total_duration(&self) -> Option<Duration> {
-        self.inner.total_duration()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::player::engine::filter::AudioFilter;
 
     #[test]
     fn identity_coefficients_pass_through() {
@@ -378,5 +360,46 @@ mod tests {
         assert!(c.b2.abs() < 1e-6);
         assert!(c.a1.abs() < 1e-6);
         assert!(c.a2.abs() < 1e-6);
+    }
+
+    #[test]
+    fn eq_filter_bypass_passes_buffer_through_unchanged() {
+        let coeffs = new_shared_coeffs();
+        let bypass = Arc::new(AtomicBool::new(true));
+        let channels = std::num::NonZero::new(2u16).unwrap();
+        let mut filter = EqFilter::new(channels, coeffs, bypass);
+
+        let mut buf: Vec<f32> = (0..100).map(|i| i as f32 * 0.01).collect();
+        let expected = buf.clone();
+        filter.apply(&mut buf);
+        assert_eq!(buf, expected, "bypassed EqFilter must not modify samples");
+    }
+
+    #[test]
+    fn eq_filter_identity_coefficients_pass_through() {
+        // new_shared_coeffs() initializes every band to BiquadCoeffs::IDENTITY.
+        let coeffs = new_shared_coeffs();
+        let bypass = Arc::new(AtomicBool::new(false));
+        let channels = std::num::NonZero::new(2u16).unwrap();
+        let mut filter = EqFilter::new(channels, coeffs, bypass);
+
+        let mut buf: Vec<f32> = (0..100).map(|i| i as f32 * 0.01).collect();
+        let expected = buf.clone();
+        filter.apply(&mut buf);
+        for (i, (out, input)) in buf.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (out - input).abs() < 1e-5,
+                "sample {i}: {out} != {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn eq_filter_name_is_eq() {
+        let coeffs = new_shared_coeffs();
+        let bypass = Arc::new(AtomicBool::new(false));
+        let channels = std::num::NonZero::new(2u16).unwrap();
+        let filter = EqFilter::new(channels, coeffs, bypass);
+        assert_eq!(filter.name(), "eq");
     }
 }

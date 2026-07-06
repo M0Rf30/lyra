@@ -16,7 +16,7 @@ use std::fmt;
 /// The type of a music provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderType {
-    /// Local filesystem (scanned directories, rodio playback).
+    /// Local filesystem (scanned directories, cpal-based playback).
     Local,
     /// MPD server (remote library, server-side playback).
     Mpd,
