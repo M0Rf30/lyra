@@ -182,6 +182,52 @@ impl LibraryDb {
                 .map_err(|e| format!("Migration v2 commit error: {e}"))?;
         }
 
+        if version < 3 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v3 transaction error: {e}"))?;
+
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS podcasts (
+                     id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                     feed_url       TEXT NOT NULL UNIQUE,
+                     title          TEXT NOT NULL DEFAULT '',
+                     description    TEXT NOT NULL DEFAULT '',
+                     image_url      TEXT NOT NULL DEFAULT '',
+                     last_refreshed INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE IF NOT EXISTS podcast_episodes (
+                     id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                     podcast_id     INTEGER NOT NULL REFERENCES podcasts(id) ON DELETE CASCADE,
+                     guid           TEXT NOT NULL,
+                     title          TEXT NOT NULL DEFAULT '',
+                     enclosure_url  TEXT NOT NULL,
+                     mime           TEXT NOT NULL DEFAULT '',
+                     duration_secs  INTEGER NOT NULL DEFAULT 0,
+                     pub_date       INTEGER NOT NULL DEFAULT 0,
+                     description    TEXT NOT NULL DEFAULT '',
+                     position_ms    INTEGER NOT NULL DEFAULT 0,
+                     played         INTEGER NOT NULL DEFAULT 0,
+                     UNIQUE(podcast_id, guid)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_podcast_episodes_podcast_pubdate
+                     ON podcast_episodes(podcast_id, pub_date DESC);
+                 CREATE TABLE IF NOT EXISTS radio_stations (
+                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                     name         TEXT NOT NULL,
+                     stream_url   TEXT NOT NULL UNIQUE,
+                     homepage     TEXT NOT NULL DEFAULT '',
+                     favicon_url  TEXT NOT NULL DEFAULT '',
+                     tags         TEXT NOT NULL DEFAULT ''
+                 );
+                 PRAGMA user_version=3;",
+            )
+            .map_err(|e| format!("Migration v3 error (schema): {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v3 commit error: {e}"))?;
+        }
+
         let tx = self
             .conn
             .unchecked_transaction()
@@ -1016,7 +1062,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            2
+            3
         );
     }
 

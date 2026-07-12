@@ -43,6 +43,10 @@ fn resolve_track_source(track: &Track) -> TrackSource {
     } else if track.provider_id.starts_with("subsonic") {
         // source_uri contains the pre-built authenticated stream URL.
         TrackSource::HttpStream(track.source_uri.clone())
+    } else if track.provider_id.starts_with("radio") {
+        TrackSource::LiveStream(track.source_uri.clone())
+    } else if track.provider_id.starts_with("podcast") {
+        TrackSource::HttpStream(track.source_uri.clone())
     } else {
         // Default: local file
         TrackSource::LocalFile(track.path.clone())
@@ -132,7 +136,7 @@ impl Player {
     pub fn play_track(&mut self, track: &Track, source: TrackSource) -> Result<(), String> {
         // Select the appropriate backend based on the track source.
         match &source {
-            TrackSource::LocalFile(_) | TrackSource::HttpStream(_) => {
+            TrackSource::LocalFile(_) | TrackSource::HttpStream(_) | TrackSource::LiveStream(_) => {
                 self.active_backend = ActiveBackend::Local;
                 // Apply replay gain to the local backend before playing.
                 let gain = self.compute_replay_gain(track);
@@ -374,6 +378,13 @@ impl Player {
     /// Get a reference to the local backend's EQ controller.
     pub fn eq_controller(&self) -> &EqController {
         self.local_backend.eq_controller()
+    }
+
+    /// Current ICY `StreamTitle` for a live radio stream, if the server
+    /// sent embedded metadata. `None` for non-radio playback or stations
+    /// that don't embed metadata.
+    pub fn icy_title(&self) -> Option<String> {
+        self.local_backend.icy_title()
     }
 
     /// Set crossfade duration on the local backend.

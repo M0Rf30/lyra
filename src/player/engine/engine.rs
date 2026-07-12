@@ -124,15 +124,15 @@ fn dsd_output_target_rate(
 
 /// A playable source. `LocalFile` is opened synchronously (a fast header
 /// probe) by [`PlaybackEngine::play`] so a bad/missing file surfaces
-/// immediately through its `Result`. `Reader` carries the *ingredients* for
-/// an HTTP stream rather than an already-connected [`HttpRangeReader`]:
-/// constructing one performs a real blocking `GET` (see
-/// `HttpRangeReader::new`), so that connect — and the subsequent format
-/// probe — happens on the dedicated playback thread instead of the caller's
-/// thread. This is the one deliberate deviation from the shape sketched in
-/// the assignment: a pre-built `reader` field would have reintroduced the
-/// exact blocking-the-caller problem the old background-thread dance
-/// existed to avoid.
+/// immediately through its `Result`. `Reader` and `LiveStream` carry the
+/// *ingredients* for an HTTP connection rather than an already-connected
+/// one: constructing a [`HttpRangeReader`]/live response performs a real
+/// blocking `GET`, so that connect — and the subsequent format probe —
+/// happens on the dedicated playback thread instead of the caller's thread.
+/// This is the one deliberate deviation from the shape sketched in the
+/// assignment: a pre-built `reader` field would have reintroduced the exact
+/// blocking-the-caller problem the old background-thread dance existed to
+/// avoid.
 pub enum PlaySource {
     LocalFile(PathBuf),
     Reader {
@@ -140,11 +140,20 @@ pub enum PlaySource {
         client: reqwest::blocking::Client,
         hint_extension: Option<String>,
     },
+    /// An internet radio / Shoutcast-Icecast live stream. `icy_title` is
+    /// updated in place from any embedded ICY `StreamTitle` metadata so the
+    /// UI can read it back without threading a message through the engine.
+    LiveStream {
+        url: String,
+        client: reqwest::blocking::Client,
+        hint_extension: Option<String>,
+        icy_title: Arc<Mutex<Option<String>>>,
+    },
 }
 
 impl PlaySource {
-    /// Open the decoder for this source. For `Reader`, this is where the
-    /// (potentially slow) HTTP connect + probe actually happens.
+    /// Open the decoder for this source. For `Reader`/`LiveStream`, this is
+    /// where the (potentially slow) HTTP connect + probe actually happens.
     fn open_decoder(self) -> Result<SymphoniaDecoder> {
         match self {
             PlaySource::LocalFile(path) => SymphoniaDecoder::open(&path),
@@ -159,6 +168,37 @@ impl PlaySource {
                     (len > 0).then_some(len)
                 };
                 SymphoniaDecoder::open_reader(reader, byte_len, hint_extension.as_deref())
+            }
+            PlaySource::LiveStream {
+                url,
+                client,
+                hint_extension,
+                icy_title,
+            } => {
+                let response = client
+                    .get(&url)
+                    .header("Icy-MetaData", "1")
+                    .send()
+                    .map_err(|e| PlayerError(format!("Failed to connect to stream: {e}")))?;
+                let metadata_interval =
+                    icy_metadata::IcyHeaders::parse_from_headers(response.headers())
+                        .metadata_interval();
+                match metadata_interval {
+                    Some(interval) => {
+                        let reader = icy_metadata::IcyMetadataReader::new(
+                            response,
+                            Some(interval),
+                            move |metadata| {
+                                let title = metadata
+                                    .ok()
+                                    .and_then(|m| m.stream_title().map(str::to_string));
+                                *icy_title.lock() = title;
+                            },
+                        );
+                        SymphoniaDecoder::open_stream(reader, hint_extension.as_deref())
+                    }
+                    None => SymphoniaDecoder::open_stream(response, hint_extension.as_deref()),
+                }
             }
         }
     }
@@ -328,10 +368,10 @@ impl PlaybackEngine {
 
         // Local files: open (a fast header probe) synchronously so a bad or
         // missing file surfaces immediately through this `Result`, matching
-        // the previous backend's behaviour exactly. HTTP streams: the
-        // connect + probe is genuinely slow (a real network round trip), so
-        // it happens on the dedicated playback thread instead — see
-        // `PlaySource::open_decoder` / `ThreadStart::Pending`.
+        // the previous backend's behaviour exactly. HTTP streams and live
+        // radio streams: the connect + probe is genuinely slow (a real
+        // network round trip), so it happens on the dedicated playback
+        // thread instead — see `PlaySource::open_decoder` / `ThreadStart::Pending`.
         let start = match source {
             PlaySource::LocalFile(path) => {
                 let decoder = SymphoniaDecoder::open(&path)?;
@@ -340,7 +380,7 @@ impl PlaybackEngine {
                     .store(secs_to_nanos(decoder.duration()), Ordering::Release);
                 ThreadStart::Ready(decoder)
             }
-            reader_source @ PlaySource::Reader { .. } => ThreadStart::Pending(reader_source),
+            pending_source => ThreadStart::Pending(pending_source),
         };
 
         self.stop_flag.store(false, Ordering::Release);

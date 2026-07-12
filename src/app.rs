@@ -3,6 +3,10 @@
 use crate::config::{Config, ReplayGainMode};
 use crate::fl;
 use crate::library::{Album, Artist, LibraryDb, LibraryScanner, Lyrics, LyricsProvider, Track};
+use crate::online::podcast::{self, PodcastSearchResult};
+use crate::online::radio;
+use crate::online::radio::StationSearchResult;
+use crate::online::store::{Episode, OnlineStore, Podcast, RadioStation};
 use crate::player::mpd_backend::MpdBackend;
 use crate::player::{ActiveBackend, PlaybackState, Player};
 use crate::provider::local::LocalProvider;
@@ -10,9 +14,10 @@ use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{MusicProvider, ProviderRegistry};
 use crate::views::{
-    albums, artists, equalizer, genres, lyrics, now_playing, playlists, providers, settings,
-    songs,
+    albums, artists, equalizer, genres, lyrics, now_playing, playlists, podcasts, providers,
+    settings, songs,
 };
+use crate::views::radio as radio_view;
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::{Alignment, Length, Subscription};
@@ -98,6 +103,34 @@ pub struct AppModel {
     filtered_playlist_map: Vec<usize>,
     filtered_genres: Vec<String>,
     filtered_genre_map: Vec<usize>,
+
+    // Podcasts
+    podcasts: Vec<Podcast>,
+    selected_podcast: Option<usize>,
+    podcast_episodes: Vec<Episode>,
+    podcast_search_query: String,
+    podcast_search_results: Vec<PodcastSearchResult>,
+    podcast_search_loading: bool,
+    podcast_add_url: String,
+    /// The episode id currently playing, if the current track came from a
+    /// podcast subscription — used to persist playback position.
+    current_podcast_episode_id: Option<i64>,
+    /// Last whole-second position persisted for `current_podcast_episode_id`,
+    /// so the tick handler only writes to the DB roughly every 5 seconds.
+    last_saved_podcast_position_secs: u64,
+
+    // Radio
+    radio_stations: Vec<RadioStation>,
+    radio_search_query: String,
+    radio_search_results: Vec<StationSearchResult>,
+    radio_search_loading: bool,
+    radio_add_name: String,
+    radio_add_url: String,
+
+    /// Podcast artwork / radio favicon bytes, keyed by their source URL.
+    /// Shared between both views since the icons are the same kind of
+    /// small, best-effort raster image loaded from a remote URL.
+    online_icons: HashMap<String, widget::icon::Handle>,
 
     // Player
     player: Option<Player>,
@@ -499,6 +532,49 @@ pub enum Message {
     VizHudPointerExit,
 
     // Notifications
+    // Podcasts
+    PodcastSearchChanged(String),
+    PodcastSearchSubmit,
+    PodcastSearchResults(Result<Vec<PodcastSearchResult>, String>),
+    PodcastAddUrlChanged(String),
+    SubscribePodcast(String),
+    PodcastSubscribed(Result<(), String>),
+    PodcastsLoaded(Vec<Podcast>),
+    SelectPodcast(usize),
+    BackToPodcastList,
+    RemovePodcast(usize),
+    RefreshPodcast(usize),
+    RefreshAllPodcasts,
+    PodcastRefreshed(i64, Result<(), String>),
+    PodcastEpisodesLoaded(i64, Vec<Episode>),
+    PlayPodcastEpisode(usize),
+    TogglePodcastEpisodePlayed(usize),
+    /// A podcast/radio icon (artwork or favicon) finished downloading.
+    OnlineIconLoaded(String, Vec<u8>),
+
+    // Radio
+    RadioSearchChanged(String),
+    RadioSearchSubmit,
+    RadioSearchResults(Result<Vec<StationSearchResult>, String>),
+    RadioAddNameChanged(String),
+    RadioAddUrlChanged(String),
+    AddRadioStation {
+        name: String,
+        stream_url: String,
+        homepage: String,
+        favicon_url: String,
+        tags: String,
+    },
+    AddRadioFromSearch(usize),
+    RadioStationsLoaded(Vec<RadioStation>),
+    RemoveRadioStation(usize),
+    PlayRadioStation(usize),
+    PlayRadioSearchResult(usize),
+    RadioStreamResolved {
+        name: String,
+        result: Result<String, String>,
+    },
+
     /// A toast notification was dismissed (by timeout or user action).
     CloseToast(widget::toaster::ToastId),
 
@@ -531,6 +607,47 @@ impl From<artists::ArtistMessage> for Message {
             artists::ArtistMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
             artists::ArtistMessage::SetRating(id, r) => Message::SetRating(id, r),
             artists::ArtistMessage::FilterByGenre(g) => Message::FilterByGenre(g),
+        }
+    }
+}
+
+impl From<podcasts::PodcastMessage> for Message {
+    fn from(msg: podcasts::PodcastMessage) -> Self {
+        match msg {
+            podcasts::PodcastMessage::SearchChanged(s) => Message::PodcastSearchChanged(s),
+            podcasts::PodcastMessage::SearchSubmit => Message::PodcastSearchSubmit,
+            podcasts::PodcastMessage::AddUrlChanged(s) => Message::PodcastAddUrlChanged(s),
+            podcasts::PodcastMessage::AddByUrl(url) => Message::SubscribePodcast(url),
+            podcasts::PodcastMessage::SubscribeFromSearch(url) => Message::SubscribePodcast(url),
+            podcasts::PodcastMessage::SelectPodcast(i) => Message::SelectPodcast(i),
+            podcasts::PodcastMessage::BackToList => Message::BackToPodcastList,
+            podcasts::PodcastMessage::RemovePodcast(i) => Message::RemovePodcast(i),
+            podcasts::PodcastMessage::RefreshPodcast(i) => Message::RefreshPodcast(i),
+            podcasts::PodcastMessage::RefreshAll => Message::RefreshAllPodcasts,
+            podcasts::PodcastMessage::PlayEpisode(i) => Message::PlayPodcastEpisode(i),
+            podcasts::PodcastMessage::TogglePlayed(i) => Message::TogglePodcastEpisodePlayed(i),
+        }
+    }
+}
+
+impl From<radio_view::RadioMessage> for Message {
+    fn from(msg: radio_view::RadioMessage) -> Self {
+        match msg {
+            radio_view::RadioMessage::SearchChanged(s) => Message::RadioSearchChanged(s),
+            radio_view::RadioMessage::SearchSubmit => Message::RadioSearchSubmit,
+            radio_view::RadioMessage::AddNameChanged(s) => Message::RadioAddNameChanged(s),
+            radio_view::RadioMessage::AddUrlChanged(s) => Message::RadioAddUrlChanged(s),
+            radio_view::RadioMessage::AddByUrl(name, url) => Message::AddRadioStation {
+                name,
+                stream_url: url,
+                homepage: String::new(),
+                favicon_url: String::new(),
+                tags: String::new(),
+            },
+            radio_view::RadioMessage::AddFromSearch(i) => Message::AddRadioFromSearch(i),
+            radio_view::RadioMessage::RemoveStation(i) => Message::RemoveRadioStation(i),
+            radio_view::RadioMessage::PlayStation(i) => Message::PlayRadioStation(i),
+            radio_view::RadioMessage::PlaySearchResult(i) => Message::PlayRadioSearchResult(i),
         }
     }
 }
@@ -580,6 +697,16 @@ impl cosmic::Application for AppModel {
             .text(fl!("genres"))
             .data::<Page>(Page::Genres)
             .icon(icon::from_name("folder-music-symbolic"));
+
+        nav.insert()
+            .text(fl!("podcasts"))
+            .data::<Page>(Page::Podcasts)
+            .icon(icon::from_name("application-rss+xml-symbolic"));
+
+        nav.insert()
+            .text(fl!("radio"))
+            .data::<Page>(Page::Radio)
+            .icon(icon::from_name("network-wireless-symbolic"));
 
         nav.insert()
             .text(fl!("settings"))
@@ -833,6 +960,22 @@ impl cosmic::Application for AppModel {
             filtered_playlist_map: Vec::new(),
             filtered_genres: Vec::new(),
             filtered_genre_map: Vec::new(),
+            podcasts: Vec::new(),
+            selected_podcast: None,
+            podcast_episodes: Vec::new(),
+            podcast_search_query: String::new(),
+            podcast_search_results: Vec::new(),
+            podcast_search_loading: false,
+            podcast_add_url: String::new(),
+            current_podcast_episode_id: None,
+            last_saved_podcast_position_secs: 0,
+            radio_stations: Vec::new(),
+            radio_search_query: String::new(),
+            radio_search_results: Vec::new(),
+            radio_search_loading: false,
+            radio_add_name: String::new(),
+            radio_add_url: String::new(),
+            online_icons: HashMap::new(),
             player,
             playback_position: Duration::ZERO,
             current_track: None,
@@ -1410,6 +1553,47 @@ impl cosmic::Application for AppModel {
                         genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
                     })
                 }
+            }
+
+            Page::Podcasts => match self
+                .selected_podcast
+                .and_then(|idx| self.podcasts.get(idx).map(|podcast| (idx, podcast)))
+            {
+                Some((_, podcast)) => podcasts::podcast_detail_view(
+                    podcast,
+                    &self.podcast_episodes,
+                    self.current_podcast_episode_id,
+                    &self.online_icons,
+                )
+                .map(Message::from),
+                None => podcasts::podcast_list_view(
+                    &self.podcasts,
+                    &self.podcast_search_query,
+                    &self.podcast_search_results,
+                    self.podcast_search_loading,
+                    &self.podcast_add_url,
+                    &self.online_icons,
+                )
+                .map(Message::from),
+            },
+
+            Page::Radio => {
+                let current_radio_url = self
+                    .current_track
+                    .as_ref()
+                    .filter(|t| &*t.provider_id == "radio")
+                    .map(|t| t.source_uri.as_str());
+                radio_view::radio_view(
+                    &self.radio_stations,
+                    &self.radio_search_query,
+                    &self.radio_search_results,
+                    self.radio_search_loading,
+                    &self.radio_add_name,
+                    &self.radio_add_url,
+                    &self.online_icons,
+                    current_radio_url,
+                )
+                .map(Message::from)
             }
 
             Page::Settings => {
@@ -2290,9 +2474,35 @@ impl cosmic::Application for AppModel {
                     }
                 }
 
+                let mut position_save_task = Task::none();
                 if let Some(track) = self.current_track.clone() {
+                    match &*track.provider_id {
+                        "radio" => {
+                            if let Some(player) = &self.player
+                                && let Some(title) = player.icy_title()
+                                && !title.is_empty()
+                                && let Some(current) = &mut self.current_track
+                                && current.title != title
+                            {
+                                current.title = title;
+                            }
+                        }
+                        "podcast" => {
+                            if let Some(episode_id) = self.current_podcast_episode_id {
+                                let secs = self.playback_position.as_secs();
+                                if secs != self.last_saved_podcast_position_secs && secs % 5 == 0 {
+                                    self.last_saved_podcast_position_secs = secs;
+                                    let position_ms = self.playback_position.as_millis() as i64;
+                                    position_save_task =
+                                        self.save_podcast_position(episode_id, position_ms, false);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                     self.handle_scrobble(track);
                 }
+                return position_save_task;
             }
 
             // -- Track selection --
@@ -3497,6 +3707,376 @@ impl cosmic::Application for AppModel {
                 self.genre_tracks = tracks;
             }
 
+            // -- Podcasts --
+            Message::PodcastSearchChanged(query) => {
+                self.podcast_search_query = query;
+            }
+
+            Message::PodcastSearchSubmit => {
+                let query = self.podcast_search_query.trim().to_string();
+                if query.is_empty() {
+                    return Task::none();
+                }
+                self.podcast_search_loading = true;
+                return cosmic::task::future(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let client = reqwest::blocking::Client::new();
+                        podcast::search_itunes(&client, &query)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    cosmic::Action::App(Message::PodcastSearchResults(result))
+                });
+            }
+
+            Message::PodcastSearchResults(result) => {
+                self.podcast_search_loading = false;
+                match result {
+                    Ok(results) => {
+                        let icon_urls: Vec<String> =
+                            results.iter().map(|r| r.image.clone()).collect();
+                        self.podcast_search_results = results;
+                        return self.load_online_icons(icon_urls);
+                    }
+                    Err(e) => {
+                        return self.push_toast(widget::toaster::Toast::new(fl!(
+                            "toast-podcast-search-failed",
+                            reason = e
+                        )));
+                    }
+                }
+            }
+
+            Message::PodcastAddUrlChanged(url) => {
+                self.podcast_add_url = url;
+            }
+
+            Message::SubscribePodcast(feed_url) => {
+                let feed_url = feed_url.trim().to_string();
+                if feed_url.is_empty() {
+                    return Task::none();
+                }
+                self.podcast_add_url.clear();
+                return cosmic::task::future(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let client = reqwest::blocking::Client::new();
+                        let (meta, episodes) = podcast::fetch_feed(&client, &feed_url)?;
+                        let store = open_online_store()?;
+                        let id = store.add_podcast(&feed_url, &meta)?;
+                        store.upsert_episodes(id, &episodes)?;
+                        store.touch_podcast_refresh(id, &meta, now_epoch())?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    cosmic::Action::App(Message::PodcastSubscribed(result))
+                });
+            }
+
+            Message::PodcastSubscribed(result) => match result {
+                Ok(()) => {
+                    self.podcast_search_results.clear();
+                    self.podcast_search_query.clear();
+                    return self.load_podcasts();
+                }
+                Err(e) => {
+                    return self.push_toast(widget::toaster::Toast::new(fl!(
+                        "toast-podcast-subscribe-failed",
+                        reason = e
+                    )));
+                }
+            },
+
+            Message::PodcastsLoaded(podcasts) => {
+                let icon_urls: Vec<String> = podcasts.iter().map(|p| p.image_url.clone()).collect();
+                self.podcasts = podcasts;
+                return self.load_online_icons(icon_urls);
+            }
+
+            Message::SelectPodcast(idx) => {
+                self.selected_podcast = Some(idx);
+                if let Some(podcast) = self.podcasts.get(idx) {
+                    return self.load_podcast_episodes(podcast.id);
+                }
+            }
+
+            Message::BackToPodcastList => {
+                self.selected_podcast = None;
+                self.podcast_episodes.clear();
+            }
+
+            Message::RemovePodcast(idx) => {
+                if let Some(podcast) = self.podcasts.get(idx) {
+                    let id = podcast.id;
+                    match open_online_store().and_then(|store| store.remove_podcast(id)) {
+                        Ok(()) => {
+                            if self.selected_podcast == Some(idx) {
+                                self.selected_podcast = None;
+                                self.podcast_episodes.clear();
+                            }
+                            return self.load_podcasts();
+                        }
+                        Err(e) => tracing::error!("Failed to remove podcast: {e}"),
+                    }
+                }
+            }
+
+            Message::RefreshPodcast(idx) => {
+                if let Some(podcast) = self.podcasts.get(idx) {
+                    return refresh_podcast_task(podcast.id, podcast.feed_url.clone());
+                }
+            }
+
+            Message::RefreshAllPodcasts => {
+                let tasks: Vec<_> = self
+                    .podcasts
+                    .iter()
+                    .map(|p| refresh_podcast_task(p.id, p.feed_url.clone()))
+                    .collect();
+                return Task::batch(tasks);
+            }
+
+            Message::PodcastRefreshed(id, result) => match result {
+                Ok(()) => {
+                    let reload_task = self.load_podcasts();
+                    let is_selected = self
+                        .selected_podcast
+                        .and_then(|i| self.podcasts.get(i))
+                        .is_some_and(|p| p.id == id);
+                    let episodes_task = if is_selected {
+                        self.load_podcast_episodes(id)
+                    } else {
+                        Task::none()
+                    };
+                    return Task::batch([reload_task, episodes_task]);
+                }
+                Err(e) => {
+                    return self.push_toast(widget::toaster::Toast::new(fl!(
+                        "toast-podcast-refresh-failed",
+                        reason = e
+                    )));
+                }
+            },
+
+            Message::PodcastEpisodesLoaded(podcast_id, episodes) => {
+                let is_selected = self
+                    .selected_podcast
+                    .and_then(|i| self.podcasts.get(i))
+                    .is_some_and(|p| p.id == podcast_id);
+                if is_selected {
+                    self.podcast_episodes = episodes;
+                }
+            }
+
+            Message::PlayPodcastEpisode(idx) => {
+                let Some(podcast_idx) = self.selected_podcast else {
+                    return Task::none();
+                };
+                let Some(episode) = self.podcast_episodes.get(idx).cloned() else {
+                    return Task::none();
+                };
+                let Some(podcast) = self.podcasts.get(podcast_idx) else {
+                    return Task::none();
+                };
+                let track = Track {
+                    id: -1,
+                    path: PathBuf::new(),
+                    title: episode.title.clone(),
+                    artist: podcast.title.clone(),
+                    album_artist: podcast.title.clone(),
+                    album: podcast.title.clone(),
+                    genre: String::new(),
+                    track_number: 0,
+                    disc_number: 0,
+                    year: 0,
+                    duration: Duration::from_secs(episode.duration_secs.max(0) as u64),
+                    bitrate: 0,
+                    sample_rate: 0,
+                    provider_id: Arc::from("podcast"),
+                    source_uri: episode.enclosure_url.clone(),
+                    is_favorite: false,
+                    rating: None,
+                    rg_track_gain: None,
+                    rg_album_gain: None,
+                };
+                let play_task = self.play_track_list(vec![track], 0);
+                self.current_podcast_episode_id = Some(episode.id);
+                self.last_saved_podcast_position_secs = 0;
+                if episode.position_ms > 0 {
+                    let resume_at = Duration::from_millis(episode.position_ms as u64);
+                    if let Some(player) = &mut self.player {
+                        let _ = player.seek(resume_at);
+                    }
+                    self.playback_position = resume_at;
+                }
+                return play_task;
+            }
+
+            Message::TogglePodcastEpisodePlayed(idx) => {
+                if let Some(episode) = self.podcast_episodes.get(idx).cloned() {
+                    let new_played = !episode.played;
+                    let result = open_online_store().and_then(|store| {
+                        store.save_episode_position(episode.id, episode.position_ms, new_played)
+                    });
+                    match result {
+                        Ok(()) => {
+                            if let Some(ep) = self.podcast_episodes.get_mut(idx) {
+                                ep.played = new_played;
+                            }
+                        }
+                        Err(e) => tracing::error!("Failed to toggle played: {e}"),
+                    }
+                }
+            }
+
+            Message::OnlineIconLoaded(url, bytes) => {
+                if !bytes.is_empty() {
+                    self.online_icons.insert(url, widget::icon::from_raster_bytes(bytes));
+                }
+            }
+
+            // -- Radio --
+            Message::RadioSearchChanged(query) => {
+                self.radio_search_query = query;
+            }
+
+            Message::RadioSearchSubmit => {
+                let query = self.radio_search_query.trim().to_string();
+                if query.is_empty() {
+                    return Task::none();
+                }
+                self.radio_search_loading = true;
+                return cosmic::task::future(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let client = reqwest::blocking::Client::new();
+                        radio::search_stations(&client, &query)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    cosmic::Action::App(Message::RadioSearchResults(result))
+                });
+            }
+
+            Message::RadioSearchResults(result) => {
+                self.radio_search_loading = false;
+                match result {
+                    Ok(results) => {
+                        let icon_urls: Vec<String> =
+                            results.iter().map(|r| r.favicon.clone()).collect();
+                        self.radio_search_results = results;
+                        return self.load_online_icons(icon_urls);
+                    }
+                    Err(e) => {
+                        return self.push_toast(widget::toaster::Toast::new(fl!(
+                            "toast-radio-search-failed",
+                            reason = e
+                        )));
+                    }
+                }
+            }
+
+            Message::RadioAddNameChanged(name) => {
+                self.radio_add_name = name;
+            }
+
+            Message::RadioAddUrlChanged(url) => {
+                self.radio_add_url = url;
+            }
+
+            Message::AddRadioStation {
+                name,
+                stream_url,
+                homepage,
+                favicon_url,
+                tags,
+            } => {
+                let result = open_online_store().and_then(|store| {
+                    store.add_radio_station(&name, &stream_url, &homepage, &favicon_url, &tags)
+                });
+                match result {
+                    Ok(_) => {
+                        self.radio_add_name.clear();
+                        self.radio_add_url.clear();
+                        return self.load_radio_stations();
+                    }
+                    Err(e) => tracing::error!("Failed to add radio station: {e}"),
+                }
+            }
+
+            Message::AddRadioFromSearch(idx) => {
+                if let Some(result) = self.radio_search_results.get(idx).cloned() {
+                    return cosmic::task::message(cosmic::Action::App(Message::AddRadioStation {
+                        name: result.name,
+                        stream_url: result.url,
+                        homepage: result.homepage,
+                        favicon_url: result.favicon,
+                        tags: result.tags,
+                    }));
+                }
+            }
+
+            Message::RadioStationsLoaded(stations) => {
+                let icon_urls: Vec<String> =
+                    stations.iter().map(|s| s.favicon_url.clone()).collect();
+                self.radio_stations = stations;
+                return self.load_online_icons(icon_urls);
+            }
+
+            Message::RemoveRadioStation(idx) => {
+                if let Some(station) = self.radio_stations.get(idx) {
+                    let id = station.id;
+                    match open_online_store().and_then(|store| store.remove_radio_station(id)) {
+                        Ok(()) => return self.load_radio_stations(),
+                        Err(e) => tracing::error!("Failed to remove radio station: {e}"),
+                    }
+                }
+            }
+
+            Message::PlayRadioStation(idx) => {
+                if let Some(station) = self.radio_stations.get(idx) {
+                    return resolve_and_play_radio(station.name.clone(), station.stream_url.clone());
+                }
+            }
+
+            Message::PlayRadioSearchResult(idx) => {
+                if let Some(result) = self.radio_search_results.get(idx) {
+                    return resolve_and_play_radio(result.name.clone(), result.url.clone());
+                }
+            }
+
+            Message::RadioStreamResolved { name, result } => match result {
+                Ok(resolved_url) => {
+                    let track = Track {
+                        id: -1,
+                        path: PathBuf::new(),
+                        title: name,
+                        artist: String::new(),
+                        album_artist: String::new(),
+                        album: String::new(),
+                        genre: String::new(),
+                        track_number: 0,
+                        disc_number: 0,
+                        year: 0,
+                        duration: Duration::ZERO,
+                        bitrate: 0,
+                        sample_rate: 0,
+                        provider_id: Arc::from("radio"),
+                        source_uri: resolved_url,
+                        is_favorite: false,
+                        rating: None,
+                        rg_track_gain: None,
+                        rg_album_gain: None,
+                    };
+                    return self.play_track_list(vec![track], 0);
+                }
+                Err(e) => {
+                    return self.push_toast(widget::toaster::Toast::new(fl!(
+                        "toast-radio-play-failed",
+                        reason = e
+                    )));
+                }
+            },
+
             Message::Quit => {
                 return cosmic::iced::exit();
             }
@@ -3526,6 +4106,8 @@ impl cosmic::Application for AppModel {
         let page_task = match page {
             Some(Page::Playlists) => self.load_playlists(),
             Some(Page::Genres) => self.load_genres(),
+            Some(Page::Podcasts) => self.load_podcasts(),
+            Some(Page::Radio) => self.load_radio_stations(),
             _ => Task::none(),
         };
 
@@ -4567,6 +5149,16 @@ impl AppModel {
         tracks: Vec<Track>,
         start_index: usize,
     ) -> Task<cosmic::Action<Message>> {
+        // Switching away from a podcast episode (to a different episode or
+        // any other track) — persist its last known position first.
+        let podcast_save_task = match self.current_podcast_episode_id.take() {
+            Some(episode_id) => {
+                let position_ms = self.playback_position.as_millis() as i64;
+                self.save_podcast_position(episode_id, position_ms, false)
+            }
+            None => Task::none(),
+        };
+
         if let Some(ref mut player) = self.player {
             let current = tracks.get(start_index).cloned();
             player.set_queue(tracks);
@@ -4582,10 +5174,10 @@ impl AppModel {
                 }
                 let mpd_task = self.dispatch_mpd_after_play();
                 let blur_task = self.maybe_update_blurred_cover();
-                return Task::batch([mpd_task, blur_task]);
+                return Task::batch([podcast_save_task, mpd_task, blur_task]);
             }
         }
-        Task::none()
+        podcast_save_task
     }
 
     fn sort_tracks(&mut self, field: songs::SortField) {
@@ -4773,6 +5365,162 @@ impl AppModel {
             Task::none()
         }
     }
+
+    /// Load subscribed podcasts from the online store.
+    fn load_podcasts(&self) -> Task<cosmic::Action<Message>> {
+        cosmic::task::future(async move {
+            let podcasts = tokio::task::spawn_blocking(|| {
+                open_online_store()
+                    .and_then(|store| store.list_podcasts())
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("list_podcasts failed: {e}");
+                        Vec::new()
+                    })
+            })
+            .await
+            .unwrap_or_default();
+            cosmic::Action::App(Message::PodcastsLoaded(podcasts))
+        })
+    }
+
+    /// Load a podcast's episodes from the online store.
+    fn load_podcast_episodes(&self, podcast_id: i64) -> Task<cosmic::Action<Message>> {
+        cosmic::task::future(async move {
+            let episodes = tokio::task::spawn_blocking(move || {
+                open_online_store()
+                    .and_then(|store| store.list_episodes(podcast_id))
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("list_episodes failed: {e}");
+                        Vec::new()
+                    })
+            })
+            .await
+            .unwrap_or_default();
+            cosmic::Action::App(Message::PodcastEpisodesLoaded(podcast_id, episodes))
+        })
+    }
+
+    /// Load saved radio stations from the online store.
+    fn load_radio_stations(&self) -> Task<cosmic::Action<Message>> {
+        cosmic::task::future(async move {
+            let stations = tokio::task::spawn_blocking(|| {
+                open_online_store()
+                    .and_then(|store| store.list_radio_stations())
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("list_radio_stations failed: {e}");
+                        Vec::new()
+                    })
+            })
+            .await
+            .unwrap_or_default();
+            cosmic::Action::App(Message::RadioStationsLoaded(stations))
+        })
+    }
+
+    /// Fetch each not-yet-cached icon URL and dispatch `OnlineIconLoaded` for
+    /// it, used for podcast artwork and radio station favicons alike.
+    fn load_online_icons(&self, urls: Vec<String>) -> Task<cosmic::Action<Message>> {
+        let tasks: Vec<_> = urls
+            .into_iter()
+            .filter(|url| !url.is_empty() && !self.online_icons.contains_key(url))
+            .map(|url| {
+                let fetch_url = url.clone();
+                cosmic::task::future(async move {
+                    let bytes = tokio::task::spawn_blocking(move || {
+                        reqwest::blocking::Client::new()
+                            .get(&fetch_url)
+                            .send()
+                            .ok()
+                            .and_then(|r| r.bytes().ok())
+                            .map(|b| b.to_vec())
+                            .unwrap_or_default()
+                    })
+                    .await
+                    .unwrap_or_default();
+                    cosmic::Action::App(Message::OnlineIconLoaded(url, bytes))
+                })
+            })
+            .collect();
+        Task::batch(tasks)
+    }
+
+    /// Persist podcast episode playback progress. Fire-and-forget: a
+    /// transient DB error is logged, not surfaced as a toast, since it
+    /// shouldn't interrupt playback.
+    fn save_podcast_position(
+        &self,
+        episode_id: i64,
+        position_ms: i64,
+        played: bool,
+    ) -> Task<cosmic::Action<Message>> {
+        cosmic::task::future(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                open_online_store()
+                    .and_then(|store| store.save_episode_position(episode_id, position_ms, played))
+            })
+            .await;
+            if let Ok(Err(e)) = result {
+                tracing::warn!("Failed to save podcast position: {e}");
+            }
+            // No-op message — this write is fire-and-forget, matching
+            // `dispatch_mpd`'s convention for tasks nothing depends on.
+            cosmic::Action::App(Message::PlaybackTick)
+        })
+    }
+}
+
+/// Path to the shared library database (also used by `OnlineStore` for
+/// podcasts/radio — same file, same schema, opened via its own connection).
+fn online_db_path() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("lyra")
+        .join("library.db")
+}
+
+/// Open the online store at the shared library database path.
+fn open_online_store() -> Result<OnlineStore, String> {
+    OnlineStore::open(&online_db_path())
+}
+
+/// Current Unix time in whole seconds.
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Re-fetch a podcast's feed and update its metadata/episodes in the
+/// online store, dispatching `PodcastRefreshed` with the outcome.
+fn refresh_podcast_task(id: i64, feed_url: String) -> Task<cosmic::Action<Message>> {
+    cosmic::task::future(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            let client = reqwest::blocking::Client::new();
+            let (meta, episodes) = podcast::fetch_feed(&client, &feed_url)?;
+            let store = open_online_store()?;
+            store.touch_podcast_refresh(id, &meta, now_epoch())?;
+            store.upsert_episodes(id, &episodes)?;
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        cosmic::Action::App(Message::PodcastRefreshed(id, result))
+    })
+}
+
+/// Resolve a station URL (following a `.pls`/`.m3u`/`.m3u8` playlist if
+/// needed) and dispatch `RadioStreamResolved` with the outcome.
+fn resolve_and_play_radio(name: String, url: String) -> Task<cosmic::Action<Message>> {
+    cosmic::task::future(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            let client = reqwest::blocking::Client::new();
+            radio::resolve_stream_url(&client, &url)
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        cosmic::Action::App(Message::RadioStreamResolved { name, result })
+    })
 }
 
 /// Navigation pages.
@@ -4783,6 +5531,8 @@ pub enum Page {
     Songs,
     Playlists,
     Genres,
+    Podcasts,
+    Radio,
     Settings,
 }
 

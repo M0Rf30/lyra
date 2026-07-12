@@ -123,3 +123,38 @@ songs-column-artist = Artist
 songs-column-album = Album
 songs-column-duration = Duration
 songs-add-to-playlist = Add to "{ $playlist }"
+
+# PodcastsView
+podcasts = Podcasts
+podcast-search-placeholder = Search podcast directory...
+searching = Searching...
+subscribe = Subscribe
+podcast-url-placeholder = Podcast feed URL...
+refresh-all = Refresh All
+subscriptions = Subscriptions
+no-podcasts = No podcasts subscribed
+podcasts-empty-hint = Search the directory above or paste a feed URL to subscribe
+refresh-podcast-tooltip = Refresh feed
+unsubscribe-tooltip = Unsubscribe
+back-to-podcasts = Back to podcasts
+resume-at = Resume at { $position }
+mark-played-tooltip = Toggle played
+no-episodes = No episodes found
+no-episodes-hint = This podcast's feed has no episodes yet
+toast-podcast-search-failed = Podcast search failed: { $reason }
+toast-podcast-subscribe-failed = Failed to subscribe: { $reason }
+toast-podcast-refresh-failed = Failed to refresh podcast: { $reason }
+
+# RadioView
+radio = Radio
+radio-search-placeholder = Search radio stations...
+play-station-tooltip = Play station
+add-station = Add
+station-name-placeholder = Station name...
+station-url-placeholder = Stream URL...
+my-stations = My Stations
+no-stations = No stations saved
+stations-empty-hint = Search the directory above or paste a stream URL to add one
+remove-station-tooltip = Remove station
+toast-radio-search-failed = Radio search failed: { $reason }
+toast-radio-play-failed = Failed to play station: { $reason }

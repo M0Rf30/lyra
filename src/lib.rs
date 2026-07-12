@@ -6,6 +6,7 @@ pub mod config;
 pub mod credentials;
 pub mod i18n;
 pub mod library;
+pub mod online;
 pub mod player;
 pub mod provider;
 pub mod views;

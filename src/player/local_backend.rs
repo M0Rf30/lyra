@@ -16,6 +16,7 @@ use super::backend::{PlaybackBackend, PlayerError};
 use super::engine::engine::{PlaySource, PlaybackEngine};
 use super::eq_source::{EqController, new_shared_coeffs};
 use crate::library::TrackSource;
+use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -26,7 +27,7 @@ pub struct LocalBackend {
     engine: PlaybackEngine,
     state: PlaybackState,
     volume: f32,
-    /// Shared blocking HTTP client for HTTP stream playback.
+    /// Shared blocking HTTP client for HTTP stream / live radio playback.
     http_client: reqwest::blocking::Client,
     /// UI-side EQ controller (shares its coefficients/bypass flag with the
     /// engine's per-track `EqFilter`).
@@ -34,6 +35,10 @@ pub struct LocalBackend {
     /// Replay gain to apply to the next track (in dB). Set before `play()`/
     /// `queue_next()`.
     replay_gain_db: Option<f32>,
+    /// Current ICY `StreamTitle` for a live radio stream, if the server
+    /// sends embedded metadata. Updated from the engine's playback thread
+    /// (see `PlaySource::LiveStream`), read by the UI via [`Self::icy_title`].
+    icy_title: Arc<Mutex<Option<String>>>,
 }
 
 impl LocalBackend {
@@ -59,12 +64,20 @@ impl LocalBackend {
             http_client: reqwest::blocking::Client::new(),
             eq_controller,
             replay_gain_db: None,
+            icy_title: Arc::new(Mutex::new(None)),
         })
     }
 
     /// Get a reference to the EQ controller for UI-thread use.
     pub fn eq_controller(&self) -> &EqController {
         &self.eq_controller
+    }
+
+    /// Current ICY `StreamTitle` for a live radio stream, if the server
+    /// sent embedded metadata. `None` for non-radio sources or stations
+    /// that don't embed metadata.
+    pub fn icy_title(&self) -> Option<String> {
+        self.icy_title.lock().clone()
     }
 
     /// Set crossfade duration in seconds (0 = disabled, gapless only).
@@ -118,13 +131,34 @@ impl LocalBackend {
         self.state = PlaybackState::Playing;
         Ok(())
     }
+
+    /// Internal: play an internet radio / Shoutcast-Icecast live stream.
+    ///
+    /// Like [`Self::play_http_stream`], the connect + probe happens on the
+    /// engine's dedicated playback thread, not here.
+    fn play_live_stream(&mut self, url: String) -> Result<(), PlayerError> {
+        let hint_extension = extension_hint(&url);
+        let source = PlaySource::LiveStream {
+            url,
+            client: self.http_client.clone(),
+            hint_extension,
+            icy_title: Arc::clone(&self.icy_title),
+        };
+        self.engine.play(source, self.replay_gain_db)?;
+        self.state = PlaybackState::Playing;
+        Ok(())
+    }
 }
 
 impl PlaybackBackend for LocalBackend {
     fn play(&mut self, source: TrackSource) -> Result<(), PlayerError> {
+        // Clear any stale ICY title from a previous radio stream before
+        // dispatching — a non-radio source should never show one.
+        *self.icy_title.lock() = None;
         match source {
             TrackSource::LocalFile(path) => self.play_local_file(path),
             TrackSource::HttpStream(url) => self.play_http_stream(url),
+            TrackSource::LiveStream(url) => self.play_live_stream(url),
             TrackSource::MpdFile(_) => Err(PlayerError(
                 "MPD files should use MpdBackend, not LocalBackend".to_string(),
             )),
@@ -211,6 +245,19 @@ impl PlaybackBackend for LocalBackend {
                         url,
                         client: self.http_client.clone(),
                         hint_extension,
+                    },
+                    self.replay_gain_db,
+                );
+                Ok(())
+            }
+            TrackSource::LiveStream(url) => {
+                let hint_extension = extension_hint(&url);
+                self.engine.queue_next(
+                    PlaySource::LiveStream {
+                        url,
+                        client: self.http_client.clone(),
+                        hint_extension,
+                        icy_title: Arc::clone(&self.icy_title),
                     },
                     self.replay_gain_db,
                 );

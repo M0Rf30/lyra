@@ -23,6 +23,10 @@ pub enum TrackSource {
     LocalFile(PathBuf),
     /// An HTTP streaming URL (e.g., Subsonic `stream` endpoint).
     HttpStream(String),
+    /// An internet radio / Shoutcast/Icecast live stream URL. Unlike
+    /// `HttpStream`, the byte length is never known up front and seeking is
+    /// never supported — see `player::engine::decoder::SymphoniaDecoder::open_stream`.
+    LiveStream(String),
     /// An MPD-relative file path — sent to the MPD server, not decoded locally.
     MpdFile(String),
 }

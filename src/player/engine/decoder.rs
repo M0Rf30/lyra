@@ -93,6 +93,45 @@ impl<R: Read + Seek + Send + Sync> MediaSource for ReadSeekMediaSource<R> {
     }
 }
 
+/// Adapts a non-seekable `Read` source (e.g. an internet radio stream) into
+/// a Symphonia [`MediaSource`]. Unlike [`ReadSeekMediaSource`], seeking is
+/// never supported: `is_seekable()` is always `false` and the `Seek` impl
+/// always errors, matching what a live stream can actually do.
+struct StreamMediaSource<R> {
+    inner: R,
+}
+
+impl<R> StreamMediaSource<R> {
+    fn new(inner: R) -> Self {
+        Self { inner }
+    }
+}
+
+impl<R: Read> Read for StreamMediaSource<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl<R> Seek for StreamMediaSource<R> {
+    fn seek(&mut self, _pos: SeekFrom) -> io::Result<u64> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "seeking is not supported on live streams",
+        ))
+    }
+}
+
+impl<R: Read + Send + Sync> MediaSource for StreamMediaSource<R> {
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        None
+    }
+}
+
 /// Symphonia-based audio decoder.
 pub struct SymphoniaDecoder {
     reader: Box<dyn FormatReader>,
@@ -204,6 +243,26 @@ impl SymphoniaDecoder {
             len => Some(len),
         };
         Self::open_reader(reader, byte_len, hint_extension)
+    }
+
+    /// Open a non-seekable byte source for decoding — e.g. an internet
+    /// radio (Shoutcast/Icecast) live stream. Unlike [`Self::open_reader`],
+    /// the source only needs `Read + Send + Sync`: seeking is never
+    /// supported (see [`StreamMediaSource`]), matching an unbounded live
+    /// stream's actual capabilities.
+    pub fn open_stream<R>(reader: R, hint_extension: Option<&str>) -> Result<Self>
+    where
+        R: Read + Send + Sync + 'static,
+    {
+        let mut hint = Hint::new();
+        if let Some(ext) = hint_extension {
+            hint.with_extension(ext);
+        }
+
+        let source = StreamMediaSource::new(reader);
+        let mss = MediaSourceStream::new(Box::new(source), Default::default());
+
+        Self::from_media_source(mss, hint)
     }
 
     /// Shared probe + track-selection + decoder-construction logic used by
