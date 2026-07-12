@@ -18,9 +18,122 @@
 
 use projectm::core::ProjectM;
 use projectm::playlist::Playlist;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use walkdir::WalkDir;
+
+/// Commands sent from the UI thread to the dedicated projectM render
+/// thread (see `projectm_render_stream` in `app.rs`). Drained via
+/// `try_recv()` once per frame, before rendering.
+#[derive(Debug, Clone)]
+pub enum VizCommand {
+    /// Advance to the next preset via the shuffled playlist (hard cut).
+    /// Replaces the old `preset_signal: AtomicBool` flag.
+    NextPreset,
+    /// Load a specific preset file directly, bypassing the playlist, with
+    /// a smooth transition.
+    LoadPreset(PathBuf),
+    /// Lock/unlock automatic preset transitions (hard/soft cuts driven by
+    /// preset duration or beat detection). Manual switches — `NextPreset`
+    /// and `LoadPreset` — are always executed regardless of lock state
+    /// (per libprojectM's `projectm_set_preset_locked` semantics).
+    SetLocked(bool),
+    /// Adjust beat-reactivity sensitivity (typical range 0.0-2.0).
+    SetBeatSensitivity(f32),
+}
+
+/// One `.milk` preset file discovered by `scan_presets`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresetEntry {
+    /// File stem (filename without the `.milk` extension) — the display
+    /// name, matched against the render thread's tracked current-preset
+    /// name to highlight the active row.
+    pub name: String,
+    /// The preset's immediate parent directory name, prettified by
+    /// stripping the projectM convention `presets_` prefix (e.g.
+    /// `presets_milkdrop` -> `milkdrop`).
+    pub category: String,
+    /// Full path, passed to `VizCommand::LoadPreset` when selected.
+    pub path: PathBuf,
+}
+
+/// Returns the full ordered list of preset search directories: the
+/// caller-supplied `user_dir` (if any) first, then projectM's common
+/// system-wide install locations, then the Flatpak location under
+/// `dirs::data_dir()`. Shared by `ProjectMRenderer::new` and the UI-side
+/// `scan_presets` so both always agree on where presets live.
+pub fn preset_search_dirs(user_dir: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = user_dir {
+        dirs.push(dir);
+    }
+    dirs.extend([
+        PathBuf::from("/usr/share/projectM/presets"),
+        PathBuf::from("/usr/local/share/projectM/presets"),
+        PathBuf::from("/usr/share/projectm/presets"),
+    ]);
+    if let Some(data) = dirs::data_dir() {
+        dirs.push(data.join("projectM").join("presets"));
+    }
+    dirs
+}
+
+/// Strips the projectM convention `presets_` prefix from a category
+/// directory name (e.g. `presets_milkdrop` -> `milkdrop`); other names are
+/// left untouched.
+fn prettify_category(raw: &str) -> String {
+    raw.strip_prefix("presets_").unwrap_or(raw).to_string()
+}
+
+/// Recursively scans `dirs` for `.milk` preset files (case-insensitive
+/// extension) off the render thread — no `ProjectM`/GL context needed.
+/// Returns one entry per file, sorted by `(category, name)` and
+/// deduplicated by path (in case two search dirs alias the same tree).
+pub fn scan_presets(dirs: &[PathBuf]) -> Vec<PresetEntry> {
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    for dir in dirs {
+        if !dir.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(dir).follow_links(true) {
+            let Ok(entry) = entry else { continue };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let is_milk = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("milk"));
+            if !is_milk {
+                continue;
+            }
+            let path = path.to_path_buf();
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let name = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let category = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|s| prettify_category(&s.to_string_lossy()))
+                .unwrap_or_default();
+            entries.push(PresetEntry {
+                name,
+                category,
+                path,
+            });
+        }
+    }
+    entries.sort_by(|a, b| (&a.category, &a.name).cmp(&(&b.category, &b.name)));
+    entries
+}
 
 /// Render resolution for the visualizer (16:9).
 /// Balanced for crispness when scaled to fullscreen vs. GPU→CPU readback cost
@@ -178,22 +291,10 @@ impl ProjectMRenderer {
         pm.set_window_size(RENDER_WIDTH, RENDER_HEIGHT);
         pm.set_fps(30);
 
-        // Search for preset directories in common locations.
-        // The caller-supplied dir is checked first, then system paths.
-        let mut search_dirs: Vec<PathBuf> = Vec::new();
-        if let Some(ref dir) = preset_dir {
-            search_dirs.push(dir.clone());
-        }
-        // Common system-wide preset locations
-        search_dirs.extend([
-            PathBuf::from("/usr/share/projectM/presets"),
-            PathBuf::from("/usr/local/share/projectM/presets"),
-            PathBuf::from("/usr/share/projectm/presets"),
-        ]);
-        // Flatpak location
-        if let Some(data) = dirs::data_dir() {
-            search_dirs.push(data.join("projectM").join("presets"));
-        }
+        // Search for preset directories in common locations — shared with
+        // the UI-side preset browser via `preset_search_dirs` so both
+        // always agree on where presets live.
+        let search_dirs = preset_search_dirs(preset_dir.clone());
 
         let mut pl = Playlist::create(&pm);
         let mut texture_paths = Vec::new();
@@ -305,6 +406,23 @@ impl ProjectMRenderer {
         if let Some(ref mut pl) = self.playlist {
             pl.play_next();
         }
+    }
+
+    /// Load a specific preset file directly, bypassing the playlist, with
+    /// a smooth transition.
+    pub fn load_preset(&mut self, path: &Path) {
+        self.projectm.load_preset_file(&path.to_string_lossy(), true);
+    }
+
+    /// Lock/unlock automatic preset transitions. Manual switches (this
+    /// renderer's `load_preset`/`next_preset`) always keep working.
+    pub fn set_locked(&self, locked: bool) {
+        self.projectm.set_preset_locked(locked);
+    }
+
+    /// Adjust beat-reactivity sensitivity.
+    pub fn set_beat_sensitivity(&self, sensitivity: f32) {
+        self.projectm.set_beat_sensitivity(sensitivity);
     }
 }
 
@@ -431,6 +549,8 @@ impl VisualizerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// A slot with no outstanding reader must be reused in place (same
     /// allocation, no clone/allocation on this call).
@@ -463,5 +583,67 @@ mod tests {
         assert!(!Arc::ptr_eq(&reader_snapshot, &pool[0]));
         assert_eq!(reader_snapshot[0], 0);
         assert_eq!(pool[0][0], 0xAB);
+    }
+
+    fn temp_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "lyra-viz-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// Nested dirs, noise files, and a mixed-case extension all in one
+    /// tree: only the three `.milk` files should surface, each attributed
+    /// to its immediate parent directory (prettified), sorted by
+    /// `(category, name)`.
+    #[test]
+    fn scan_presets_finds_nested_case_insensitive_milk_files_grouped_by_category() {
+        let root = temp_root("nested");
+        let milkdrop_dir = root.join("presets_milkdrop");
+        let nested_dir = milkdrop_dir.join("subdir");
+        let stock_dir = root.join("presets_stock");
+        fs::create_dir_all(&nested_dir).unwrap();
+        fs::create_dir_all(&stock_dir).unwrap();
+
+        fs::write(milkdrop_dir.join("Cool - Preset.milk"), b"").unwrap();
+        fs::write(milkdrop_dir.join("noise.txt"), b"").unwrap();
+        fs::write(nested_dir.join("Deep.MILK"), b"").unwrap();
+        fs::write(stock_dir.join("Basic.milk"), b"").unwrap();
+        fs::write(root.join("readme.txt"), b"").unwrap();
+
+        let entries = scan_presets(&[root.clone()]);
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| (e.category.as_str(), e.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("milkdrop", "Cool - Preset"),
+                ("stock", "Basic"),
+                ("subdir", "Deep"),
+            ]
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The same directory reachable twice in the search-dir list (e.g. a
+    /// duplicated config entry) must not double up the preset it contains.
+    #[test]
+    fn scan_presets_dedupes_when_the_same_dir_is_listed_twice() {
+        let root = temp_root("dedup");
+        fs::write(root.join("Solo.milk"), b"").unwrap();
+
+        let entries = scan_presets(&[root.clone(), root.clone()]);
+
+        assert_eq!(entries.len(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 }

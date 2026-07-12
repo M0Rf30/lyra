@@ -11,6 +11,8 @@ pub mod blur;
 pub mod compact_bar;
 pub mod expanded_view;
 #[cfg(feature = "visualizer")]
+pub mod preset_browser;
+#[cfg(feature = "visualizer")]
 pub mod visualizer;
 #[cfg(feature = "visualizer")]
 pub mod viz_shader;
@@ -54,6 +56,22 @@ pub enum NowPlayingMessage {
     /// counting resumes.
     #[cfg(feature = "visualizer")]
     VizHudPointerExit,
+    /// Toggle the preset browser overlay on/off.
+    #[cfg(feature = "visualizer")]
+    TogglePresetBrowser,
+    /// Preset browser search query changed.
+    #[cfg(feature = "visualizer")]
+    PresetSearchInput(String),
+    /// Load a specific preset file (browser row click), bypassing the
+    /// playlist, with a smooth transition.
+    #[cfg(feature = "visualizer")]
+    LoadVizPreset(std::path::PathBuf),
+    /// Lock/unlock automatic preset transitions.
+    #[cfg(feature = "visualizer")]
+    SetVizLocked(bool),
+    /// Adjust beat-reactivity sensitivity.
+    #[cfg(feature = "visualizer")]
+    SetVizBeatSensitivity(f32),
 }
 
 /// Format a duration as `H:MM:SS` / `M:SS`.

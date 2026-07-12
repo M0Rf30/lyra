@@ -246,9 +246,22 @@ pub struct AppModel {
     viz_frame_buf: Arc<Mutex<crate::views::now_playing::viz_shader::VizFrameBuffer>>,
     #[cfg(feature = "visualizer")]
     pcm_buffer: Option<Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>>,
-    /// Shared flag to signal preset change to the render thread.
+    /// Sender half of the command channel to the render thread (see
+    /// `VizCommand`); the `Receiver` lives in `viz_cmd_rx_slot`.
     #[cfg(feature = "visualizer")]
-    next_preset_signal: Arc<std::sync::atomic::AtomicBool>,
+    viz_cmd_tx: std::sync::mpsc::Sender<crate::views::now_playing::visualizer::VizCommand>,
+    /// Holds the render thread's command `Receiver` between activations —
+    /// see the comment where it's created in `AppModel::init`.
+    #[cfg(feature = "visualizer")]
+    viz_cmd_rx_slot: Arc<
+        Mutex<Option<std::sync::mpsc::Receiver<crate::views::now_playing::visualizer::VizCommand>>>,
+    >,
+    /// Preset name the render thread most recently loaded/switched to.
+    /// `None` after a playlist-driven `NextPreset` switch, since the
+    /// playlist API exposes no way to read back which preset it landed
+    /// on; set again on the next explicit `LoadPreset`.
+    #[cfg(feature = "visualizer")]
+    viz_current_preset_shared: Arc<Mutex<Option<String>>>,
     /// Opacity of the visualizer metadata overlay (0.0 = hidden, 1.0 = fully visible).
     /// Decays to 0 over ~4 seconds after a track change.
     #[cfg(feature = "visualizer")]
@@ -279,6 +292,31 @@ pub struct AppModel {
     /// Caps concurrently-running conversion jobs at 2, shared across every
     /// in-flight job future.
     convert_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Whether the preset browser overlay is currently open.
+    #[cfg(feature = "visualizer")]
+    viz_browser_open: bool,
+    /// Discovered `.milk` presets, populated lazily on first browser open.
+    #[cfg(feature = "visualizer")]
+    viz_preset_entries: Vec<crate::views::now_playing::visualizer::PresetEntry>,
+    /// Set once the background preset scan has been kicked off, so
+    /// reopening the browser doesn't rescan every time.
+    #[cfg(feature = "visualizer")]
+    viz_presets_scan_started: bool,
+    /// Live search filter text for the preset browser.
+    #[cfg(feature = "visualizer")]
+    viz_preset_search: String,
+    /// Whether automatic preset transitions are locked (see
+    /// `VizCommand::SetLocked`).
+    #[cfg(feature = "visualizer")]
+    viz_locked: bool,
+    /// Beat-reactivity sensitivity (see `VizCommand::SetBeatSensitivity`).
+    #[cfg(feature = "visualizer")]
+    viz_beat_sensitivity: f32,
+    /// UI-local mirror of `viz_current_preset_shared`, updated
+    /// optimistically on `LoadVizPreset` and resynced from the render
+    /// thread on every `VisualizerFrameReady`.
+    #[cfg(feature = "visualizer")]
+    viz_current_preset_name: Option<String>,
 }
 
 /// All application messages.
@@ -546,6 +584,25 @@ pub enum Message {
     VizHudPointerEnter,
     #[cfg(feature = "visualizer")]
     VizHudPointerExit,
+    /// Toggle the preset browser overlay on/off.
+    #[cfg(feature = "visualizer")]
+    TogglePresetBrowser,
+    /// Preset browser search query changed.
+    #[cfg(feature = "visualizer")]
+    PresetSearchInput(String),
+    /// Load a specific preset file, bypassing the playlist, with a smooth
+    /// transition.
+    #[cfg(feature = "visualizer")]
+    LoadVizPreset(PathBuf),
+    /// Lock/unlock automatic preset transitions.
+    #[cfg(feature = "visualizer")]
+    SetVizLocked(bool),
+    /// Adjust beat-reactivity sensitivity.
+    #[cfg(feature = "visualizer")]
+    SetVizBeatSensitivity(f32),
+    /// Background preset scan finished.
+    #[cfg(feature = "visualizer")]
+    VizPresetsScanned(Vec<crate::views::now_playing::visualizer::PresetEntry>),
 
     // Notifications
     // Podcasts
@@ -975,6 +1032,26 @@ impl cosmic::Application for AppModel {
             Some(buf)
         };
 
+        // Command channel to the projectM render thread — replaces the
+        // old `next_preset_signal: AtomicBool` flag so the UI can also
+        // request specific-preset loads, lock state, and beat sensitivity.
+        // The `Sender` lives in `AppModel` for the whole app lifetime; the
+        // `Receiver` is checked out of this `Mutex<Option<_>>` slot by
+        // whichever render thread is currently running and handed back
+        // when it stops (visualizer deactivated), so a later reactivation
+        // can check it out again — the channel itself is only ever
+        // created once, here.
+        #[cfg(feature = "visualizer")]
+        let (viz_cmd_tx, viz_cmd_rx) =
+            std::sync::mpsc::channel::<crate::views::now_playing::visualizer::VizCommand>();
+        #[cfg(feature = "visualizer")]
+        let viz_cmd_rx_slot = Arc::new(Mutex::new(Some(viz_cmd_rx)));
+        // Preset name the render thread most recently loaded/switched to;
+        // written there, mirrored into `AppModel::viz_current_preset_name`
+        // on every `VisualizerFrameReady`.
+        #[cfg(feature = "visualizer")]
+        let viz_current_preset_shared: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
         let mut app = AppModel {
             core,
             nav,
@@ -1091,7 +1168,11 @@ impl cosmic::Application for AppModel {
             #[cfg(feature = "visualizer")]
             pcm_buffer,
             #[cfg(feature = "visualizer")]
-            next_preset_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            viz_cmd_tx,
+            #[cfg(feature = "visualizer")]
+            viz_cmd_rx_slot,
+            #[cfg(feature = "visualizer")]
+            viz_current_preset_shared,
             #[cfg(feature = "visualizer")]
             viz_metadata_opacity: 0.0,
             #[cfg(feature = "visualizer")]
@@ -1106,6 +1187,20 @@ impl cosmic::Application for AppModel {
             convert_rate_index: 0,
             convert_next_id: 0,
             convert_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+            #[cfg(feature = "visualizer")]
+            viz_browser_open: false,
+            #[cfg(feature = "visualizer")]
+            viz_preset_entries: Vec::new(),
+            #[cfg(feature = "visualizer")]
+            viz_presets_scan_started: false,
+            #[cfg(feature = "visualizer")]
+            viz_preset_search: String::new(),
+            #[cfg(feature = "visualizer")]
+            viz_locked: false,
+            #[cfg(feature = "visualizer")]
+            viz_beat_sensitivity: 1.0,
+            #[cfg(feature = "visualizer")]
+            viz_current_preset_name: None,
         };
 
         app.rebuild_provider_list();
@@ -1746,6 +1841,20 @@ impl cosmic::Application for AppModel {
             now_playing::NowPlayingMessage::VizHudPointerEnter => Message::VizHudPointerEnter,
             #[cfg(feature = "visualizer")]
             now_playing::NowPlayingMessage::VizHudPointerExit => Message::VizHudPointerExit,
+            #[cfg(feature = "visualizer")]
+            now_playing::NowPlayingMessage::TogglePresetBrowser => Message::TogglePresetBrowser,
+            #[cfg(feature = "visualizer")]
+            now_playing::NowPlayingMessage::PresetSearchInput(query) => {
+                Message::PresetSearchInput(query)
+            }
+            #[cfg(feature = "visualizer")]
+            now_playing::NowPlayingMessage::LoadVizPreset(path) => Message::LoadVizPreset(path),
+            #[cfg(feature = "visualizer")]
+            now_playing::NowPlayingMessage::SetVizLocked(locked) => Message::SetVizLocked(locked),
+            #[cfg(feature = "visualizer")]
+            now_playing::NowPlayingMessage::SetVizBeatSensitivity(v) => {
+                Message::SetVizBeatSensitivity(v)
+            }
         };
 
         let bar = now_playing::compact_bar::playback_bar(
@@ -1766,8 +1875,9 @@ impl cosmic::Application for AppModel {
         // When expand_progress > 0, show expanded now-playing view replacing normal content
         let layout: Element<'_, Self::Message> = if self.expand_progress > 0.0 {
             #[cfg(feature = "visualizer")]
-            let viz_hud_visible =
-                self.viz_hud_pointer_over || self.viz_hud_idle_frames < VIZ_HUD_HOLD_FRAMES;
+            let viz_hud_visible = self.viz_hud_pointer_over
+                || self.viz_hud_idle_frames < VIZ_HUD_HOLD_FRAMES
+                || self.viz_browser_open;
             // Expanded/animating: show expanded now-playing view
             let expanded = now_playing::expanded_view::expanded_now_playing(
                 self.current_track.as_ref(),
@@ -1794,6 +1904,18 @@ impl cosmic::Application for AppModel {
                 self.viz_fullscreen,
                 #[cfg(feature = "visualizer")]
                 viz_hud_visible,
+                #[cfg(feature = "visualizer")]
+                self.viz_browser_open,
+                #[cfg(feature = "visualizer")]
+                &self.viz_preset_entries,
+                #[cfg(feature = "visualizer")]
+                &self.viz_preset_search,
+                #[cfg(feature = "visualizer")]
+                self.viz_locked,
+                #[cfg(feature = "visualizer")]
+                self.viz_beat_sensitivity,
+                #[cfg(feature = "visualizer")]
+                self.viz_current_preset_name.as_deref(),
             )
             .map(map_now_playing_msg);
 
@@ -1921,13 +2043,15 @@ impl cosmic::Application for AppModel {
             && let Some(ref pcm_buf) = self.pcm_buffer
         {
             let pcm = Arc::clone(pcm_buf);
-            let preset_signal = Arc::clone(&self.next_preset_signal);
+            let cmd_rx = Arc::clone(&self.viz_cmd_rx_slot);
             let frame_buf = Arc::clone(&self.viz_frame_buf);
+            let current_preset = Arc::clone(&self.viz_current_preset_shared);
             subs.push(Subscription::run_with(
                 VizRenderKey {
                     pcm,
-                    preset_signal,
+                    cmd_rx,
                     frame_buf,
+                    current_preset,
                 },
                 projectm_render_stream,
             ));
@@ -3502,6 +3626,17 @@ impl cosmic::Application for AppModel {
             }
 
             Message::CollapseNowPlaying => {
+                // If the preset browser is open, Escape (or the collapse
+                // button) closes it first instead of collapsing the whole
+                // view. Handled here rather than branching in the Escape
+                // subscription itself, since `listen_with` only accepts a
+                // non-capturing `fn` pointer — it can't read
+                // `viz_browser_open`.
+                #[cfg(feature = "visualizer")]
+                if self.viz_browser_open {
+                    self.viz_browser_open = false;
+                    return Task::none();
+                }
                 self.expand_target = Some(0.0);
                 self.expand_anim_start = Some(std::time::Instant::now());
                 self.expand_anim_from = self.expand_progress;
@@ -3566,6 +3701,7 @@ impl cosmic::Application for AppModel {
                 // viz was active and bytes weren't cached yet), trigger it now.
                 if !self.visualizer_active {
                     self.exit_viz_fullscreen();
+                    self.viz_browser_open = false;
                     // Force retry even if key matches — blurred_cover may be None.
                     if self.blurred_cover.is_none() {
                         self.blurred_cover_key = None;
@@ -3576,8 +3712,9 @@ impl cosmic::Application for AppModel {
 
             #[cfg(feature = "visualizer")]
             Message::NextVisualizerPreset => {
-                self.next_preset_signal
-                    .store(true, std::sync::atomic::Ordering::Release);
+                let _ = self
+                    .viz_cmd_tx
+                    .send(crate::views::now_playing::visualizer::VizCommand::NextPreset);
             }
 
             #[cfg(feature = "visualizer")]
@@ -3586,6 +3723,16 @@ impl cosmic::Application for AppModel {
                 // This message just triggers a view redraw so the Shader
                 // widget picks them up in its next prepare() call.
 
+                // Resync the UI-local current-preset name from whatever
+                // the render thread most recently set (see
+                // `viz_current_preset_shared`'s doc comment). Overwrites
+                // any optimistic value `LoadVizPreset` already set with
+                // the render thread's own value — they converge within a
+                // frame either way.
+                if let Ok(name) = self.viz_current_preset_shared.lock() {
+                    self.viz_current_preset_name = name.clone();
+                }
+
                 // Decay metadata overlay (~4 seconds at 30 fps = 120 frames).
                 // No inner cfg needed — this arm is only reachable with the visualizer feature.
                 if self.viz_metadata_opacity > 0.0 {
@@ -3593,10 +3740,12 @@ impl cosmic::Application for AppModel {
                         (self.viz_metadata_opacity - (1.0 / 120.0)).max(0.0);
                 }
 
-                // Tick the HUD auto-hide idle counter (only while fullscreen —
-                // no point counting otherwise, and it avoids a stale huge
-                // count if fullscreen is re-entered much later).
-                if self.viz_fullscreen && !self.viz_hud_pointer_over {
+                // Tick the HUD auto-hide idle counter (only while
+                // fullscreen, and not while the preset browser forces the
+                // HUD visible — no point counting otherwise, and it avoids
+                // a stale huge count instantly hiding the HUD the moment
+                // the browser closes).
+                if self.viz_fullscreen && !self.viz_hud_pointer_over && !self.viz_browser_open {
                     self.viz_hud_idle_frames = self.viz_hud_idle_frames.saturating_add(1);
                 }
             }
@@ -3635,6 +3784,68 @@ impl cosmic::Application for AppModel {
                     self.core.window.show_headerbar = true;
                     self.core.nav_bar_set_toggled(self.viz_prev_nav_active);
                 }
+            }
+
+            #[cfg(feature = "visualizer")]
+            Message::TogglePresetBrowser => {
+                self.viz_browser_open = !self.viz_browser_open;
+                if self.viz_browser_open {
+                    self.viz_hud_idle_frames = 0;
+                    if !self.viz_presets_scan_started {
+                        self.viz_presets_scan_started = true;
+                        return cosmic::task::future(async move {
+                            let dirs = crate::views::now_playing::visualizer::preset_search_dirs(
+                                dirs::data_dir().map(|d| d.join("projectm").join("presets")),
+                            );
+                            let entries = tokio::task::spawn_blocking(move || {
+                                crate::views::now_playing::visualizer::scan_presets(&dirs)
+                            })
+                            .await
+                            .unwrap_or_default();
+                            cosmic::Action::App(Message::VizPresetsScanned(entries))
+                        });
+                    }
+                }
+            }
+
+            #[cfg(feature = "visualizer")]
+            Message::PresetSearchInput(query) => {
+                self.viz_preset_search = query;
+            }
+
+            #[cfg(feature = "visualizer")]
+            Message::LoadVizPreset(path) => {
+                // Optimistic: reflect the load immediately so the browser
+                // highlights the new row without waiting on the render
+                // thread's next frame — see `VisualizerFrameReady`.
+                self.viz_current_preset_name =
+                    path.file_stem().map(|s| s.to_string_lossy().into_owned());
+                let _ = self
+                    .viz_cmd_tx
+                    .send(crate::views::now_playing::visualizer::VizCommand::LoadPreset(path));
+            }
+
+            #[cfg(feature = "visualizer")]
+            Message::SetVizLocked(locked) => {
+                self.viz_locked = locked;
+                let _ = self
+                    .viz_cmd_tx
+                    .send(crate::views::now_playing::visualizer::VizCommand::SetLocked(locked));
+            }
+
+            #[cfg(feature = "visualizer")]
+            Message::SetVizBeatSensitivity(sensitivity) => {
+                self.viz_beat_sensitivity = sensitivity;
+                let _ = self.viz_cmd_tx.send(
+                    crate::views::now_playing::visualizer::VizCommand::SetBeatSensitivity(
+                        sensitivity,
+                    ),
+                );
+            }
+
+            #[cfg(feature = "visualizer")]
+            Message::VizPresetsScanned(entries) => {
+                self.viz_preset_entries = entries;
             }
 
             // -- Playlists view --
@@ -4592,8 +4803,11 @@ fn fs_watcher_stream(music_dirs: &Vec<PathBuf>) -> impl Stream<Item = Message> +
 #[cfg(feature = "visualizer")]
 struct VizRenderKey {
     pcm: Arc<Mutex<crate::views::now_playing::visualizer::PcmBuffer>>,
-    preset_signal: Arc<std::sync::atomic::AtomicBool>,
+    cmd_rx: Arc<
+        Mutex<Option<std::sync::mpsc::Receiver<crate::views::now_playing::visualizer::VizCommand>>>,
+    >,
     frame_buf: Arc<Mutex<crate::views::now_playing::viz_shader::VizFrameBuffer>>,
+    current_preset: Arc<Mutex<Option<String>>>,
 }
 
 #[cfg(feature = "visualizer")]
@@ -4610,8 +4824,9 @@ impl Hash for VizRenderKey {
 #[cfg(feature = "visualizer")]
 fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + use<> {
     let pcm = Arc::clone(&key.pcm);
-    let preset_signal = Arc::clone(&key.preset_signal);
+    let cmd_rx_slot = Arc::clone(&key.cmd_rx);
     let frame_buf = Arc::clone(&key.frame_buf);
+    let current_preset = Arc::clone(&key.current_preset);
     cosmic::iced::stream::channel(
         2,
         move |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
@@ -4637,13 +4852,47 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
                             }
                         };
 
+                    // Check out the command receiver for this thread's
+                    // lifetime; handed back below so a future activation
+                    // (visualizer toggled off then on again) can check it
+                    // out in turn — the channel itself is only ever
+                    // created once, in `AppModel::init`.
+                    let mut cmd_rx = cmd_rx_slot.lock().ok().and_then(|mut slot| slot.take());
+
                     loop {
                         // ~30 fps
                         std::thread::sleep(Duration::from_millis(33));
 
-                        // Check if a preset change was requested
-                        if preset_signal.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                            renderer.next_preset();
+                        // Drain every pending command before rendering
+                        // this frame.
+                        if let Some(rx) = cmd_rx.as_ref() {
+                            use crate::views::now_playing::visualizer::VizCommand;
+                            while let Ok(cmd) = rx.try_recv() {
+                                match cmd {
+                                    VizCommand::NextPreset => {
+                                        renderer.next_preset();
+                                        // The playlist API exposes no way to
+                                        // read back which preset it landed
+                                        // on — clear the tracked name.
+                                        if let Ok(mut name) = current_preset.lock() {
+                                            *name = None;
+                                        }
+                                    }
+                                    VizCommand::LoadPreset(path) => {
+                                        renderer.load_preset(&path);
+                                        let display_name = path
+                                            .file_stem()
+                                            .map(|s| s.to_string_lossy().into_owned());
+                                        if let Ok(mut name) = current_preset.lock() {
+                                            *name = display_name;
+                                        }
+                                    }
+                                    VizCommand::SetLocked(locked) => renderer.set_locked(locked),
+                                    VizCommand::SetBeatSensitivity(sensitivity) => {
+                                        renderer.set_beat_sensitivity(sensitivity);
+                                    }
+                                }
+                            }
                         }
 
                         // Read PCM from shared buffer
@@ -4671,6 +4920,12 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
                                 break;
                             }
                         }
+                    }
+
+                    // Hand the receiver back so a future render-thread
+                    // activation can check it out in turn.
+                    if let Ok(mut slot) = cmd_rx_slot.lock() {
+                        *slot = cmd_rx.take();
                     }
                 })
                 .expect("failed to spawn projectm-render thread");

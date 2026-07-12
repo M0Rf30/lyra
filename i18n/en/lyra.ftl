@@ -183,3 +183,13 @@ convert-format-flac = FLAC
 convert-format-wav16 = WAV (16-bit)
 convert-format-wav24 = WAV (24-bit)
 convert-format-wav32float = WAV (32-bit float)
+
+# Visualizer
+viz-toggle-presets = Browse presets
+viz-presets = Presets
+viz-preset-search = Search presets...
+viz-preset-empty = No presets match your search
+viz-close-presets = Close
+viz-next-preset = Next preset
+viz-lock = Lock preset
+viz-beat-sensitivity = Beat sensitivity

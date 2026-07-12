@@ -25,14 +25,14 @@ use std::sync::{Arc, Mutex};
 /// backdrop is actually painted behind the panel (`has_backdrop`); with no
 /// backdrop the panel falls back to pure theme colors instead (see
 /// `theme_surface_class`).
-const BACKDROP_SCRIM: Color = Color {
+pub(super) const BACKDROP_SCRIM: Color = Color {
     r: 0.0,
     g: 0.0,
     b: 0.0,
     a: 0.72,
 };
-const BACKDROP_TEXT: Color = Color::WHITE;
-const BACKDROP_SUBTEXT: Color = Color {
+pub(super) const BACKDROP_TEXT: Color = Color::WHITE;
+pub(super) const BACKDROP_SUBTEXT: Color = Color {
     r: 1.0,
     g: 1.0,
     b: 1.0,
@@ -392,11 +392,13 @@ fn compact_transport_row<'a>(
 }
 
 /// Volume icon + slider and the lyrics toggle, plus (visualizer builds) the
-/// visualizer on/off toggle and, while active, the next-preset button.
+/// visualizer on/off toggle and, while active, the next-preset and
+/// preset-browser-toggle buttons.
 /// Identical wiring to the view's original inline `bottom_row`.
 fn utility_row<'a>(
     volume: f32,
     #[cfg(feature = "visualizer")] visualizer_active: bool,
+    #[cfg(feature = "visualizer")] viz_browser_open: bool,
     space_xs: f32,
     space_xxs: f32,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
@@ -445,6 +447,13 @@ fn utility_row<'a>(
                 )
                 .on_press(NowPlayingMessage::NextPreset),
             );
+            row = row.push(transport_button(
+                "view-grid-symbolic",
+                20,
+                viz_browser_open,
+                fl!("viz-toggle-presets"),
+                Some(NowPlayingMessage::TogglePresetBrowser),
+            ));
         }
     }
 
@@ -476,6 +485,12 @@ pub fn expanded_now_playing<'a>(
     // only governs the control card — lyrics (if overlaid) are content,
     // not chrome, and stay visible regardless.
     #[cfg(feature = "visualizer")] viz_hud_visible: bool,
+    #[cfg(feature = "visualizer")] viz_browser_open: bool,
+    #[cfg(feature = "visualizer")] viz_preset_entries: &'a [super::visualizer::PresetEntry],
+    #[cfg(feature = "visualizer")] viz_preset_search: &'a str,
+    #[cfg(feature = "visualizer")] viz_locked: bool,
+    #[cfg(feature = "visualizer")] viz_beat_sensitivity: f32,
+    #[cfg(feature = "visualizer")] viz_current_preset_name: Option<&'a str>,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     let _ = expand_progress;
 
@@ -605,6 +620,8 @@ pub fn expanded_now_playing<'a>(
             volume,
             #[cfg(feature = "visualizer")]
             visualizer_active,
+            #[cfg(feature = "visualizer")]
+            viz_browser_open,
             space_xs,
             space_xxs,
         );
@@ -832,6 +849,8 @@ pub fn expanded_now_playing<'a>(
             volume,
             #[cfg(feature = "visualizer")]
             visualizer_active,
+            #[cfg(feature = "visualizer")]
+            viz_browser_open,
             space_xs,
             space_xxs,
         ));
@@ -1047,6 +1066,21 @@ pub fn expanded_now_playing<'a>(
             if let Some(meta_overlay) = viz_metadata_overlay {
                 stack_widget = stack_widget.push(meta_overlay);
             }
+        }
+
+        // Preset browser overlay: the topmost layer, above the metadata
+        // pill and the fullscreen HUD card, so its own backdrop dims
+        // everything else. Reachable in both fullscreen and non-fullscreen
+        // viz layouts since both share this same outer Stack.
+        #[cfg(feature = "visualizer")]
+        if visualizer_active && viz_browser_open {
+            stack_widget = stack_widget.push(super::preset_browser::preset_browser_overlay(
+                viz_preset_entries,
+                viz_preset_search,
+                viz_current_preset_name,
+                viz_locked,
+                viz_beat_sensitivity,
+            ));
         }
 
         stack_widget.width(Length::Fill).into()
