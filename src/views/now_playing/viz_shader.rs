@@ -8,16 +8,22 @@
 //! image cache (and its per-frame `Id::unique()` churn), eliminating the
 //! white-flash artefact that plagued the `image::Handle::from_rgba` path.
 
+use cosmic::iced::wgpu;
 use cosmic::iced::widget::shader;
 use cosmic::iced::{Rectangle, mouse};
-use cosmic::iced::wgpu;
 use std::sync::{Arc, Mutex};
 
 /// Shared frame buffer: the render subscription writes RGBA pixels here,
 /// the shader widget reads them in `prepare()`.
 pub struct VizFrameBuffer {
-    /// Raw RGBA pixels (width * height * 4 bytes).
-    pub pixels: Vec<u8>,
+    /// Raw RGBA pixels (width * height * 4 bytes). Held behind an `Arc` so
+    /// a reader (`VizProgram::draw`) can share the exact allocation with a
+    /// snapshot instead of copying it every frame; the `Mutex` itself stays
+    /// `std::sync::Mutex` (never held across an `.await`, always unwrapped
+    /// immediately) because its type is fixed by `App`/the expanded-view
+    /// state that own the shared `Arc<Mutex<VizFrameBuffer>>` — see the
+    /// `parking_lot` note in `Cargo.toml`.
+    pub pixels: Arc<Vec<u8>>,
     /// Width of the frame in pixels.
     pub width: u32,
     /// Height of the frame in pixels.
@@ -30,7 +36,7 @@ pub struct VizFrameBuffer {
 impl VizFrameBuffer {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
-            pixels: vec![0u8; (width * height * 4) as usize],
+            pixels: Arc::new(vec![0u8; (width * height * 4) as usize]),
             width,
             height,
             generation: 0,
@@ -38,7 +44,14 @@ impl VizFrameBuffer {
     }
 
     /// Replace the pixel data with a new frame.
-    pub fn update(&mut self, pixels: Vec<u8>) {
+    ///
+    /// Takes ownership of an already-shared `Arc` (e.g. straight from the
+    /// renderer's reusable pixel pool) rather than cloning or re-wrapping
+    /// it, and swaps it in instead of mutating the old one in place — so a
+    /// reader still holding a previously cloned `Arc` (e.g. mid-upload in
+    /// `VizPrimitive::prepare`) keeps its own immutable snapshot and the
+    /// writer can never race it.
+    pub fn update(&mut self, pixels: Arc<Vec<u8>>) {
         self.pixels = pixels;
         self.generation = self.generation.wrapping_add(1);
     }
@@ -69,10 +82,12 @@ impl<Message> shader::Program<Message> for VizProgram {
         _cursor: mouse::Cursor,
         _bounds: Rectangle,
     ) -> Self::Primitive {
-        // Snapshot the current frame data under the lock
+        // Snapshot the current frame under the lock. `Arc::clone` only
+        // bumps a refcount instead of copying the pixel buffer, and the
+        // shared bytes are immutable for the primitive's lifetime.
         let guard = self.frame_buf.lock().unwrap();
         VizPrimitive {
-            pixels: guard.pixels.clone(),
+            pixels: Arc::clone(&guard.pixels),
             width: guard.width,
             height: guard.height,
             generation: guard.generation,
@@ -83,7 +98,7 @@ impl<Message> shader::Program<Message> for VizProgram {
 /// The per-frame primitive sent to the GPU pipeline.
 #[derive(Debug)]
 pub struct VizPrimitive {
-    pixels: Vec<u8>,
+    pixels: Arc<Vec<u8>>,
     width: u32,
     height: u32,
     generation: u64,
@@ -149,8 +164,13 @@ impl VizPipeline {
     /// Re-allocate the GPU texture at a new size, forcing a re-upload on the
     /// next `prepare()` call.
     fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let (texture, bind_group) =
-            Self::create_texture(device, &self.bind_group_layout, &self.sampler, width, height);
+        let (texture, bind_group) = Self::create_texture(
+            device,
+            &self.bind_group_layout,
+            &self.sampler,
+            width,
+            height,
+        );
         self.texture = texture;
         self.bind_group = bind_group;
         self.tex_width = width;
@@ -369,3 +389,53 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(viz_texture, viz_sampler, in.uv);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn solid_frame(fill: u8, width: u32, height: u32) -> Vec<u8> {
+        vec![fill; (width * height * 4) as usize]
+    }
+
+    fn snapshot(program: &VizProgram) -> VizPrimitive {
+        <VizProgram as shader::Program<()>>::draw(
+            program,
+            &(),
+            mouse::Cursor::default(),
+            Rectangle::default(),
+        )
+    }
+
+    /// `VizProgram::draw` must hand out shared, immutable snapshots of the
+    /// frame buffer rather than cloning the pixel storage on every call, and
+    /// a later writer update must never mutate a snapshot a reader already
+    /// holds (no aliasing race between writer and reader).
+    #[test]
+    fn draw_shares_pixel_storage_and_never_races_a_writer_update() {
+        let buf = Arc::new(Mutex::new(VizFrameBuffer::new(4, 2)));
+        let program = VizProgram::new(Arc::clone(&buf));
+
+        let snap_a = snapshot(&program);
+        let snap_b = snapshot(&program);
+
+        // No update happened between the two draws: same generation, and
+        // the exact same backing allocation is shared (no per-frame clone).
+        assert_eq!(snap_a.generation, snap_b.generation);
+        assert!(Arc::ptr_eq(&snap_a.pixels, &snap_b.pixels));
+        assert_eq!(snap_a.width, 4);
+        assert_eq!(snap_a.height, 2);
+
+        // Write a new frame; this must swap in a fresh Arc rather than
+        // mutate the bytes `snap_a`/`snap_b` still hold.
+        buf.lock()
+            .unwrap()
+            .update(Arc::new(solid_frame(0xAB, 4, 2)));
+        let snap_c = snapshot(&program);
+
+        assert_eq!(snap_c.generation, snap_a.generation.wrapping_add(1));
+        assert!(!Arc::ptr_eq(&snap_a.pixels, &snap_c.pixels));
+        assert!(snap_a.pixels.iter().all(|&b| b == 0));
+        assert!(snap_c.pixels.iter().all(|&b| b == 0xAB));
+    }
+}

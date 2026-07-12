@@ -8,7 +8,6 @@ use crate::library::{LyricLine, Lyrics};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Color;
 use cosmic::iced::{Alignment, Length};
-use cosmic::prelude::*;
 use cosmic::widget;
 use std::time::Duration;
 
@@ -157,7 +156,12 @@ pub fn lyrics_overlay_view<'a, M: 'static>(
                 let mut col = widget::Column::new().spacing(10).width(Length::Fill);
                 for (i, line) in lines.iter().enumerate() {
                     let is_current = current_idx == Some(i);
-                    col = col.push(overlay_line_widget(line, is_current, text_color, subtext_color));
+                    col = col.push(overlay_line_widget(
+                        line,
+                        is_current,
+                        text_color,
+                        subtext_color,
+                    ));
                 }
                 widget::scrollable(widget::container(col).width(Length::Fill).padding(24))
                     .width(Length::Fill)
@@ -201,7 +205,11 @@ fn overlay_line_widget<'a, M: 'static>(
     text_color: Color,
     subtext_color: Color,
 ) -> cosmic::Element<'a, M> {
-    let color = if is_current { text_color } else { subtext_color };
+    let color = if is_current {
+        text_color
+    } else {
+        subtext_color
+    };
     let text_widget = if is_current {
         widget::text::title4(line.text.clone())
     } else {

@@ -13,7 +13,7 @@ pub mod mpd_backend;
 
 use crate::config::ReplayGainMode;
 use crate::library::{Track, TrackSource};
-use backend::{PlaybackBackend, PlayerError};
+use backend::PlaybackBackend;
 pub use eq_source::EqController;
 use local_backend::LocalBackend;
 use mpd_backend::MpdBackend;

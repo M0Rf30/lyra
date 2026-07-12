@@ -11,9 +11,6 @@ use super::PlaybackState;
 use super::backend::{PlaybackBackend, PlayerError};
 use crate::library::TrackSource;
 use mpd_client::Client;
-use mpd_client::commands::{
-    Add, ClearQueue, Play, Seek, SeekMode, SetPause, SetVolume, Status, Stop,
-};
 use std::time::Duration;
 
 /// MPD-based playback backend.

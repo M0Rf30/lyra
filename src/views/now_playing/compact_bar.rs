@@ -17,7 +17,6 @@ use crate::views::common;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Background;
 use cosmic::iced::{Alignment, ContentFit, Length};
-use cosmic::prelude::*;
 use cosmic::widget;
 use cosmic::widget::tooltip::Position as TooltipPosition;
 use std::time::Duration;
@@ -281,7 +280,7 @@ pub fn playback_bar<'a>(
         .push(common::cell_caption(format_time(display_position)))
         .push(if has_track {
             widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
-                .step(0.001)
+                .step(0.001_f32)
                 .on_release(NowPlayingMessage::SeekCommit)
                 .width(Length::Fill)
                 .into()
@@ -315,7 +314,7 @@ pub fn playback_bar<'a>(
         .push(widget::icon::from_name(volume_icon_name).size(20))
         .push(
             widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
-                .step(0.01)
+                .step(0.01_f32)
                 .width(Length::Fixed(120.0)),
         )
         .spacing(8)

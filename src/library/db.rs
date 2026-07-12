@@ -48,18 +48,7 @@ impl LibraryDb {
     /// Open or create the database at the given path.
     pub fn open(db_path: &Path) -> Result<Self, String> {
         let conn = Connection::open(db_path).map_err(|e| format!("DB open error: {e}"))?;
-
-        // Performance-critical PRAGMAs — set before schema creation.
-        // WAL enables concurrent reads during background scans;
-        // synchronous=NORMAL is safe with WAL and reduces fsync overhead;
-        // cache_size=-8000 gives an 8 MB page cache.
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
-             PRAGMA cache_size=-8000;",
-        )
-        .map_err(|e| format!("DB PRAGMA error: {e}"))?;
-
+        Self::configure_connection(&conn)?;
         conn.execute_batch(SCHEMA_BASE)
             .map_err(|e| format!("DB init error: {e}"))?;
 
@@ -71,6 +60,7 @@ impl LibraryDb {
     /// Open an in-memory database (useful for tests).
     pub fn open_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| format!("DB error: {e}"))?;
+        Self::configure_connection(&conn)?;
         conn.execute_batch(SCHEMA_BASE)
             .map_err(|e| format!("DB init error: {e}"))?;
 
@@ -79,73 +69,132 @@ impl LibraryDb {
         Ok(db)
     }
 
-    /// Run idempotent migration: add provider columns if missing.
+    fn configure_connection(conn: &Connection) -> Result<(), String> {
+        // WAL enables concurrent reads during background scans; synchronous=NORMAL
+        // reduces fsync overhead; cache_size=-8000 gives an 8 MB page cache.
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA cache_size=-8000;",
+        )
+        .map_err(|e| format!("DB PRAGMA error: {e}"))?;
+
+        let foreign_keys: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .map_err(|e| format!("DB foreign key verification error: {e}"))?;
+        if foreign_keys != 1 {
+            return Err("DB foreign keys could not be enabled".to_string());
+        }
+        Ok(())
+    }
+
+    /// Apply versioned migrations atomically.
     fn run_migration(&self) -> Result<(), String> {
-        let has_provider = self.column_exists("tracks", "provider")?;
-        if !has_provider {
-            tracing::info!("Running database migration: adding provider columns");
+        let version: u32 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|e| format!("Migration version error: {e}"))?;
 
-            self.conn
-                .execute_batch(
-                    "ALTER TABLE tracks ADD COLUMN provider TEXT NOT NULL DEFAULT 'local';
-                     ALTER TABLE tracks ADD COLUMN provider_track_id TEXT NOT NULL DEFAULT '';",
+        if version < 1 {
+            let has_provider = self.column_exists("tracks", "provider")?;
+            let has_provider_track_id = self.column_exists("tracks", "provider_track_id")?;
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v1 transaction error: {e}"))?;
+
+            if !has_provider {
+                tx.execute_batch(
+                    "ALTER TABLE tracks ADD COLUMN provider TEXT NOT NULL DEFAULT 'local';",
                 )
-                .map_err(|e| format!("Migration error (add columns): {e}"))?;
-
-            self.conn
-                .execute(
-                    "UPDATE tracks SET provider_track_id = path WHERE provider_track_id = ''",
-                    [],
+                .map_err(|e| format!("Migration v1 error (provider): {e}"))?;
+            }
+            if !has_provider_track_id {
+                tx.execute_batch(
+                    "ALTER TABLE tracks ADD COLUMN provider_track_id TEXT NOT NULL DEFAULT '';",
                 )
-                .map_err(|e| format!("Migration error (backfill): {e}"))?;
-
-            self.conn
-                .execute_batch(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_provider_id
-                         ON tracks(provider, provider_track_id);
-                     CREATE INDEX IF NOT EXISTS idx_tracks_provider ON tracks(provider);",
-                )
-                .map_err(|e| format!("Migration error (indexes): {e}"))?;
-
-            tracing::info!("Database migration complete");
+                .map_err(|e| format!("Migration v1 error (provider ID): {e}"))?;
+            }
+            tx.execute(
+                "UPDATE tracks SET provider_track_id = path WHERE provider_track_id = ''",
+                [],
+            )
+            .map_err(|e| format!("Migration v1 error (backfill): {e}"))?;
+            tx.execute_batch(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_provider_id
+                     ON tracks(provider, provider_track_id);
+                 CREATE INDEX IF NOT EXISTS idx_tracks_provider ON tracks(provider);
+                 PRAGMA user_version=1;",
+            )
+            .map_err(|e| format!("Migration v1 error (indexes): {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v1 commit error: {e}"))?;
         }
 
-        // --- v2 migration: favorites, ratings, replay gain, playlists ---
-        let has_favorite = self.column_exists("tracks", "is_favorite")?;
-        if !has_favorite {
-            tracing::info!(
-                "Running database migration v2: adding favorites, ratings, replay gain, playlists"
-            );
+        if version < 2 {
+            let has_favorite = self.column_exists("tracks", "is_favorite")?;
+            let has_rating = self.column_exists("tracks", "rating")?;
+            let has_track_gain = self.column_exists("tracks", "rg_track_gain")?;
+            let has_album_gain = self.column_exists("tracks", "rg_album_gain")?;
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v2 transaction error: {e}"))?;
 
-            self.conn
-                .execute_batch(
-                    "ALTER TABLE tracks ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;
-                     ALTER TABLE tracks ADD COLUMN rating INTEGER;
-                     ALTER TABLE tracks ADD COLUMN rg_track_gain REAL;
-                     ALTER TABLE tracks ADD COLUMN rg_album_gain REAL;
-
-                     CREATE TABLE IF NOT EXISTS playlists (
-                         id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                         name       TEXT NOT NULL,
-                         created_at TEXT NOT NULL DEFAULT (datetime('now'))
-                     );
-
-                     CREATE TABLE IF NOT EXISTS playlist_tracks (
-                         playlist_id INTEGER NOT NULL,
-                         track_id    INTEGER NOT NULL,
-                         position    INTEGER NOT NULL,
-                         FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
-                         FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
-                     );
-
-                     CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist
-                         ON playlist_tracks(playlist_id, position);",
+            if !has_favorite {
+                tx.execute_batch(
+                    "ALTER TABLE tracks ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;",
                 )
-                .map_err(|e| format!("Migration v2 error: {e}"))?;
-
-            tracing::info!("Database migration v2 complete");
+                .map_err(|e| format!("Migration v2 error (favorite): {e}"))?;
+            }
+            if !has_rating {
+                tx.execute_batch("ALTER TABLE tracks ADD COLUMN rating INTEGER;")
+                    .map_err(|e| format!("Migration v2 error (rating): {e}"))?;
+            }
+            if !has_track_gain {
+                tx.execute_batch("ALTER TABLE tracks ADD COLUMN rg_track_gain REAL;")
+                    .map_err(|e| format!("Migration v2 error (track gain): {e}"))?;
+            }
+            if !has_album_gain {
+                tx.execute_batch("ALTER TABLE tracks ADD COLUMN rg_album_gain REAL;")
+                    .map_err(|e| format!("Migration v2 error (album gain): {e}"))?;
+            }
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS playlists (
+                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                     name       TEXT NOT NULL,
+                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                 );
+                 CREATE TABLE IF NOT EXISTS playlist_tracks (
+                     playlist_id INTEGER NOT NULL,
+                     track_id    INTEGER NOT NULL,
+                     position    INTEGER NOT NULL,
+                     FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+                     FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist
+                     ON playlist_tracks(playlist_id, position);
+                 PRAGMA user_version=2;",
+            )
+            .map_err(|e| format!("Migration v2 error (schema): {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v2 commit error: {e}"))?;
         }
 
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Orphan repair transaction error: {e}"))?;
+        tx.execute(
+            "DELETE FROM playlist_tracks
+             WHERE playlist_id NOT IN (SELECT id FROM playlists)
+                OR track_id NOT IN (SELECT id FROM tracks)",
+            [],
+        )
+        .map_err(|e| format!("Orphan repair error: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("Orphan repair commit error: {e}"))?;
         Ok(())
     }
 
@@ -204,40 +253,51 @@ impl LibraryDb {
         Ok(())
     }
 
-    /// Remove tracks whose paths no longer exist on disk (local provider only).
-    ///
-    /// Uses batched `DELETE ... WHERE id IN (...)` inside a transaction for
-    /// efficiency instead of one DELETE per row.
-    #[tracing::instrument(skip(self), level = "debug")]
-    pub fn remove_missing_tracks(&self) -> Result<usize, String> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, path FROM tracks WHERE provider = 'local'")
-            .map_err(|e| format!("Query error: {e}"))?;
-
-        let missing: Vec<i64> = stmt
-            .query_map([], |row| {
-                let id: i64 = row.get(0)?;
-                let path: String = row.get(1)?;
-                Ok((id, path))
-            })
-            .map_err(|e| format!("Query error: {e}"))?
-            .filter_map(|r| r.ok())
-            .filter(|(_, path)| !Path::new(path).exists())
-            .map(|(id, _)| id)
-            .collect();
-
-        let count = missing.len();
-        if count == 0 {
+    /// Remove missing local tracks beneath successfully scanned roots.
+    #[tracing::instrument(skip(self, roots), level = "debug")]
+    pub fn remove_missing_tracks(&self, roots: &[PathBuf]) -> Result<usize, String> {
+        if roots.is_empty() {
             return Ok(0);
         }
 
-        // Batch deletes in chunks of 999 (SQLite variable limit) inside a transaction.
-        self.conn
-            .execute_batch("BEGIN")
-            .map_err(|e| format!("Transaction begin error: {e}"))?;
+        let tracks: Vec<(i64, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, path FROM tracks WHERE provider = 'local'")
+                .map_err(|e| format!("Query error: {e}"))?;
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|e| format!("Query error: {e}"))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("Query row error: {e}"))?
+        };
 
-        // SQLite max variable number is 999 by default.
+        let missing: Vec<i64> = tracks
+            .into_iter()
+            .filter_map(|(id, path)| {
+                let path = PathBuf::from(path);
+                if !roots.iter().any(|root| path.starts_with(root)) {
+                    return None;
+                }
+                match std::fs::metadata(&path) {
+                    Ok(_) => None,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(id),
+                    Err(error) => {
+                        tracing::warn!("Skipping inaccessible track {}: {error}", path.display());
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        if missing.is_empty() {
+            return Ok(0);
+        }
+
+        let count = missing.len();
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Transaction begin error: {e}"))?;
         for chunk in missing.chunks(999) {
             let placeholders: String = (1..=chunk.len())
                 .map(|i| format!("?{i}"))
@@ -248,15 +308,11 @@ impl LibraryDb {
                 .iter()
                 .map(|id| id as &dyn rusqlite::types::ToSql)
                 .collect();
-            self.conn
-                .execute(&sql, params.as_slice())
+            tx.execute(&sql, params.as_slice())
                 .map_err(|e| format!("Batch delete error: {e}"))?;
         }
-
-        self.conn
-            .execute_batch("COMMIT")
+        tx.commit()
             .map_err(|e| format!("Transaction commit error: {e}"))?;
-
         Ok(count)
     }
 
@@ -868,5 +924,154 @@ impl LibraryDb {
             rg_track_gain: row.get::<_, Option<f32>>(17).unwrap_or(None),
             rg_album_gain: row.get::<_, Option<f32>>(18).unwrap_or(None),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "lyra-db-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn insert_local(db: &LibraryDb, path: &Path) -> i64 {
+        let path = path.to_string_lossy();
+        db.conn
+            .execute(
+                "INSERT INTO tracks (path, provider, provider_track_id) VALUES (?1, 'local', ?1)",
+                params![path.as_ref()],
+            )
+            .unwrap();
+        db.conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn foreign_keys_reject_orphans_and_cascade_track_deletes() {
+        let db = LibraryDb::open_memory().unwrap();
+        assert_eq!(
+            db.conn
+                .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+
+        let track_id = insert_local(&db, Path::new("/tmp/lyra-cascade.mp3"));
+        let playlist = db.create_playlist("test").unwrap();
+        db.add_to_playlist(&playlist.id, &[track_id.to_string()])
+            .unwrap();
+        assert!(
+            db.add_to_playlist(&playlist.id, &["999999".to_string()])
+                .is_err()
+        );
+
+        db.conn
+            .execute("DELETE FROM tracks WHERE id = ?1", params![track_id])
+            .unwrap();
+        assert_eq!(
+            db.conn
+                .query_row("SELECT COUNT(*) FROM playlist_tracks", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn migrations_roll_back_failures_and_are_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        LibraryDb::configure_connection(&conn).unwrap();
+        conn.execute_batch(SCHEMA_BASE).unwrap();
+        conn.execute_batch("CREATE VIEW idx_tracks_provider AS SELECT 1;")
+            .unwrap();
+        let db = LibraryDb { conn };
+
+        assert!(db.run_migration().is_err());
+        assert!(!db.column_exists("tracks", "provider").unwrap());
+        assert_eq!(
+            db.conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+
+        db.conn
+            .execute_batch("DROP VIEW idx_tracks_provider;")
+            .unwrap();
+        db.run_migration().unwrap();
+        db.run_migration().unwrap();
+        assert!(db.column_exists("tracks", "rg_album_gain").unwrap());
+        assert_eq!(
+            db.conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn migrations_remove_legacy_playlist_orphans() {
+        let db = LibraryDb::open_memory().unwrap();
+        db.conn
+            .execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (1, 1, 0);
+                 PRAGMA foreign_keys=ON;",
+            )
+            .unwrap();
+
+        db.run_migration().unwrap();
+        assert_eq!(
+            db.conn
+                .query_row("SELECT COUNT(*) FROM playlist_tracks", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn failed_batched_cleanup_rolls_back_every_chunk() {
+        let db = LibraryDb::open_memory().unwrap();
+        let root = temp_root("cleanup-rollback");
+        let prefix = root.join("missing-").to_string_lossy().into_owned();
+        db.conn
+            .execute(
+                "INSERT INTO tracks (path, provider, provider_track_id)
+                 WITH RECURSIVE n(value) AS (
+                     VALUES(1) UNION ALL SELECT value + 1 FROM n WHERE value < 1000
+                 )
+                 SELECT ?1 || value, 'local', ?1 || value FROM n",
+                params![prefix],
+            )
+            .unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_last_cleanup BEFORE DELETE ON tracks
+                 WHEN OLD.id = 1000
+                 BEGIN SELECT RAISE(ABORT, 'forced cleanup failure'); END;",
+            )
+            .unwrap();
+
+        assert!(db.remove_missing_tracks(&[root.clone()]).is_err());
+        assert_eq!(
+            db.conn
+                .query_row("SELECT COUNT(*) FROM tracks", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1000
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

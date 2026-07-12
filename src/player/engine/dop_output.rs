@@ -31,7 +31,11 @@ enum SendOutcome {
 /// non-blocking `try_send` retries. `std::sync::mpsc` has no stable timed send,
 /// and a plain blocking `send` would hang forever if the output callback stalls
 /// (device xrun/disconnect) — leaking the exclusive ALSA device.
-fn send_bounded(sender: &SyncSender<Vec<i32>>, mut payload: Vec<i32>, timeout: Duration) -> SendOutcome {
+fn send_bounded(
+    sender: &SyncSender<Vec<i32>>,
+    mut payload: Vec<i32>,
+    timeout: Duration,
+) -> SendOutcome {
     let deadline = Instant::now() + timeout;
     loop {
         match sender.try_send(payload) {
@@ -228,7 +232,8 @@ impl DopOutput {
 
         if let Some(sender) = &self.sample_sender {
             let reset_frames = self.config.sample_rate as usize / 10;
-            let mut reset_samples = Vec::with_capacity(reset_frames * self.config.channels as usize);
+            let mut reset_samples =
+                Vec::with_capacity(reset_frames * self.config.channels as usize);
 
             for _ in 0..(reset_frames * self.config.channels as usize) {
                 reset_samples.push(0);

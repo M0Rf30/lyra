@@ -34,7 +34,7 @@ pub fn f32_to_i16(val: f32) -> i16 {
 /// Clamp and scale a single f32 sample to `i32` range.
 #[inline]
 pub fn f32_to_i32(val: f32) -> i32 {
-    (val.clamp(-1.0, 1.0) * i32::MAX as f32) as i32
+    (f64::from(val.clamp(-1.0, 1.0)) * f64::from(i32::MAX)) as i32
 }
 
 /// A bounded sample buffer fed from a `SyncSender`/`Receiver` channel.

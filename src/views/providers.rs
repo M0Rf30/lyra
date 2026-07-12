@@ -6,7 +6,6 @@ use crate::fl;
 use crate::provider::ProviderType;
 use cosmic::iced::Alignment;
 use cosmic::iced::core::Color;
-use cosmic::prelude::*;
 use cosmic::widget;
 
 // ── MPD editing state ──────────────────────────────────────────────────────
@@ -248,7 +247,7 @@ pub fn providers_view<'a>(
                 )
                 .push(
                     widget::slider(0.0..=12.0, crossfade_secs, ProvidersMessage::SetCrossfade)
-                        .step(0.5),
+                        .step(0.5_f32),
                 )
                 .spacing(4),
         );

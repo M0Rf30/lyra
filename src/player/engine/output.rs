@@ -103,7 +103,11 @@ pub struct CpalOutput {
 }
 
 impl CpalOutput {
-    pub fn new(format: AudioFormat, quality: ResamplerQuality, buffer_time_ms: u32) -> Result<Self> {
+    pub fn new(
+        format: AudioFormat,
+        quality: ResamplerQuality,
+        buffer_time_ms: u32,
+    ) -> Result<Self> {
         Self::build(format, quality, buffer_time_ms, format.sample_rate)
     }
 

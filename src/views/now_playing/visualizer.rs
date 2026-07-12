@@ -43,6 +43,31 @@ pub struct ProjectMRenderer {
     _color_rb: u32,
     /// Whether we successfully set up the GL context.
     _gl_ready: bool,
+    /// Reusable double-buffered pixel storage for `render_frame`'s GL
+    /// readback, shared with downstream readers via `Arc`. A slot is only
+    /// mutated in place once `Arc::get_mut` proves it is uniquely owned
+    /// (no reader still holds it); otherwise a fresh buffer is allocated
+    /// for that frame instead of racing a reader.
+    pixel_pool: [Arc<Vec<u8>>; 2],
+    /// Index of the next pool slot to render into.
+    pool_next: usize,
+}
+
+/// Selects pool slot `idx` for a fresh GL readback of `len` bytes.
+///
+/// Reuses the slot's existing allocation in place when `Arc::get_mut`
+/// proves it is uniquely owned (no reader — e.g. a `VizPrimitive`
+/// mid-upload — still holds a clone); otherwise a slow downstream
+/// consumer still has it, so a brand-new buffer takes its place rather
+/// than mutating memory a reader might be reading from. This is the
+/// double-buffering safety net that lets `render_frame` avoid a fresh
+/// allocation on the common path without ever racing a reader.
+fn ensure_unique_pool_slot(pool: &mut [Arc<Vec<u8>>; 2], idx: usize, len: usize) -> &mut Vec<u8> {
+    if Arc::get_mut(&mut pool[idx]).is_none() {
+        pool[idx] = Arc::new(vec![0u8; len]);
+    }
+    Arc::get_mut(&mut pool[idx])
+        .expect("uniquely owned immediately after the check/replacement above")
 }
 
 // SAFETY: ProjectM implements Send + Sync. The GL context is only used
@@ -200,6 +225,11 @@ impl ProjectMRenderer {
             _fbo: fbo,
             _color_rb: color_rb,
             _gl_ready: true,
+            pixel_pool: [
+                Arc::new(vec![0u8; RENDER_WIDTH * RENDER_HEIGHT * 4]),
+                Arc::new(vec![0u8; RENDER_WIDTH * RENDER_HEIGHT * 4]),
+            ],
+            pool_next: 0,
         })
     }
 
@@ -208,7 +238,13 @@ impl ProjectMRenderer {
     /// Feed PCM audio data to projectM, render a frame into the FBO,
     /// and read pixels back. The returned bytes are ready for direct use
     /// with `widget::icon::from_raster_pixels()` — no PNG encoding needed.
-    pub fn render_frame(&self, pcm: &[f32]) -> Vec<u8> {
+    ///
+    /// Reuses one of two pooled buffers for the GL readback instead of
+    /// allocating a fresh one every call: a slot is reused in place when
+    /// `Arc::get_mut` proves no reader still holds it, otherwise (a slow
+    /// downstream consumer) a fresh buffer is allocated just for that
+    /// frame so the readback never aliases memory a reader is using.
+    pub fn render_frame(&mut self, pcm: &[f32]) -> Arc<Vec<u8>> {
         // Feed audio samples if available, clamped to projectM's max buffer size
         if !pcm.is_empty() {
             let max = ProjectM::pcm_get_max_samples() as usize;
@@ -219,8 +255,13 @@ impl ProjectMRenderer {
         // Render the visualization
         self.projectm.render_frame();
 
+        let idx = self.pool_next;
+        self.pool_next = (self.pool_next + 1) % self.pixel_pool.len();
+
+        let pixels =
+            ensure_unique_pool_slot(&mut self.pixel_pool, idx, RENDER_WIDTH * RENDER_HEIGHT * 4);
+
         // Read pixels from the FBO
-        let mut pixels = vec![0u8; RENDER_WIDTH * RENDER_HEIGHT * 4];
         unsafe {
             gl::Finish();
             gl::ReadPixels(
@@ -251,7 +292,7 @@ impl ProjectMRenderer {
             pixel[3] = 255;
         }
 
-        pixels
+        Arc::clone(&self.pixel_pool[idx])
     }
 
     /// Return the render resolution (width, height).
@@ -357,8 +398,8 @@ impl VisualizerState {
     }
 
     /// Render one frame, reading PCM from the shared buffer.
-    pub fn render_one_frame(&self) -> Option<Vec<u8>> {
-        let renderer = self.renderer.as_ref()?;
+    pub fn render_one_frame(&mut self) -> Option<Vec<u8>> {
+        let renderer = self.renderer.as_mut()?;
         let pcm = self
             .pcm_buffer
             .lock()
@@ -384,5 +425,43 @@ impl VisualizerState {
     /// Check if actively rendering.
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A slot with no outstanding reader must be reused in place (same
+    /// allocation, no clone/allocation on this call).
+    #[test]
+    fn ensure_unique_pool_slot_reuses_unshared_buffer() {
+        let mut pool: [Arc<Vec<u8>>; 2] = [Arc::new(vec![0u8; 8]), Arc::new(vec![0u8; 8])];
+        let original_ptr = Arc::as_ptr(&pool[0]);
+
+        let slot = ensure_unique_pool_slot(&mut pool, 0, 8);
+        slot[0] = 0xAB;
+
+        assert_eq!(Arc::as_ptr(&pool[0]), original_ptr);
+        assert_eq!(pool[0][0], 0xAB);
+    }
+
+    /// A slot still held by a reader (simulated via an extra `Arc` clone,
+    /// e.g. a `VizPrimitive` mid-upload) must never be mutated in place —
+    /// a fresh buffer is allocated instead, so the writer can never race
+    /// that reader, and the reader's snapshot stays untouched.
+    #[test]
+    fn ensure_unique_pool_slot_replaces_buffer_still_held_by_a_reader() {
+        let mut pool: [Arc<Vec<u8>>; 2] = [Arc::new(vec![0u8; 8]), Arc::new(vec![0u8; 8])];
+        let reader_snapshot = Arc::clone(&pool[0]);
+
+        let slot = ensure_unique_pool_slot(&mut pool, 0, 8);
+        slot[0] = 0xAB;
+
+        // The writer got a distinct allocation from the one the reader
+        // still holds, and the reader's bytes are untouched.
+        assert!(!Arc::ptr_eq(&reader_snapshot, &pool[0]));
+        assert_eq!(reader_snapshot[0], 0);
+        assert_eq!(pool[0][0], 0xAB);
     }
 }

@@ -17,11 +17,13 @@ use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::{Alignment, Length, Subscription};
 use cosmic::prelude::*;
 use cosmic::widget::{self, about::About, icon, menu, nav_bar};
-use futures_util::{SinkExt, Stream, StreamExt};
+use futures_util::{SinkExt, Stream};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "visualizer")]
+use std::sync::Mutex;
 use std::time::Duration;
 
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
@@ -66,6 +68,11 @@ pub struct AppModel {
     all_albums: Vec<Album>,
     all_artists: Vec<Artist>,
     library_scanning: bool,
+    /// Monotonically increasing generation counter for library
+    /// reloads/scans. Bumped before every new reload/scan so in-flight
+    /// async results tagged with an older generation (or a different
+    /// provider id) can be detected and ignored as stale.
+    reload_generation: u64,
 
     // Library search (header search bar)
     /// Current search query (case-insensitive substring match against the
@@ -157,7 +164,6 @@ pub struct AppModel {
     save_as_name: String,
 
     // AutoEQ
-    autoeq_manager: Option<crate::autoeq::AutoEQManager>,
     /// AutoEQ profiles loaded from GitHub, available in the preset dropdown.
     autoeq_profiles: Vec<crate::autoeq::AutoEQProfileMetadata>,
     autoeq_loading: bool,
@@ -244,8 +250,18 @@ pub enum Message {
     ClearLibrarySearch,
     // Library
     ScanLibrary,
-    LibraryScanComplete(usize),
+    /// `count` is the number of tracks the scan updated; `generation`
+    /// and `provider_id` identify the reload/scan this result belongs
+    /// to, so stale results (superseded by a later reload or a provider
+    /// switch) can be ignored.
+    LibraryScanComplete {
+        generation: u64,
+        provider_id: String,
+        count: usize,
+    },
     LibraryLoaded {
+        generation: u64,
+        provider_id: String,
         tracks: Vec<Track>,
         albums: Vec<Album>,
         artists: Vec<Artist>,
@@ -261,13 +277,18 @@ pub enum Message {
     /// Incremental batch of albums from a remote provider (e.g. Subsonic).
     /// Each batch appends albums, derives tracks/artists, and updates the UI.
     LibraryBatch {
+        generation: u64,
+        provider_id: String,
         albums: Vec<Album>,
         cover_images: HashMap<String, widget::icon::Handle>,
         /// Raw cover art bytes for blur processing.
         cover_art_bytes: HashMap<String, Vec<u8>>,
     },
     /// Signals that incremental loading is complete.
-    LibraryLoadComplete,
+    LibraryLoadComplete {
+        generation: u64,
+        provider_id: String,
+    },
 
     // Player transport
     TogglePlayback,
@@ -790,6 +811,7 @@ impl cosmic::Application for AppModel {
             all_albums: Vec::new(),
             all_artists: Vec::new(),
             library_scanning: false,
+            reload_generation: 0,
 
             library_search: String::new(),
             search_active: false,
@@ -841,7 +863,6 @@ impl cosmic::Application for AppModel {
             active_preset_name: None,
             eq_dirty: false,
             save_as_name: String::new(),
-            autoeq_manager: None,
             autoeq_profiles: Vec::new(),
             autoeq_loading: false,
             autoeq_search: String::new(),
@@ -1809,6 +1830,8 @@ impl cosmic::Application for AppModel {
                     match provider.provider_type() {
                         crate::provider::ProviderType::Local => {
                             self.library_scanning = true;
+                            let generation = self.begin_reload_generation();
+                            let provider_id = provider.id().to_string();
                             return cosmic::task::future(async move {
                                 let count = tokio::task::spawn_blocking(move || {
                                     provider.sync_library().unwrap_or_else(|e| {
@@ -1818,7 +1841,11 @@ impl cosmic::Application for AppModel {
                                 })
                                 .await
                                 .unwrap_or(0);
-                                cosmic::Action::App(Message::LibraryScanComplete(count))
+                                cosmic::Action::App(Message::LibraryScanComplete {
+                                    generation,
+                                    provider_id,
+                                    count,
+                                })
                             });
                         }
                         crate::provider::ProviderType::Subsonic => {
@@ -1838,7 +1865,14 @@ impl cosmic::Application for AppModel {
                 }
             }
 
-            Message::LibraryScanComplete(count) => {
+            Message::LibraryScanComplete {
+                generation,
+                provider_id,
+                count,
+            } => {
+                if self.is_stale_reload(generation, &provider_id) {
+                    return Task::none();
+                }
                 self.library_scanning = false;
                 tracing::info!("Library scan complete: {count} tracks updated");
                 // Only reload if tracks actually changed to avoid unnecessary
@@ -1849,6 +1883,8 @@ impl cosmic::Application for AppModel {
             }
 
             Message::LibraryLoaded {
+                generation,
+                provider_id,
                 tracks,
                 albums,
                 artists,
@@ -1856,6 +1892,9 @@ impl cosmic::Application for AppModel {
                 artist_avatars,
                 cover_art_bytes,
             } => {
+                if self.is_stale_reload(generation, &provider_id) {
+                    return Task::none();
+                }
                 self.library_scanning = false;
                 self.all_tracks = tracks;
                 self.all_albums = albums;
@@ -1870,10 +1909,15 @@ impl cosmic::Application for AppModel {
             }
 
             Message::LibraryBatch {
+                generation,
+                provider_id,
                 albums,
                 cover_images,
                 cover_art_bytes,
             } => {
+                if self.is_stale_reload(generation, &provider_id) {
+                    return Task::none();
+                }
                 // Append new albums and extract tracks
                 for album in &albums {
                     for track in &album.tracks {
@@ -1895,7 +1939,13 @@ impl cosmic::Application for AppModel {
                 return blur_task;
             }
 
-            Message::LibraryLoadComplete => {
+            Message::LibraryLoadComplete {
+                generation,
+                provider_id,
+            } => {
+                if self.is_stale_reload(generation, &provider_id) {
+                    return Task::none();
+                }
                 self.library_scanning = false;
                 // Final sort
                 self.all_tracks.sort_by(|a, b| a.title.cmp(&b.title));
@@ -1929,6 +1979,8 @@ impl cosmic::Application for AppModel {
                     && provider.provider_type() == crate::provider::ProviderType::Local
                 {
                     self.library_scanning = true;
+                    let generation = self.begin_reload_generation();
+                    let provider_id = provider.id().to_string();
                     return cosmic::task::future(async move {
                         let count = tokio::task::spawn_blocking(move || {
                             // The LocalProvider wraps LibraryDb in a Mutex.
@@ -1957,7 +2009,11 @@ impl cosmic::Application for AppModel {
                         })
                         .await
                         .unwrap_or(0);
-                        cosmic::Action::App(Message::LibraryScanComplete(count))
+                        cosmic::Action::App(Message::LibraryScanComplete {
+                            generation,
+                            provider_id,
+                            count,
+                        })
                     });
                 }
             }
@@ -3703,8 +3759,7 @@ fn projectm_render_stream(key: &VizRenderKey) -> impl Stream<Item = Message> + u
             std::thread::Builder::new()
                 .name("projectm-render".into())
                 .spawn(move || {
-                    let preset_dir =
-                        dirs::data_dir().map(|d| d.join("projectm").join("presets"));
+                    let preset_dir = dirs::data_dir().map(|d| d.join("projectm").join("presets"));
                     let mut renderer =
                         match crate::views::now_playing::visualizer::ProjectMRenderer::new(
                             preset_dir,
@@ -3884,15 +3939,37 @@ impl AppModel {
         }
     }
 
+    /// Bumps the library reload generation counter, invalidating any
+    /// in-flight async result tagged with an older generation. Call this
+    /// once at the start of every new reload/scan that should supersede
+    /// earlier work.
+    fn begin_reload_generation(&mut self) -> u64 {
+        self.reload_generation += 1;
+        self.reload_generation
+    }
+
+    /// True when an async library result tagged with `generation`/
+    /// `provider_id` is stale — superseded by a later reload/scan or a
+    /// provider switch — and must be ignored without mutating state.
+    fn is_stale_reload(&self, generation: u64, provider_id: &str) -> bool {
+        reload_result_is_stale(
+            self.reload_generation,
+            self.registry.active_id(),
+            generation,
+            provider_id,
+        )
+    }
+
     fn reload_library(&mut self) -> Task<cosmic::Action<Message>> {
         let provider = match self.registry.active_shared() {
             Some(p) => p,
             None => return Task::none(),
         };
         let provider_type = provider.provider_type();
+        let generation = self.begin_reload_generation();
 
         match provider_type {
-            crate::provider::ProviderType::Local => self.reload_library_local(provider),
+            crate::provider::ProviderType::Local => self.reload_library_local(provider, generation),
             crate::provider::ProviderType::Mpd | crate::provider::ProviderType::Subsonic => {
                 // Clear existing data before incremental loading begins.
                 self.all_tracks.clear();
@@ -3901,7 +3978,7 @@ impl AppModel {
                 self.cover_images.clear();
                 self.artist_avatars.clear();
                 self.library_scanning = true;
-                self.reload_library_incremental(provider, provider_type)
+                self.reload_library_incremental(provider, provider_type, generation)
             }
         }
     }
@@ -3910,7 +3987,9 @@ impl AppModel {
     fn reload_library_local(
         &self,
         provider: Arc<dyn MusicProvider + Send + Sync>,
+        generation: u64,
     ) -> Task<cosmic::Action<Message>> {
+        let provider_id = provider.id().to_string();
         cosmic::task::future(async move {
             let provider_clone = Arc::clone(&provider);
             let (tracks, albums, artists) = tokio::task::spawn_blocking(move || {
@@ -3964,6 +4043,8 @@ impl AppModel {
             }
 
             cosmic::Action::App(Message::LibraryLoaded {
+                generation,
+                provider_id,
                 tracks,
                 albums,
                 artists,
@@ -3983,6 +4064,7 @@ impl AppModel {
         &self,
         provider: Arc<dyn MusicProvider + Send + Sync>,
         provider_type: crate::provider::ProviderType,
+        generation: u64,
     ) -> Task<cosmic::Action<Message>> {
         // Downcast to concrete provider types for paged access.
         // We clone the Arc'd provider references from self.
@@ -4011,7 +4093,10 @@ impl AppModel {
                             Err(e) => {
                                 tracing::error!("MPD list_album_names failed: {e}");
                                 _ = emitter
-                                    .send(cosmic::Action::App(Message::LibraryLoadComplete))
+                                    .send(cosmic::Action::App(Message::LibraryLoadComplete {
+                                        generation,
+                                        provider_id: active_id.clone(),
+                                    }))
                                     .await;
                                 return;
                             }
@@ -4062,6 +4147,8 @@ impl AppModel {
 
                             _ = emitter
                                 .send(cosmic::Action::App(Message::LibraryBatch {
+                                    generation,
+                                    provider_id: active_id.clone(),
                                     albums,
                                     cover_images,
                                     cover_art_bytes,
@@ -4133,6 +4220,8 @@ impl AppModel {
 
                             _ = emitter
                                 .send(cosmic::Action::App(Message::LibraryBatch {
+                                    generation,
+                                    provider_id: active_id.clone(),
                                     albums,
                                     cover_images,
                                     cover_art_bytes,
@@ -4153,7 +4242,10 @@ impl AppModel {
                 }
 
                 _ = emitter
-                    .send(cosmic::Action::App(Message::LibraryLoadComplete))
+                    .send(cosmic::Action::App(Message::LibraryLoadComplete {
+                        generation,
+                        provider_id: active_id.clone(),
+                    }))
                     .await;
             },
         );
@@ -4710,4 +4802,43 @@ fn key_binds() -> HashMap<menu::KeyBind, MenuAction> {
 /// `None` (search inactive or the query is empty).
 fn unfilter_index(map: Option<&[usize]>, i: usize) -> usize {
     map.map_or(i, |m| m[i])
+}
+
+/// Pure staleness check for an async library reload result.
+///
+/// `true` when the result's `(generation, provider_id)` no longer matches
+/// the currently active reload — i.e. it was superseded by a later
+/// reload/scan or a provider switch — and must be discarded without
+/// mutating library data or `library_scanning`.
+fn reload_result_is_stale(
+    current_generation: u64,
+    current_provider_id: &str,
+    result_generation: u64,
+    result_provider_id: &str,
+) -> bool {
+    result_generation != current_generation || result_provider_id != current_provider_id
+}
+
+#[cfg(test)]
+mod reload_generation_tests {
+    use super::reload_result_is_stale;
+
+    #[test]
+    fn matching_generation_and_provider_is_not_stale() {
+        assert!(!reload_result_is_stale(3, "mpd-home", 3, "mpd-home"));
+    }
+
+    #[test]
+    fn result_from_a_superseded_reload_is_stale() {
+        // A second reload bumped the generation before this result arrived.
+        assert!(reload_result_is_stale(3, "mpd-home", 2, "mpd-home"));
+    }
+
+    #[test]
+    fn result_from_a_different_provider_is_stale_even_at_current_generation() {
+        // The generation counter alone can't catch a switch back to the
+        // same numeric generation on a different provider, so identity
+        // must be checked independently.
+        assert!(reload_result_is_stale(3, "mpd-home", 3, "subsonic-server"));
+    }
 }

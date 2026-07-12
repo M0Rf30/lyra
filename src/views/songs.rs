@@ -6,7 +6,6 @@ use crate::views::{common, list_row_button_class};
 use cosmic::cosmic_theme::palette::WithAlpha;
 use cosmic::iced::alignment::Horizontal;
 use cosmic::iced::{Alignment, Length, Size};
-use cosmic::prelude::*;
 use cosmic::widget;
 
 /// Fixed width of the leading track-number / now-playing indicator column.

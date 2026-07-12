@@ -33,8 +33,8 @@ symphonia = { git = "https://github.com/M0Rf30/Symphonia.git", rev = "e0649c9c77
     "dsd",
 ] }
 cpal = "0.18"
-rubato = "3.0"
-audioadapter-buffers = "3.0"
+rubato = "4.0"
+audioadapter-buffers = "4.0"
 # Internal-only locks in the playback engine (e.g. the gapless/crossfade
 # look-ahead slot) that are always locked and immediately unwrapped, never
 # held across an `.await` — parking_lot's non-poisoning guards are the

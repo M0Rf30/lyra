@@ -10,7 +10,6 @@ use crate::views::list_row_button_class;
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
-use cosmic::prelude::*;
 use cosmic::widget;
 
 /// Messages from the genres view.

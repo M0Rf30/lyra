@@ -37,37 +37,64 @@ impl LibraryScanner {
     #[tracing::instrument(skip(db), level = "debug")]
     pub fn scan(db: &LibraryDb, dirs: &[PathBuf]) -> Result<usize, String> {
         let mut count = 0;
+        let mut complete_roots = Vec::new();
 
         for dir in dirs {
-            if !dir.exists() {
-                tracing::warn!("Music directory does not exist: {}", dir.display());
-                continue;
+            match std::fs::metadata(dir) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    tracing::warn!("Music root is not a directory: {}", dir.display());
+                    continue;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::warn!("Music directory does not exist: {}", dir.display());
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!("Cannot access music directory {}: {error}", dir.display());
+                    continue;
+                }
             }
 
-            for entry in WalkDir::new(dir)
-                .follow_links(true)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
+            let mut complete = true;
+            for entry in WalkDir::new(dir).follow_links(true) {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        tracing::warn!(
+                            "Failed to traverse music directory {}: {error}",
+                            dir.display()
+                        );
+                        complete = false;
+                        continue;
+                    }
+                };
                 let path = entry.path();
-
                 if !Self::is_audio_file(path) {
                     continue;
                 }
 
-                // Check if we need to rescan based on mtime
-                let mtime = std::fs::metadata(path)
-                    .and_then(|m| m.modified())
+                let metadata = match std::fs::metadata(path) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => {
+                        tracing::warn!("Cannot access track {}: {error}", path.display());
+                        complete = false;
+                        continue;
+                    }
+                };
+                let mtime = metadata
+                    .modified()
                     .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs() as i64)
                     .unwrap_or(0);
 
                 let path_str = path.to_string_lossy();
                 if let Some(existing_mtime) = db.get_track_mtime(&path_str)
                     && existing_mtime == mtime
                 {
-                    continue; // File hasn't changed
+                    continue;
                 }
 
                 match Self::read_metadata(path) {
@@ -83,15 +110,15 @@ impl LibraryScanner {
                     }
                 }
             }
+            if complete {
+                complete_roots.push(dir.clone());
+            }
         }
 
-        // Clean up tracks that no longer exist
-        if let Ok(removed) = db.remove_missing_tracks()
-            && removed > 0
-        {
+        let removed = db.remove_missing_tracks(&complete_roots)?;
+        if removed > 0 {
             tracing::info!("Removed {removed} missing tracks from library");
         }
-
         Ok(count)
     }
 
@@ -258,5 +285,73 @@ impl LibraryScanner {
             rg_track_gain,
             rg_album_gain,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn temp_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "lyra-scanner-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn local_track(path: PathBuf) -> Track {
+        Track {
+            id: 0,
+            path: path.clone(),
+            title: String::new(),
+            artist: String::new(),
+            album_artist: String::new(),
+            album: String::new(),
+            genre: String::new(),
+            track_number: 0,
+            disc_number: 0,
+            year: 0,
+            duration: Duration::ZERO,
+            bitrate: 0,
+            sample_rate: 0,
+            provider_id: Arc::from("local"),
+            source_uri: path.to_string_lossy().into_owned(),
+            is_favorite: false,
+            rating: None,
+            rg_track_gain: None,
+            rg_album_gain: None,
+        }
+    }
+
+    #[test]
+    fn unavailable_root_preserves_existing_tracks() {
+        let db = LibraryDb::open_memory().unwrap();
+        let root = temp_root("missing-root");
+        db.upsert_track(&local_track(root.join("gone.mp3")), 0)
+            .unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(LibraryScanner::scan(&db, &[root]).unwrap(), 0);
+        assert_eq!(db.all_tracks(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn successful_root_scan_removes_deleted_tracks() {
+        let db = LibraryDb::open_memory().unwrap();
+        let root = temp_root("deleted-track");
+        db.upsert_track(&local_track(root.join("gone.mp3")), 0)
+            .unwrap();
+
+        assert_eq!(LibraryScanner::scan(&db, &[root.clone()]).unwrap(), 0);
+        assert!(db.all_tracks(None).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 }

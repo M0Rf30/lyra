@@ -41,8 +41,8 @@ pub type Result<T, E = PlayerError> = std::result::Result<T, E>;
 /// strictly require a matching extension — this list only ever feeds a
 /// [`Hint`], never gates whether a file is attempted.
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "flac", "mp3", "ogg", "oga", "opus", "wav", "wave", "aiff", "aif", "m4a", "mp4", "aac",
-    "alac", "ape", "wv", "mpc", "dsf", "dff", "webm", "mka", "caf",
+    "flac", "mp3", "ogg", "oga", "opus", "wav", "wave", "aiff", "aif", "m4a", "mp4", "aac", "alac",
+    "ape", "wv", "mpc", "dsf", "dff", "webm", "mka", "caf",
 ];
 
 /// Minimal audio format descriptor. Dependency-free by design — lyra has no
@@ -109,6 +109,46 @@ pub struct SymphoniaDecoder {
     channel_data_layout: Option<ChannelDataLayout>,
     bit_order: Option<BitOrder>,
     uses_pcm_conversion: bool,
+}
+
+const MAX_CONSECUTIVE_DSD_RESETS: usize = 1024;
+
+enum DsdPacketEvent<T> {
+    Packet { track_id: u32, packet: T },
+    Reset,
+    End,
+}
+
+fn next_dsd_packet<T>(
+    track_id: u32,
+    mut next_event: impl FnMut() -> Result<DsdPacketEvent<T>>,
+    mut reset: impl FnMut(),
+) -> Result<Option<T>> {
+    let mut consecutive_resets = 0;
+
+    loop {
+        match next_event()? {
+            DsdPacketEvent::Packet {
+                track_id: packet_track_id,
+                packet,
+            } => {
+                consecutive_resets = 0;
+                if packet_track_id == track_id {
+                    return Ok(Some(packet));
+                }
+            }
+            DsdPacketEvent::Reset => {
+                consecutive_resets += 1;
+                if consecutive_resets > MAX_CONSECUTIVE_DSD_RESETS {
+                    return Err(PlayerError(
+                        "Too many consecutive DSD decoder resets".to_owned(),
+                    ));
+                }
+                reset();
+            }
+            DsdPacketEvent::End => return Ok(None),
+        }
+    }
 }
 
 impl SymphoniaDecoder {
@@ -459,26 +499,33 @@ impl SymphoniaDecoder {
     pub fn read_dsd_raw(&mut self, buffer: &mut Vec<u8>) -> Result<usize> {
         buffer.clear();
 
-        // Read next packet.
-        let packet = match self.reader.next_packet() {
-            Ok(Some(packet)) => packet,
-            Ok(None) => return Ok(0),
-            Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Ok(0);
-            }
-            Err(SymphoniaError::ResetRequired) => {
-                self.decoder.reset();
-                return self.read_dsd_raw(buffer);
-            }
-            Err(e) => {
-                return Err(PlayerError(format!("Failed to read DSD packet: {e}")));
-            }
-        };
+        let track_id = self.track_id;
+        let packet = {
+            let reader = &mut self.reader;
+            let decoder = &mut self.decoder;
+            next_dsd_packet(
+                track_id,
+                || match reader.next_packet() {
+                    Ok(Some(packet)) => Ok(DsdPacketEvent::Packet {
+                        track_id: packet.track_id,
+                        packet,
+                    }),
+                    Ok(None) => Ok(DsdPacketEvent::End),
+                    Err(SymphoniaError::IoError(e))
+                        if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                    {
+                        Ok(DsdPacketEvent::End)
+                    }
+                    Err(SymphoniaError::ResetRequired) => Ok(DsdPacketEvent::Reset),
+                    Err(e) => Err(PlayerError(format!("Failed to read DSD packet: {e}"))),
+                },
+                || decoder.reset(),
+            )
+        }?;
 
-        // Skip packets from other tracks.
-        if packet.track_id != self.track_id {
-            return self.read_dsd_raw(buffer);
-        }
+        let Some(packet) = packet else {
+            return Ok(0);
+        };
 
         // For DSD, the packet buffer contains raw DSD data.
         // Copy it directly without decoding.
@@ -511,5 +558,48 @@ impl Decoder for SymphoniaDecoder {
     }
     fn duration(&self) -> Option<f64> {
         self.duration()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dsd_packet_skip_loop_handles_many_events() {
+        let mut skipped = 100_000;
+        let packet = next_dsd_packet(
+            1,
+            || {
+                if skipped == 0 {
+                    Ok(DsdPacketEvent::Packet {
+                        track_id: 1,
+                        packet: 7,
+                    })
+                } else {
+                    skipped -= 1;
+                    Ok(DsdPacketEvent::Packet {
+                        track_id: 2,
+                        packet: 0,
+                    })
+                }
+            },
+            || {},
+        )
+        .unwrap();
+
+        assert_eq!(packet, Some(7));
+    }
+
+    #[test]
+    fn dsd_packet_skip_loop_rejects_repeated_resets() {
+        let error = next_dsd_packet(
+            1,
+            || Ok::<_, PlayerError>(DsdPacketEvent::<()>::Reset),
+            || {},
+        )
+        .unwrap_err();
+
+        assert_eq!(error.0, "Too many consecutive DSD decoder resets");
     }
 }

@@ -10,7 +10,6 @@ use crate::autoeq::AutoEQProfileMetadata;
 use crate::player::equalizer::{BAND_LABELS, EqPresetData, PresetSource};
 use crate::views::list_row_button_class;
 use cosmic::iced::{Alignment, Length};
-use cosmic::prelude::*;
 use cosmic::widget;
 
 /// Messages from the equalizer view.

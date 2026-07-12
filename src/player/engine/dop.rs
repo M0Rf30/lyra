@@ -173,8 +173,7 @@ impl DopEncoder {
             }
             ChannelDataLayout::Interleaved => {
                 // Interleaved layout: [L0, R0, L1, R1, L2, R2, ...]
-                let num_frames =
-                    dsd_data.len() / (self.channels * dsd_bytes_per_channel_per_frame);
+                let num_frames = dsd_data.len() / (self.channels * dsd_bytes_per_channel_per_frame);
 
                 // Reserve space for output
                 output.clear();
@@ -278,9 +277,13 @@ mod tests {
     #[test]
     fn test_interleaved_layout_and_lsb_first_reversal() {
         // LSB-first source must be bit-reversed to MSB-first in the DoP output.
-        let mut encoder =
-            DopEncoder::new(2822400, 2, ChannelDataLayout::Interleaved, BitOrder::LsbFirst)
-                .unwrap();
+        let mut encoder = DopEncoder::new(
+            2822400,
+            2,
+            ChannelDataLayout::Interleaved,
+            BitOrder::LsbFirst,
+        )
+        .unwrap();
         // Interleaved: L0,L1 = 0x01,0x02 ; R0,R1 = 0x03,0x04 for frame 0
         let dsd_data = vec![0x01, 0x02, 0x03, 0x04];
         let mut output = Vec::new();

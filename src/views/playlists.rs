@@ -4,12 +4,11 @@
 //! and a detail view showing tracks in a selected playlist.
 
 use crate::fl;
-use crate::library::{Playlist, Track};
+use crate::library::Playlist;
 use crate::views::common;
 use crate::views::list_row_button_class;
 use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
-use cosmic::prelude::*;
 use cosmic::widget;
 
 /// Messages from the playlists view.

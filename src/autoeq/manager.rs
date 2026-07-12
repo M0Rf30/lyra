@@ -13,7 +13,6 @@ const PROFILE_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60); // 3
 /// Manager for fetching and caching AutoEQ profiles.
 pub struct AutoEQManager {
     cache_dir: PathBuf,
-    timeout: Duration,
     http_client: reqwest::Client,
     memory_cache: HashMap<String, CacheEntry>,
     lru_order: VecDeque<String>,
@@ -37,7 +36,6 @@ impl AutoEQManager {
 
         Ok(Self {
             cache_dir,
-            timeout,
             http_client,
             memory_cache: HashMap::new(),
             lru_order: VecDeque::new(),

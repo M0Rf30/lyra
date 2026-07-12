@@ -10,9 +10,10 @@ use crate::library::{Album, Artist, CoverSource, Playlist, Track, TrackSource};
 use mpd_client::Client;
 use mpd_client::client::{ConnectWithPasswordError, ConnectionEvents};
 use mpd_client::commands::{
-    self, AddToPlaylist, Crossfade, CurrentSong, DeletePlaylist, Find, GetPlaylist, GetPlaylists,
-    List, ReplayGainMode, SaveQueueAsPlaylist, SetRandom, SetRepeat, SetReplayGainMode, SetSingle,
-    SingleMode, Status, StickerDelete, StickerFind, StickerGet, StickerSet, Update,
+    self, AddToPlaylist, ClearPlaylist, Crossfade, CurrentSong, DeletePlaylist, Find, GetPlaylist,
+    GetPlaylists, List, ReplayGainMode, SaveQueueAsPlaylist, SetRandom, SetRepeat,
+    SetReplayGainMode, SetSingle, SingleMode, Status, StickerDelete, StickerFind, StickerGet,
+    StickerSet, Update,
 };
 use mpd_client::filter::{Filter, Operator};
 use mpd_client::responses;
@@ -645,12 +646,23 @@ impl MusicProvider for MpdProvider {
         let name_owned = name.to_string();
         self.block_on(async {
             let client = self.get_client().await?;
-            // MPD `save` saves the current queue as a playlist.
-            // We create an empty playlist by saving and then clearing it.
+            // MPD's `playlistclear` only clears an *existing* stored
+            // playlist — it does not reliably create one. `save` creates
+            // the playlist (as a snapshot of the live queue, which is left
+            // untouched), then `playlistclear` wipes that snapshot so the
+            // stored playlist ends up genuinely empty regardless of what
+            // was in the queue. If the clear fails, best-effort delete the
+            // playlist `save` just created so we don't leave a non-empty
+            // one behind.
             client
                 .command(SaveQueueAsPlaylist(&name_owned))
                 .await
                 .map_err(mpd_err("save"))?;
+
+            if let Err(e) = client.command(ClearPlaylist(&name_owned)).await {
+                let _ = client.command(DeletePlaylist(&name_owned)).await;
+                return Err(mpd_err("playlistclear")(e));
+            }
 
             Ok(Playlist {
                 id: name_owned.clone(),
@@ -835,5 +847,146 @@ impl MusicProvider for MpdProvider {
             let tracks: Vec<Track> = songs.iter().map(|s| self.song_to_track(s)).collect();
             Ok(tracks)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::Mutex as PlMutex;
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    /// Minimal fake MPD server tracking stored playlists and a pre-seeded
+    /// live queue. Every command line received is forwarded on `tx` so the
+    /// test can assert exactly what was sent to the server. `playlistclear`
+    /// on a playlist that doesn't exist yet is rejected with an `ACK`, just
+    /// like real MPD — it only clears an *existing* stored playlist.
+    fn spawn_fake_mpd(
+        queue: Vec<String>,
+    ) -> (u16, mpsc::Receiver<String>, Arc<PlMutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake MPD listener");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel();
+        let live_queue = Arc::new(PlMutex::new(queue));
+        let live_queue_clone = Arc::clone(&live_queue);
+
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept fake MPD connection");
+            let mut writer = stream.try_clone().expect("clone fake MPD stream");
+            let mut reader = BufReader::new(stream);
+            writer.write_all(b"OK MPD 0.23.5\n").unwrap();
+
+            let mut playlists: HashMap<String, Vec<String>> = HashMap::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let cmd = line.trim_end().to_string();
+                if cmd.is_empty() {
+                    continue;
+                }
+                let _ = tx.send(cmd.clone());
+
+                if cmd == "idle" {
+                    // `idle` blocks until `noidle` cancels it; defer the
+                    // single combined response to that point.
+                    continue;
+                } else if cmd == "noidle" {
+                    writer.write_all(b"OK\n").unwrap();
+                } else if let Some(name) = cmd.strip_prefix("playlistclear ") {
+                    if playlists.contains_key(name) {
+                        playlists.insert(name.to_string(), Vec::new());
+                        writer.write_all(b"OK\n").unwrap();
+                    } else {
+                        writer
+                            .write_all(b"ACK [50@0] {playlistclear} No such playlist\n")
+                            .unwrap();
+                    }
+                } else if let Some(name) = cmd.strip_prefix("save ") {
+                    // `save` snapshots the live queue into a new stored
+                    // playlist; the live queue itself is left untouched.
+                    playlists.insert(name.to_string(), live_queue_clone.lock().clone());
+                    writer.write_all(b"OK\n").unwrap();
+                } else if let Some(name) = cmd.strip_prefix("rm ") {
+                    playlists.remove(name);
+                    writer.write_all(b"OK\n").unwrap();
+                } else if let Some(name) = cmd.strip_prefix("listplaylistinfo ") {
+                    for uri in playlists.get(name).cloned().unwrap_or_default() {
+                        writer
+                            .write_all(format!("file: {uri}\n").as_bytes())
+                            .unwrap();
+                    }
+                    writer.write_all(b"OK\n").unwrap();
+                } else if cmd.starts_with("sticker get") {
+                    writer
+                        .write_all(b"ACK [5@0] {} unknown command \"sticker\"\n")
+                        .unwrap();
+                } else {
+                    writer.write_all(b"OK\n").unwrap();
+                }
+            }
+        });
+
+        (port, rx, live_queue)
+    }
+
+    #[test]
+    fn create_playlist_does_not_copy_a_non_empty_live_queue() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let seed_queue = vec!["track-a.mp3".to_string(), "track-b.mp3".to_string()];
+        let (port, commands, live_queue) = spawn_fake_mpd(seed_queue.clone());
+
+        let provider = MpdProvider::new(
+            MpdConfig {
+                id: "mpd-test".into(),
+                name: "Test".into(),
+                host: "127.0.0.1".into(),
+                port,
+                password: None,
+            },
+            runtime.handle().clone(),
+        );
+
+        runtime
+            .block_on(provider.connect_command())
+            .expect("connect to fake MPD");
+
+        let playlist = provider
+            .create_playlist("new-playlist")
+            .expect("create_playlist should succeed");
+        assert_eq!(playlist.track_count, 0);
+        assert!(playlist.tracks.is_empty());
+
+        // The server requires `save` (create) before `playlistclear` (wipe)
+        // will succeed on a brand-new playlist, so seeing this succeed at
+        // all proves both commands were sent in that order.
+        let mut saw_save = false;
+        let mut saw_playlistclear = false;
+        while let Ok(cmd) = commands.try_recv() {
+            if cmd == "save new-playlist" {
+                saw_save = true;
+            }
+            if cmd == "playlistclear new-playlist" {
+                assert!(saw_save, "playlistclear must be sent after save: {cmd}");
+                saw_playlistclear = true;
+            }
+        }
+        assert!(saw_save, "expected a save command");
+        assert!(saw_playlistclear, "expected a playlistclear command");
+
+        // The stored playlist ends up genuinely empty...
+        let fetched = provider
+            .get_playlist("new-playlist")
+            .expect("get_playlist should succeed");
+        assert!(fetched.tracks.is_empty());
+        assert_eq!(fetched.track_count, 0);
+
+        // ...and the live queue was never touched.
+        assert_eq!(*live_queue.lock(), seed_queue);
     }
 }

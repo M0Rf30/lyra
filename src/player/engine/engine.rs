@@ -26,17 +26,17 @@
 
 use std::num::NonZero;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use parking_lot::Mutex;
 use symphonia::core::codecs::audio::{BitOrder, ChannelDataLayout};
 
-use super::crossfade;
 use super::cpal_utils;
+use super::crossfade;
 use super::decoder::{AudioFormat as DecoderFormat, SymphoniaDecoder};
 use super::dop::DopEncoder;
 use super::dop_output::DopOutput;
@@ -88,7 +88,13 @@ fn select_dsd_pcm_rate(device_rate: u32, supports_rate: impl Fn(u32) -> bool) ->
         .iter()
         .copied()
         .find(|&r| r >= device_rate && supports_rate(r))
-        .or_else(|| DSD_PCM_RATES.iter().rev().copied().find(|&r| supports_rate(r)))
+        .or_else(|| {
+            DSD_PCM_RATES
+                .iter()
+                .rev()
+                .copied()
+                .find(|&r| supports_rate(r))
+        })
         .unwrap_or(88_200)
 }
 
@@ -104,7 +110,11 @@ fn select_dsd_pcm_rate(device_rate: u32, supports_rate: impl Fn(u32) -> bool) ->
 /// advertises — which underruns and leaves DSD ultrasonic noise in-band.
 ///
 /// Ported verbatim from rmpd's `engine.rs` (see the report's §5/§9).
-fn dsd_output_target_rate(decode_rate: u32, device_rate: u32, native_decode_ok: bool) -> Option<u32> {
+fn dsd_output_target_rate(
+    decode_rate: u32,
+    device_rate: u32,
+    native_decode_ok: bool,
+) -> Option<u32> {
     if native_decode_ok || decode_rate == device_rate {
         None
     } else {
@@ -138,7 +148,11 @@ impl PlaySource {
     fn open_decoder(self) -> Result<SymphoniaDecoder> {
         match self {
             PlaySource::LocalFile(path) => SymphoniaDecoder::open(&path),
-            PlaySource::Reader { url, client, hint_extension } => {
+            PlaySource::Reader {
+                url,
+                client,
+                hint_extension,
+            } => {
                 let reader = HttpRangeReader::new(url, Some(client)).map_err(PlayerError)?;
                 let byte_len = {
                     let len = reader.content_length();
@@ -381,7 +395,8 @@ impl PlaybackEngine {
 
     /// Set the crossfade duration in seconds (`0.0` = disabled/gapless-only).
     pub fn set_crossfade(&self, seconds: f32) {
-        self.crossfade_bits.store(seconds.max(0.0).to_bits(), Ordering::Release);
+        self.crossfade_bits
+            .store(seconds.max(0.0).to_bits(), Ordering::Release);
     }
 
     /// Pre-queue `source` for a gapless (claimed at end-of-stream) or
@@ -390,7 +405,10 @@ impl PlaybackEngine {
     /// mechanism actually fires is decided by the playback thread based on
     /// the current crossfade setting, not by the caller.
     pub fn queue_next(&self, source: PlaySource, replay_gain_db: Option<f32>) {
-        *self.next_track.lock() = Some(PendingTrack { source, replay_gain_db });
+        *self.next_track.lock() = Some(PendingTrack {
+            source,
+            replay_gain_db,
+        });
         // Matches the old `TrackBoundarySource`'s eager reset: queuing a next
         // track immediately un-signals "finished" for the currently playing
         // one, exactly as constructing a new wrapped source used to.
@@ -476,7 +494,8 @@ fn playback_thread_main(
         let mut dsd_target_rate = None;
         if decoder.is_dsd() {
             match try_dop(&decoder) {
-                Ok((encoder, output)) => match run_dsd(decoder, encoder, output, &command_rx, &ctx) {
+                Ok((encoder, output)) => match run_dsd(decoder, encoder, output, &command_rx, &ctx)
+                {
                     DsdOutcome::Advance(next_decoder, next_gain) => {
                         decoder = next_decoder;
                         gain = next_gain;
@@ -540,10 +559,17 @@ fn open_pending(pending: PendingTrack) -> Option<(SymphoniaDecoder, f32)> {
 fn try_dop(decoder: &SymphoniaDecoder) -> Result<(DopEncoder, DopOutput)> {
     let dsd_sample_rate = decoder.sample_rate();
     let channels = decoder.channels();
-    let channel_layout = decoder.channel_data_layout().unwrap_or(ChannelDataLayout::Planar);
+    let channel_layout = decoder
+        .channel_data_layout()
+        .unwrap_or(ChannelDataLayout::Planar);
     let bit_order = decoder.bit_order().unwrap_or(BitOrder::LsbFirst);
 
-    let encoder = DopEncoder::new(dsd_sample_rate, channels as usize, channel_layout, bit_order)?;
+    let encoder = DopEncoder::new(
+        dsd_sample_rate,
+        channels as usize,
+        channel_layout,
+        bit_order,
+    )?;
     let mut output = DopOutput::new(encoder.pcm_sample_rate(), channels)?;
     output.start()?;
     Ok((encoder, output))
@@ -648,9 +674,10 @@ fn run_dsd(
         }
 
         total_bytes += bytes_read as u64;
-        ctx.status
-            .position_nanos
-            .store(units_to_nanos(total_bytes, bytes_per_second), Ordering::Release);
+        ctx.status.position_nanos.store(
+            units_to_nanos(total_bytes, bytes_per_second),
+            Ordering::Release,
+        );
     }
 }
 
@@ -677,17 +704,28 @@ struct PcmSink {
 }
 
 impl PcmSink {
-    fn new(format: DecoderFormat, dsd_target_rate: Option<u32>, ctx: &ThreadContext) -> Result<Self> {
+    fn new(
+        format: DecoderFormat,
+        dsd_target_rate: Option<u32>,
+        ctx: &ThreadContext,
+    ) -> Result<Self> {
         let out_format = OutputFormat {
             sample_rate: format.sample_rate,
             channels: format.channels,
             bits_per_sample: format.bits_per_sample,
         };
         let mut output = match dsd_target_rate {
-            Some(rate) => {
-                CpalOutput::with_target_rate(out_format, ResamplerQuality::default(), DEFAULT_BUFFER_TIME_MS, rate)?
-            }
-            None => CpalOutput::new(out_format, ResamplerQuality::default(), DEFAULT_BUFFER_TIME_MS)?,
+            Some(rate) => CpalOutput::with_target_rate(
+                out_format,
+                ResamplerQuality::default(),
+                DEFAULT_BUFFER_TIME_MS,
+                rate,
+            )?,
+            None => CpalOutput::new(
+                out_format,
+                ResamplerQuality::default(),
+                DEFAULT_BUFFER_TIME_MS,
+            )?,
         };
         output.start()?;
 
@@ -790,7 +828,13 @@ fn run_pcm(
         }
 
         if let Ok(EngineCommand::Seek(pos)) = command_rx.try_recv() {
-            apply_seek(&mut decoder, pos, samples_per_second, &mut total_samples, ctx);
+            apply_seek(
+                &mut decoder,
+                pos,
+                samples_per_second,
+                &mut total_samples,
+                ctx,
+            );
             sink.eq.reset_states();
         }
 
@@ -814,9 +858,11 @@ fn run_pcm(
                     Some((next_decoder, next_gain))
                         if !next_decoder.is_dsd() && next_decoder.format() == format =>
                     {
-                        let window =
-                            crossfade::window_samples_secs(format.sample_rate, format.channels, crossfade_secs)
-                                as u64;
+                        let window = crossfade::window_samples_secs(
+                            format.sample_rate,
+                            format.channels,
+                            crossfade_secs,
+                        ) as u64;
                         match run_crossfade(
                             &mut decoder,
                             next_decoder,
@@ -828,7 +874,11 @@ fn run_pcm(
                             command_rx,
                             ctx,
                         ) {
-                            CrossfadeOutcome::Transitioned { decoder: nd, gain: ng, samples_played } => {
+                            CrossfadeOutcome::Transitioned {
+                                decoder: nd,
+                                gain: ng,
+                                samples_played,
+                            } => {
                                 ctx.status.track_finished.store(true, Ordering::Release);
                                 decoder = nd;
                                 gain = ng;
@@ -837,9 +887,10 @@ fn run_pcm(
                                 ctx.status
                                     .duration_nanos
                                     .store(secs_to_nanos(decoder.duration()), Ordering::Release);
-                                ctx.status
-                                    .position_nanos
-                                    .store(units_to_nanos(total_samples, samples_per_second), Ordering::Release);
+                                ctx.status.position_nanos.store(
+                                    units_to_nanos(total_samples, samples_per_second),
+                                    Ordering::Release,
+                                );
                                 continue 'buf;
                             }
                             CrossfadeOutcome::Abandoned => continue 'buf,
@@ -913,9 +964,10 @@ fn run_pcm(
         }
 
         total_samples += samples_read as u64;
-        ctx.status
-            .position_nanos
-            .store(units_to_nanos(total_samples, samples_per_second), Ordering::Release);
+        ctx.status.position_nanos.store(
+            units_to_nanos(total_samples, samples_per_second),
+            Ordering::Release,
+        );
     }
 }
 
@@ -1090,5 +1142,6 @@ fn units_to_nanos(units: u64, units_per_second: u64) -> u64 {
 }
 
 fn secs_to_nanos(secs: Option<f64>) -> u64 {
-    secs.map(|s| (s.max(0.0) * 1_000_000_000.0) as u64).unwrap_or(0)
+    secs.map(|s| (s.max(0.0) * 1_000_000_000.0) as u64)
+        .unwrap_or(0)
 }

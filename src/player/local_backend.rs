@@ -13,12 +13,12 @@
 
 use super::PlaybackState;
 use super::backend::{PlaybackBackend, PlayerError};
-use super::engine::engine::{PlaybackEngine, PlaySource};
+use super::engine::engine::{PlaySource, PlaybackEngine};
 use super::eq_source::{EqController, new_shared_coeffs};
 use crate::library::TrackSource;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 /// Local audio playback backend, driven by a dedicated [`PlaybackEngine`].
@@ -92,7 +92,8 @@ impl LocalBackend {
 
     /// Internal: play a local file.
     fn play_local_file(&mut self, path: PathBuf) -> Result<(), PlayerError> {
-        self.engine.play(PlaySource::LocalFile(path), self.replay_gain_db)?;
+        self.engine
+            .play(PlaySource::LocalFile(path), self.replay_gain_db)?;
         self.state = PlaybackState::Playing;
         Ok(())
     }
@@ -192,7 +193,8 @@ impl PlaybackBackend for LocalBackend {
     fn queue_next(&mut self, source: TrackSource) -> Result<(), PlayerError> {
         match source {
             TrackSource::LocalFile(path) => {
-                self.engine.queue_next(PlaySource::LocalFile(path), self.replay_gain_db);
+                self.engine
+                    .queue_next(PlaySource::LocalFile(path), self.replay_gain_db);
                 Ok(())
             }
             TrackSource::HttpStream(url) => {
@@ -214,7 +216,9 @@ impl PlaybackBackend for LocalBackend {
                 );
                 Ok(())
             }
-            TrackSource::MpdFile(_) => Err(PlayerError("MPD files should use MpdBackend".to_string())),
+            TrackSource::MpdFile(_) => {
+                Err(PlayerError("MPD files should use MpdBackend".to_string()))
+            }
         }
     }
 }

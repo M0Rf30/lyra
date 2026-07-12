@@ -10,7 +10,6 @@ use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::text::{Ellipsize, EllipsizeHeightLimit, Wrapping};
 use cosmic::iced::widget::Stack;
 use cosmic::iced::{Alignment, Color, Length};
-use cosmic::prelude::*;
 use cosmic::widget;
 use cosmic::widget::tooltip::Position as TooltipPosition;
 use std::time::Duration;
@@ -234,7 +233,7 @@ fn seek_bar_row<'a>(
         .push(widget::text::body(format_time(display_position)))
         .push(
             widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
-                .step(0.001)
+                .step(0.001_f32)
                 .on_release(NowPlayingMessage::SeekCommit)
                 .width(Length::Fill),
         )
@@ -421,7 +420,7 @@ fn utility_row<'a>(
         .push(widget::icon::from_name(volume_icon_name).size(20))
         .push(
             widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
-                .step(0.01)
+                .step(0.01_f32)
                 .width(Length::Fixed(160.0)),
         )
         .push(transport_button(
@@ -865,8 +864,7 @@ pub fn expanded_now_playing<'a>(
             let cosmic = theme.cosmic();
             (cosmic.on_bg_color().into(), cosmic.palette.neutral_7.into())
         };
-        let left_panel_content: cosmic::Element<'_, NowPlayingMessage> = if lyrics_overlay_active
-        {
+        let left_panel_content: cosmic::Element<'_, NowPlayingMessage> = if lyrics_overlay_active {
             crate::views::lyrics::lyrics_overlay_view::<NowPlayingMessage>(
                 lyrics,
                 lyrics_loading,
@@ -1027,9 +1025,13 @@ pub fn expanded_now_playing<'a>(
         #[cfg(feature = "visualizer")]
         if visualizer_active {
             let dbl_click_layer: cosmic::Element<'_, NowPlayingMessage> = widget::mouse_area(
-                widget::container(widget::Space::new().width(Length::Fill).height(Length::Fill))
-                    .width(Length::Fill)
-                    .height(Length::Fill),
+                widget::container(
+                    widget::Space::new()
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill),
             )
             .on_double_press(NowPlayingMessage::ToggleVizFullscreen)
             .into();

@@ -41,7 +41,9 @@ impl HttpRangeReader {
         let response = client
             .get(&url)
             .send()
-            .map_err(|e| format!("HTTP request failed: {e}"))?;
+            .map_err(|e| format!("HTTP request failed: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("HTTP request returned an error status: {e}"))?;
 
         let content_length = response.content_length().unwrap_or(0);
 
@@ -82,10 +84,31 @@ impl HttpRangeReader {
             .send()
             .map_err(|e| io::Error::other(format!("HTTP Range request failed: {e}")))?;
 
-        let status = response.status();
-        if !status.is_success() && status.as_u16() != 206 {
+        if byte_offset > 0 {
+            if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+                return Err(io::Error::other(format!(
+                    "HTTP Range request returned {} instead of 206 Partial Content",
+                    response.status()
+                )));
+            }
+
+            let range_start = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("bytes "))
+                .and_then(|value| value.split_once('-'))
+                .and_then(|(start, _)| start.parse::<u64>().ok());
+
+            if range_start != Some(byte_offset) {
+                return Err(io::Error::other(format!(
+                    "HTTP Range response Content-Range does not start at byte {byte_offset}"
+                )));
+            }
+        } else if !response.status().is_success() {
             return Err(io::Error::other(format!(
-                "HTTP Range request returned {status}"
+                "HTTP Range request returned {}",
+                response.status()
             )));
         }
 
@@ -154,21 +177,167 @@ impl Seek for HttpRangeReader {
             && forward_delta < 256 * 1024
             && let Some(ref mut response) = self.response
         {
-            let mut remaining = forward_delta;
-            let mut skip_buf = [0u8; 8192];
-            while remaining > 0 {
-                let to_read = remaining.min(skip_buf.len() as u64) as usize;
-                let n = response.read(&mut skip_buf[..to_read])?;
-                if n == 0 {
-                    break; // EOF
-                }
-                remaining -= n as u64;
+            let (skipped, error) = {
+                let mut skipped = 0;
+                let mut remaining = forward_delta;
+                let mut skip_buf = [0u8; 8192];
+                let error = loop {
+                    let to_read = remaining.min(skip_buf.len() as u64) as usize;
+                    match response.read(&mut skip_buf[..to_read]) {
+                        Ok(0) => {
+                            break Some(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "HTTP response ended before forward seek completed",
+                            ));
+                        }
+                        Ok(n) => {
+                            skipped += n as u64;
+                            remaining -= n as u64;
+                            if remaining == 0 {
+                                break None;
+                            }
+                        }
+                        Err(error) => break Some(error),
+                    }
+                };
+                (skipped, error)
+            };
+            self.position += skipped;
+            if let Some(error) = error {
+                return Err(error);
             }
-            self.position = target;
             return Ok(self.position);
         }
 
         self.open_at(target)?;
         Ok(self.position)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn server(responses: Vec<String>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                let _ = stream.read(&mut request);
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        format!("http://{address}/track")
+    }
+
+    fn response(status: &str, headers: &[(&str, &str)], body: &str) -> String {
+        let mut response = format!("HTTP/1.1 {status}\r\nConnection: close\r\n");
+        for (name, value) in headers {
+            response.push_str(name);
+            response.push_str(": ");
+            response.push_str(value);
+            response.push_str("\r\n");
+        }
+        response.push_str("\r\n");
+        response.push_str(body);
+        response
+    }
+
+    const LARGE_OFFSET: u64 = 256 * 1024;
+    const LARGE_LENGTH: u64 = LARGE_OFFSET + 1;
+
+    #[test]
+    fn rejects_initial_error_status() {
+        let url = server(vec![response(
+            "404 Not Found",
+            &[("Content-Length", "0")],
+            "",
+        )]);
+
+        assert!(HttpRangeReader::new(url, None).is_err());
+    }
+
+    #[test]
+    fn rejects_range_response_that_ignores_range_header() {
+        let url = server(vec![
+            response(
+                "200 OK",
+                &[("Content-Length", &LARGE_LENGTH.to_string())],
+                "",
+            ),
+            response("200 OK", &[("Content-Length", "0")], ""),
+        ]);
+        let mut reader = HttpRangeReader::new(url, None).unwrap();
+
+        assert!(reader.seek(SeekFrom::Start(LARGE_OFFSET)).is_err());
+    }
+
+    #[test]
+    fn accepts_matching_partial_content_range() {
+        let url = server(vec![
+            response(
+                "200 OK",
+                &[("Content-Length", &LARGE_LENGTH.to_string())],
+                "",
+            ),
+            response(
+                "206 Partial Content",
+                &[
+                    ("Content-Length", "0"),
+                    (
+                        "Content-Range",
+                        &format!("bytes {LARGE_OFFSET}-{LARGE_OFFSET}/{LARGE_LENGTH}"),
+                    ),
+                ],
+                "",
+            ),
+        ]);
+        let mut reader = HttpRangeReader::new(url, None).unwrap();
+
+        assert_eq!(
+            reader.seek(SeekFrom::Start(LARGE_OFFSET)).unwrap(),
+            LARGE_OFFSET
+        );
+    }
+
+    #[test]
+    fn rejects_mismatched_partial_content_range() {
+        let url = server(vec![
+            response(
+                "200 OK",
+                &[("Content-Length", &LARGE_LENGTH.to_string())],
+                "",
+            ),
+            response(
+                "206 Partial Content",
+                &[
+                    ("Content-Length", "0"),
+                    ("Content-Range", "bytes 7-8/262145"),
+                ],
+                "",
+            ),
+        ]);
+        let mut reader = HttpRangeReader::new(url, None).unwrap();
+
+        assert!(reader.seek(SeekFrom::Start(LARGE_OFFSET)).is_err());
+    }
+
+    #[test]
+    fn truncated_forward_seek_keeps_consumed_position() {
+        let url = server(vec![response(
+            "200 OK",
+            &[("Transfer-Encoding", "chunked")],
+            "3\r\nabc\r\n0\r\n\r\n",
+        )]);
+        let mut reader = HttpRangeReader::new(url, None).unwrap();
+
+        let error = reader.seek(SeekFrom::Start(5)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(reader.position, 3);
     }
 }

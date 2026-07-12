@@ -9,7 +9,7 @@ pub mod local;
 pub mod mpd;
 pub mod subsonic;
 
-use crate::library::{Album, Artist, CoverSource, Lyrics, Track, TrackSource};
+use crate::library::{Album, Artist, Lyrics, Track, TrackSource};
 use std::collections::HashMap;
 use std::fmt;
 

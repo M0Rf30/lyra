@@ -9,7 +9,6 @@ use crate::views::{card_button_class, list_row_button_class};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::{Alignment, Length, Padding};
-use cosmic::prelude::*;
 use cosmic::widget;
 
 /// Messages from the album view.

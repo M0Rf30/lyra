@@ -387,10 +387,7 @@ mod tests {
         let expected = buf.clone();
         filter.apply(&mut buf);
         for (i, (out, input)) in buf.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (out - input).abs() < 1e-5,
-                "sample {i}: {out} != {input}"
-            );
+            assert!((out - input).abs() < 1e-5, "sample {i}: {out} != {input}");
         }
     }
 
