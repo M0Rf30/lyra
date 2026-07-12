@@ -9,6 +9,7 @@ pub mod lyrics;
 pub mod now_playing;
 pub mod playlists;
 pub mod providers;
+pub mod settings;
 pub mod songs;
 pub mod tag_editor;
 

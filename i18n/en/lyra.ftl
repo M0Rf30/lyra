@@ -41,7 +41,6 @@ subsonic-url = Server URL
 subsonic-username = Username
 subsonic-password = Password
 subsonic-accept-invalid-certs = Accept invalid TLS certificates
-local-music-dirs = Local Music Directories
 no-music-dirs = No music directories configured
 no-providers = No remote providers configured
 playlists = Playlists
@@ -63,12 +62,17 @@ replay-gain-off = Off
 replay-gain-track = Track
 replay-gain-album = Album
 replay-gain-auto = Auto
-playback-settings = Playback Settings
 transcoding = Transcoding
 transcoding-bitrate = Max Bitrate
 transcoding-format = Format
 transcoding-original = Original
 transcoding-bandwidth-estimate = Estimated bandwidth savings: ~{ $percent }%
+
+# SettingsView
+settings-library = Library
+settings-playback = Playback
+settings-shortcuts = Shortcuts
+settings-about = About
 
 # RowFoundation
 favorite-add = Add to favorites

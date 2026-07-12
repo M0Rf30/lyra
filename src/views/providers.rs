@@ -3,7 +3,6 @@
 //! Provider settings view — configure MPD and Subsonic servers.
 
 use crate::fl;
-use crate::provider::ProviderType;
 use cosmic::iced::Alignment;
 use cosmic::iced::core::Color;
 use cosmic::widget;
@@ -169,10 +168,6 @@ impl SubsonicEditState {
 /// Messages emitted by the providers settings view.
 #[derive(Debug, Clone)]
 pub enum ProvidersMessage {
-    // Local music directories
-    AddMusicDir,
-    RemoveMusicDir(usize),
-
     // MPD
     AddMpd,
     EditName(usize, String),
@@ -197,120 +192,18 @@ pub enum ProvidersMessage {
     SubsonicTranscodingBitrate(usize, Option<u32>),
     /// Subsonic transcoding format changed (server index, format or None for original).
     SubsonicTranscodingFormat(usize, Option<String>),
-
-    // Playback settings (Task 107, 108)
-    /// Crossfade duration changed (seconds, 0 = disabled).
-    SetCrossfade(f32),
-    /// Replay gain mode changed.
-    SetReplayGainMode(crate::config::ReplayGainMode),
 }
 
 // ── View ───────────────────────────────────────────────────────────────────
 
 /// Render the providers settings panel (shown in the context drawer).
-#[allow(clippy::too_many_arguments)]
 pub fn providers_view<'a>(
-    music_dirs: &'a [std::path::PathBuf],
     mpd_servers: &'a [MpdEditState],
     mpd_connection_status: &'a [Option<String>],
     subsonic_servers: &'a [SubsonicEditState],
     subsonic_connection_status: &'a [Option<String>],
-    crossfade_secs: f32,
-    replay_gain_mode: crate::config::ReplayGainMode,
-    active_provider_type: Option<ProviderType>,
 ) -> cosmic::Element<'a, ProvidersMessage> {
     let mut col = widget::Column::new().spacing(16).padding(16);
-
-    // ── Playback settings (Task 107, 108) ──────────────────────────────────
-    col = col.push(widget::text::title4(fl!("playback-settings")));
-
-    // Task 107: Crossfade duration slider (0-12s)
-    // Task 122: Only show for Local and MPD providers (not Subsonic)
-    let show_crossfade = active_provider_type
-        .map(|pt| matches!(pt, ProviderType::Local | ProviderType::Mpd))
-        .unwrap_or(true);
-
-    if show_crossfade {
-        let crossfade_label = if crossfade_secs < 0.1 {
-            fl!("crossfade-disabled")
-        } else {
-            fl!("crossfade-seconds", secs = format!("{:.0}", crossfade_secs))
-        };
-
-        col = col.push(
-            widget::Column::new()
-                .push(
-                    widget::Row::new()
-                        .push(widget::text::body(fl!("crossfade-duration")))
-                        .push(widget::space::horizontal())
-                        .push(widget::text::caption(crossfade_label)),
-                )
-                .push(
-                    widget::slider(0.0..=12.0, crossfade_secs, ProvidersMessage::SetCrossfade)
-                        .step(0.5_f32),
-                )
-                .spacing(4),
-        );
-    }
-
-    // Task 108: Replay gain mode selector
-    // Task 122: Only show for Local and MPD providers
-    let show_replay_gain = active_provider_type
-        .map(|pt| matches!(pt, ProviderType::Local | ProviderType::Mpd))
-        .unwrap_or(true);
-
-    if show_replay_gain {
-        use crate::config::ReplayGainMode;
-
-        let modes = [
-            (ReplayGainMode::Off, fl!("replay-gain-off")),
-            (ReplayGainMode::Track, fl!("replay-gain-track")),
-            (ReplayGainMode::Album, fl!("replay-gain-album")),
-            (ReplayGainMode::Auto, fl!("replay-gain-auto")),
-        ];
-
-        let mut mode_row = widget::Row::new().spacing(8).align_y(Alignment::Center);
-        mode_row = mode_row.push(widget::text::body(fl!("replay-gain")));
-        for (mode, label) in modes {
-            let btn = if mode == replay_gain_mode {
-                widget::button::standard(label)
-            } else {
-                widget::button::text(label)
-            };
-            mode_row = mode_row.push(btn.on_press(ProvidersMessage::SetReplayGainMode(mode)));
-        }
-        col = col.push(mode_row);
-    }
-
-    col = col.push(widget::divider::horizontal::default());
-
-    // ── Local music directories ────────────────────────────────────────────
-    col = col.push(widget::text::title4(fl!("local-music-dirs")));
-
-    if music_dirs.is_empty() {
-        col = col.push(widget::text::body(fl!("no-music-dirs")));
-    } else {
-        for (i, dir) in music_dirs.iter().enumerate() {
-            col = col.push(
-                widget::Row::new()
-                    .push(
-                        widget::text::body(dir.to_string_lossy()).width(cosmic::iced::Length::Fill),
-                    )
-                    .push(
-                        widget::button::destructive(fl!("remove"))
-                            .on_press(ProvidersMessage::RemoveMusicDir(i)),
-                    )
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-            );
-        }
-    }
-
-    col = col.push(
-        widget::button::text(fl!("add-music-folder")).on_press(ProvidersMessage::AddMusicDir),
-    );
-
-    col = col.push(widget::divider::horizontal::default());
 
     // Remote providers section
     let has_any = !mpd_servers.is_empty() || !subsonic_servers.is_empty();

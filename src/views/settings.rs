@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: GPL-3.0
+
+//! Settings view — library folders, playback defaults, and quick links to
+//! the Equalizer/Providers drawers and the About dialog.
+
+use crate::config::ReplayGainMode;
+use crate::fl;
+use cosmic::iced::Length;
+use cosmic::widget;
+use std::path::PathBuf;
+
+/// Messages emitted by the settings view.
+///
+/// All variants map onto existing `Message` variants in `app.rs` — this
+/// page reuses the flows already owned by the music-dir picker, the
+/// playback engine, and the context drawers rather than introducing new
+/// mutations.
+#[derive(Debug, Clone)]
+pub enum SettingsMessage {
+    /// Launch the XDG portal directory picker to add a music folder.
+    AddMusicDir,
+    /// Remove a music directory by index.
+    RemoveMusicDir(usize),
+    /// Crossfade duration changed (seconds, 0 = disabled).
+    SetCrossfade(f32),
+    /// Replay gain mode changed.
+    SetReplayGainMode(ReplayGainMode),
+    /// Playback volume changed.
+    SetVolume(f32),
+    /// Open the Equalizer context drawer.
+    OpenEqualizer,
+    /// Open the Providers context drawer.
+    OpenProviders,
+    /// Open the About dialog.
+    OpenAbout,
+}
+
+/// All replay gain modes, in the order shown in the dropdown.
+const REPLAY_GAIN_MODES: [ReplayGainMode; 4] = [
+    ReplayGainMode::Off,
+    ReplayGainMode::Track,
+    ReplayGainMode::Album,
+    ReplayGainMode::Auto,
+];
+
+/// Render the Settings page.
+pub fn view<'a>(
+    music_dirs: &'a [PathBuf],
+    crossfade_secs: f32,
+    replay_gain_mode: ReplayGainMode,
+    volume: f32,
+) -> cosmic::Element<'a, SettingsMessage> {
+    let col = widget::Column::new()
+        .spacing(24)
+        .push(library_section(music_dirs))
+        .push(playback_section(crossfade_secs, replay_gain_mode, volume))
+        .push(shortcuts_section())
+        .push(about_section());
+
+    widget::scrollable(widget::container(col).width(Length::Fill).padding(24))
+        .height(Length::Fill)
+        .into()
+}
+
+/// Library section: configured music directories, with add/remove.
+fn library_section<'a>(music_dirs: &'a [PathBuf]) -> cosmic::Element<'a, SettingsMessage> {
+    let mut section = widget::settings::section().title(fl!("settings-library"));
+
+    if music_dirs.is_empty() {
+        section = section.add(widget::text::body(fl!("no-music-dirs")));
+    } else {
+        for (i, dir) in music_dirs.iter().enumerate() {
+            section = section.add(widget::settings::item(
+                dir.to_string_lossy(),
+                widget::button::destructive(fl!("remove"))
+                    .on_press(SettingsMessage::RemoveMusicDir(i)),
+            ));
+        }
+    }
+
+    section = section.add(
+        widget::button::text(fl!("add-music-folder")).on_press(SettingsMessage::AddMusicDir),
+    );
+
+    section.into()
+}
+
+/// Playback section: crossfade duration, replay gain mode, volume.
+fn playback_section<'a>(
+    crossfade_secs: f32,
+    replay_gain_mode: ReplayGainMode,
+    volume: f32,
+) -> cosmic::Element<'a, SettingsMessage> {
+    let crossfade_label = if crossfade_secs < 0.1 {
+        fl!("crossfade-disabled")
+    } else {
+        fl!("crossfade-seconds", secs = format!("{:.0}", crossfade_secs))
+    };
+    let crossfade_item = widget::settings::item::builder(fl!("crossfade-duration"))
+        .description(crossfade_label)
+        .control(
+            widget::slider(0.0..=12.0, crossfade_secs, SettingsMessage::SetCrossfade)
+                .step(0.5_f32)
+                .width(Length::Fixed(200.0)),
+        );
+
+    let replay_gain_labels = vec![
+        fl!("replay-gain-off"),
+        fl!("replay-gain-track"),
+        fl!("replay-gain-album"),
+        fl!("replay-gain-auto"),
+    ];
+    let replay_gain_selected = REPLAY_GAIN_MODES
+        .iter()
+        .position(|mode| *mode == replay_gain_mode);
+    let replay_gain_item = widget::settings::item::builder(fl!("replay-gain")).control(
+        widget::dropdown(replay_gain_labels, replay_gain_selected, |i| {
+            SettingsMessage::SetReplayGainMode(REPLAY_GAIN_MODES[i])
+        }),
+    );
+
+    let volume_item = widget::settings::item::builder(fl!("volume")).control(
+        widget::slider(0.0..=1.0, volume, SettingsMessage::SetVolume)
+            .step(0.01_f32)
+            .width(Length::Fixed(200.0)),
+    );
+
+    widget::settings::section()
+        .title(fl!("settings-playback"))
+        .add(crossfade_item)
+        .add(replay_gain_item)
+        .add(volume_item)
+        .into()
+}
+
+/// Shortcuts section: whole-row links into the Equalizer/Providers drawers.
+fn shortcuts_section<'a>() -> cosmic::Element<'a, SettingsMessage> {
+    widget::settings::section()
+        .title(fl!("settings-shortcuts"))
+        .add(drawer_link_row(fl!("equalizer"), SettingsMessage::OpenEqualizer))
+        .add(drawer_link_row(fl!("providers"), SettingsMessage::OpenProviders))
+        .into()
+}
+
+/// About section: whole-row link into the About dialog.
+fn about_section<'a>() -> cosmic::Element<'a, SettingsMessage> {
+    widget::settings::section()
+        .title(fl!("settings-about"))
+        .add(drawer_link_row(fl!("about"), SettingsMessage::OpenAbout))
+        .into()
+}
+
+/// A settings row that is entirely clickable, opening a drawer/dialog via
+/// `message`, with a trailing chevron hinting at the navigation.
+fn drawer_link_row<'a>(
+    title: impl Into<std::borrow::Cow<'a, str>> + 'a,
+    message: SettingsMessage,
+) -> widget::list::ListButton<'a, SettingsMessage> {
+    widget::list::button(widget::settings::item(
+        title,
+        widget::icon::from_name("go-next-symbolic"),
+    ))
+    .on_press(message)
+}

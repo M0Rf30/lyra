@@ -10,7 +10,8 @@ use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{MusicProvider, ProviderRegistry};
 use crate::views::{
-    albums, artists, equalizer, genres, lyrics, now_playing, playlists, providers, songs,
+    albums, artists, equalizer, genres, lyrics, now_playing, playlists, providers, settings,
+    songs,
 };
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
@@ -237,6 +238,8 @@ pub enum Message {
     // Navigation / chrome
     LaunchUrl(String),
     ToggleContextPage(ContextPage),
+    /// Activates the Settings nav page (from the View menu).
+    OpenSettings,
     /// Tracks text input focus state for keyboard shortcuts.
     /// When true, text input has focus; when false, input lost focus.
     TextInputFocused(bool),
@@ -577,6 +580,11 @@ impl cosmic::Application for AppModel {
             .text(fl!("genres"))
             .data::<Page>(Page::Genres)
             .icon(icon::from_name("folder-music-symbolic"));
+
+        nav.insert()
+            .text(fl!("settings"))
+            .data::<Page>(Page::Settings)
+            .icon(icon::from_name("preferences-system-symbolic"));
 
         let about = About::default()
             .name(fl!("app-title"))
@@ -953,6 +961,7 @@ impl cosmic::Application for AppModel {
                         menu::Item::Button(fl!("search"), None, MenuAction::Search),
                         menu::Item::Button(fl!("equalizer"), None, MenuAction::Equalizer),
                         menu::Item::Button(fl!("providers"), None, MenuAction::Providers),
+                        menu::Item::Button(fl!("settings"), None, MenuAction::Settings),
                         menu::Item::Button(fl!("about"), None, MenuAction::About),
                     ],
                 ),
@@ -1070,21 +1079,13 @@ impl cosmic::Application for AppModel {
                 .title(fl!("equalizer"))
             }
             ContextPage::Providers => {
-                let active_provider_type = self.registry.active().map(|p| p.provider_type());
                 let providers_content = providers::providers_view(
-                    &self.config.music_dirs,
                     &self.mpd_edit_states,
                     &self.mpd_connection_status,
                     &self.subsonic_edit_states,
                     &self.subsonic_connection_status,
-                    self.config.crossfade_duration_secs,
-                    self.config.replay_gain_mode,
-                    active_provider_type,
                 )
                 .map(|msg| match msg {
-                    // Local music directories
-                    providers::ProvidersMessage::AddMusicDir => Message::AddMusicDir,
-                    providers::ProvidersMessage::RemoveMusicDir(i) => Message::RemoveMusicDir(i),
                     // MPD
                     providers::ProvidersMessage::AddMpd => Message::MpdAddServer,
                     providers::ProvidersMessage::EditName(i, v) => Message::MpdEditName(i, v),
@@ -1126,11 +1127,6 @@ impl cosmic::Application for AppModel {
                     }
                     providers::ProvidersMessage::SubsonicTranscodingFormat(i, f) => {
                         Message::SubsonicTranscodingFormat(i, f)
-                    }
-                    // Playback settings (Tasks 107, 108)
-                    providers::ProvidersMessage::SetCrossfade(v) => Message::SetCrossfade(v),
-                    providers::ProvidersMessage::SetReplayGainMode(m) => {
-                        Message::SetReplayGainMode(m)
                     }
                 });
 
@@ -1414,6 +1410,39 @@ impl cosmic::Application for AppModel {
                         genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
                     })
                 }
+            }
+
+            Page::Settings => {
+                let volume = self
+                    .player
+                    .as_ref()
+                    .map(|p| p.volume())
+                    .unwrap_or(self.config.volume);
+
+                settings::view(
+                    &self.config.music_dirs,
+                    self.config.crossfade_duration_secs,
+                    self.config.replay_gain_mode,
+                    volume,
+                )
+                .map(|msg| match msg {
+                    settings::SettingsMessage::AddMusicDir => Message::AddMusicDir,
+                    settings::SettingsMessage::RemoveMusicDir(i) => Message::RemoveMusicDir(i),
+                    settings::SettingsMessage::SetCrossfade(v) => Message::SetCrossfade(v),
+                    settings::SettingsMessage::SetReplayGainMode(m) => {
+                        Message::SetReplayGainMode(m)
+                    }
+                    settings::SettingsMessage::SetVolume(v) => Message::SetVolume(v),
+                    settings::SettingsMessage::OpenEqualizer => {
+                        Message::ToggleContextPage(ContextPage::Equalizer)
+                    }
+                    settings::SettingsMessage::OpenProviders => {
+                        Message::ToggleContextPage(ContextPage::Providers)
+                    }
+                    settings::SettingsMessage::OpenAbout => {
+                        Message::ToggleContextPage(ContextPage::About)
+                    }
+                })
             }
         };
 
@@ -2712,6 +2741,20 @@ impl cosmic::Application for AppModel {
                     }
                     Err(e) => {
                         tracing::error!("Failed to load AutoEQ profile: {}", e);
+                    }
+                }
+            }
+
+            Message::OpenSettings => {
+                let entities: Vec<_> = self.nav.iter().collect();
+                for entity in entities {
+                    if self
+                        .nav
+                        .data::<Page>(entity)
+                        .is_some_and(|p| *p == Page::Settings)
+                    {
+                        self.nav.activate(entity);
+                        break;
                     }
                 }
             }
@@ -4740,6 +4783,7 @@ pub enum Page {
     Songs,
     Playlists,
     Genres,
+    Settings,
 }
 
 /// Context drawer pages.
@@ -4758,6 +4802,7 @@ pub enum MenuAction {
     About,
     Equalizer,
     Providers,
+    Settings,
     ScanLibrary,
     AddMusicDir,
     Search,
@@ -4772,6 +4817,7 @@ impl menu::action::MenuAction for MenuAction {
             MenuAction::About => Message::ToggleContextPage(ContextPage::About),
             MenuAction::Equalizer => Message::ToggleContextPage(ContextPage::Equalizer),
             MenuAction::Providers => Message::ToggleContextPage(ContextPage::Providers),
+            MenuAction::Settings => Message::OpenSettings,
             MenuAction::ScanLibrary => Message::ScanLibrary,
             MenuAction::AddMusicDir => Message::AddMusicDir,
             MenuAction::Search => Message::ToggleLibrarySearch,
