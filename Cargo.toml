@@ -98,6 +98,11 @@ urlencoding = "2"
 md5 = "0.8"
 thiserror = "2"
 
+# Local file conversion / transcoding / CUE ripping (pure Rust — no C
+# bindings, so no lossy encoder or CD-drive ripping support)
+flacenc = "0.5"
+hound = "3.5"
+
 # Optional: tokio-console support for runtime introspection
 console-subscriber = { version = "0.5", optional = true }
 

@@ -3,6 +3,7 @@
 pub mod app;
 pub mod autoeq;
 pub mod config;
+pub mod convert;
 pub mod credentials;
 pub mod i18n;
 pub mod library;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 use crate::config::{Config, ReplayGainMode};
+use crate::convert::{ConvertJob, JobKind, JobState, OutputFormat, run_job};
 use crate::fl;
 use crate::library::{Album, Artist, LibraryDb, LibraryScanner, Lyrics, LyricsProvider, Track};
 use crate::online::podcast::{self, PodcastSearchResult};
@@ -14,8 +15,8 @@ use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{MusicProvider, ProviderRegistry};
 use crate::views::{
-    albums, artists, equalizer, genres, lyrics, now_playing, playlists, podcasts, providers,
-    settings, songs,
+    albums, artists, convert, equalizer, genres, lyrics, now_playing, playlists, podcasts,
+    providers, settings, songs,
 };
 use crate::views::radio as radio_view;
 use cosmic::app::context_drawer;
@@ -263,6 +264,21 @@ pub struct AppModel {
     /// slider/button without moving it).
     #[cfg(feature = "visualizer")]
     viz_hud_pointer_over: bool,
+
+    // Local file conversion / transcoding / CUE-ripping
+    /// Queued/running/finished conversion jobs, oldest first.
+    convert_jobs: Vec<ConvertJob>,
+    /// Output directory for new conversion jobs.
+    convert_out_dir: PathBuf,
+    /// Selected index into `OutputFormat::ALL`.
+    convert_format_index: usize,
+    /// Selected index into `views::convert::SAMPLE_RATE_OPTIONS`.
+    convert_rate_index: usize,
+    /// Monotonic id source for new jobs.
+    convert_next_id: u64,
+    /// Caps concurrently-running conversion jobs at 2, shared across every
+    /// in-flight job future.
+    convert_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 /// All application messages.
@@ -578,6 +594,19 @@ pub enum Message {
     /// A toast notification was dismissed (by timeout or user action).
     CloseToast(widget::toaster::ToastId),
 
+    // Convert / transcode / rip local files
+    ConvertAddFiles,
+    ConvertFilesPicked(Result<Vec<PathBuf>, String>),
+    ConvertPickOutputDir,
+    ConvertOutputDirPicked(Result<PathBuf, String>),
+    ConvertFormatSelected(usize),
+    ConvertRateSelected(usize),
+    ConvertStart,
+    ConvertCancelJob(u64),
+    ConvertClearFinished,
+    ConvertJobFinished(u64, JobState),
+    ConvertTick,
+
     // Application lifecycle
     Quit,
 }
@@ -652,6 +681,19 @@ impl From<radio_view::RadioMessage> for Message {
     }
 }
 
+impl From<convert::ConvertMessage> for Message {
+    fn from(msg: convert::ConvertMessage) -> Self {
+        match msg {
+            convert::ConvertMessage::AddFiles => Message::ConvertAddFiles,
+            convert::ConvertMessage::PickOutputDir => Message::ConvertPickOutputDir,
+            convert::ConvertMessage::FormatSelected(i) => Message::ConvertFormatSelected(i),
+            convert::ConvertMessage::RateSelected(i) => Message::ConvertRateSelected(i),
+            convert::ConvertMessage::StartQueue => Message::ConvertStart,
+            convert::ConvertMessage::CancelJob(id) => Message::ConvertCancelJob(id),
+            convert::ConvertMessage::ClearFinished => Message::ConvertClearFinished,
+        }
+    }
+}
 impl cosmic::Application for AppModel {
     type Executor = cosmic::executor::Default;
     type Flags = ();
@@ -709,10 +751,14 @@ impl cosmic::Application for AppModel {
             .icon(icon::from_name("network-wireless-symbolic"));
 
         nav.insert()
+            .text(fl!("convert"))
+            .data::<Page>(Page::Convert)
+            .icon(icon::from_name("media-import-audio-symbolic"));
+
+        nav.insert()
             .text(fl!("settings"))
             .data::<Page>(Page::Settings)
             .icon(icon::from_name("preferences-system-symbolic"));
-
         let about = About::default()
             .name(fl!("app-title"))
             .icon(widget::icon::from_svg_bytes(APP_ICON))
@@ -1052,6 +1098,14 @@ impl cosmic::Application for AppModel {
             viz_hud_idle_frames: 0,
             #[cfg(feature = "visualizer")]
             viz_hud_pointer_over: false,
+            convert_jobs: Vec::new(),
+            convert_out_dir: dirs::audio_dir()
+                .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
+                .join("Converted"),
+            convert_format_index: 0,
+            convert_rate_index: 0,
+            convert_next_id: 0,
+            convert_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         };
 
         app.rebuild_provider_list();
@@ -1628,6 +1682,14 @@ impl cosmic::Application for AppModel {
                     }
                 })
             }
+
+            Page::Convert => convert::convert_view(
+                &self.convert_jobs,
+                &self.convert_out_dir,
+                self.convert_format_index,
+                self.convert_rate_index,
+            )
+            .map(Message::from),
         };
 
         // Build bottom playback bar
@@ -1827,6 +1889,11 @@ impl cosmic::Application for AppModel {
                 MpdIdleKey { idx, provider },
                 mpd_idle_stream,
             ));
+        }
+
+        // Convert queue progress ticker (every 500ms while jobs are running)
+        if self.convert_jobs.iter().any(|j| j.state == JobState::Running) {
+            subs.push(Subscription::run(convert_tick_stream));
         }
 
         // Expand/collapse animation tick (~60fps, only during transitions)
@@ -4077,6 +4144,164 @@ impl cosmic::Application for AppModel {
                 }
             },
 
+            // -- Convert / transcode / rip --
+            Message::ConvertAddFiles => {
+                return cosmic::task::future(async {
+                    let result = async {
+                        use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
+
+                        let mut filter = FileFilter::new("Audio, Video & CUE Files");
+                        for ext in crate::player::engine::decoder::SUPPORTED_EXTENSIONS
+                            .iter()
+                            .chain(["cue", "mkv", "mov", "avi"].iter())
+                        {
+                            filter = filter.glob(&format!("*.{ext}"));
+                        }
+
+                        let selected = SelectedFiles::open_file()
+                            .title("Select Audio/Video Files or a CUE Sheet")
+                            .multiple(true)
+                            .modal(true)
+                            .filter(filter)
+                            .send()
+                            .await
+                            .map_err(|e| format!("Portal request failed: {e}"))?
+                            .response()
+                            .map_err(|e| format!("Portal response failed: {e}"))?;
+
+                        let mut paths = Vec::new();
+                        for uri in selected.uris() {
+                            let uri_str = uri.as_str();
+                            let path = uri_str
+                                .strip_prefix("file://")
+                                .ok_or_else(|| format!("Not a local file URI: {uri_str}"))
+                                .and_then(|encoded| {
+                                    urlencoding::decode(encoded)
+                                        .map(|d| PathBuf::from(d.as_ref()))
+                                        .map_err(|e| format!("Could not decode URI path: {e}"))
+                                })?;
+                            paths.push(path);
+                        }
+                        if paths.is_empty() {
+                            Err("No files selected".to_string())
+                        } else {
+                            Ok(paths)
+                        }
+                    }
+                    .await;
+                    cosmic::Action::App(Message::ConvertFilesPicked(result))
+                });
+            }
+
+            Message::ConvertFilesPicked(result) => match result {
+                Ok(paths) => {
+                    let format = OutputFormat::ALL[self.convert_format_index];
+                    let target_rate = convert::SAMPLE_RATE_OPTIONS[self.convert_rate_index];
+                    for path in paths {
+                        let kind = if path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case("cue"))
+                        {
+                            JobKind::CueSplit
+                        } else {
+                            JobKind::Convert
+                        };
+                        let id = self.convert_next_id;
+                        self.convert_next_id += 1;
+                        self.convert_jobs.push(ConvertJob::new(
+                            id,
+                            path,
+                            kind,
+                            format,
+                            target_rate,
+                            self.convert_out_dir.clone(),
+                        ));
+                    }
+                }
+                Err(e) => tracing::warn!("convert: file picker failed: {e}"),
+            },
+
+            Message::ConvertPickOutputDir => {
+                return cosmic::task::future(async {
+                    let result = async {
+                        use ashpd::desktop::file_chooser::SelectedFiles;
+
+                        let selected = SelectedFiles::open_file()
+                            .title("Select Output Directory")
+                            .directory(true)
+                            .modal(true)
+                            .send()
+                            .await
+                            .map_err(|e| format!("Portal request failed: {e}"))?
+                            .response()
+                            .map_err(|e| format!("Portal response failed: {e}"))?;
+
+                        let uris = selected.uris();
+                        if let Some(uri) = uris.first() {
+                            let uri_str = uri.as_str();
+                            uri_str
+                                .strip_prefix("file://")
+                                .ok_or_else(|| format!("Not a local file URI: {uri_str}"))
+                                .and_then(|encoded| {
+                                    urlencoding::decode(encoded)
+                                        .map(|d| PathBuf::from(d.as_ref()))
+                                        .map_err(|e| format!("Could not decode URI path: {e}"))
+                                })
+                        } else {
+                            Err("No directory selected".to_string())
+                        }
+                    }
+                    .await;
+                    cosmic::Action::App(Message::ConvertOutputDirPicked(result))
+                });
+            }
+
+            Message::ConvertOutputDirPicked(result) => match result {
+                Ok(path) => self.convert_out_dir = path,
+                Err(e) => tracing::warn!("convert: output directory picker failed: {e}"),
+            },
+
+            Message::ConvertFormatSelected(index) => self.convert_format_index = index,
+
+            Message::ConvertRateSelected(index) => self.convert_rate_index = index,
+
+            Message::ConvertStart => {
+                let mut tasks = Vec::new();
+                for job in &mut self.convert_jobs {
+                    if job.state == JobState::Queued {
+                        job.state = JobState::Running;
+                        let job_clone = job.clone();
+                        let semaphore = Arc::clone(&self.convert_semaphore);
+                        tasks.push(cosmic::task::future(async move {
+                            let (id, state) = run_job(job_clone, semaphore).await;
+                            cosmic::Action::App(Message::ConvertJobFinished(id, state))
+                        }));
+                    }
+                }
+                if !tasks.is_empty() {
+                    return Task::batch(tasks);
+                }
+            }
+
+            Message::ConvertJobFinished(id, state) => {
+                if let Some(job) = self.convert_jobs.iter_mut().find(|j| j.id == id) {
+                    job.state = state;
+                }
+            }
+
+            Message::ConvertCancelJob(id) => {
+                if let Some(job) = self.convert_jobs.iter().find(|j| j.id == id) {
+                    job.request_cancel();
+                }
+            }
+
+            Message::ConvertClearFinished => {
+                self.convert_jobs
+                    .retain(|j| matches!(j.state, JobState::Queued | JobState::Running));
+            }
+
+            Message::ConvertTick => {}
             Message::Quit => {
                 return cosmic::iced::exit();
             }
@@ -4173,6 +4398,22 @@ fn playback_tick_stream() -> impl Stream<Item = Message> {
             loop {
                 interval.tick().await;
                 _ = emitter.send(Message::PlaybackTick).await;
+            }
+        },
+    )
+}
+
+/// Convert-queue progress ticker: while jobs are running, periodically
+/// triggers a re-render so the UI picks up the latest atomic progress
+/// values written by the background job tasks.
+fn convert_tick_stream() -> impl Stream<Item = Message> {
+    cosmic::iced::stream::channel(
+        1,
+        |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                _ = emitter.send(Message::ConvertTick).await;
             }
         },
     )
@@ -5533,6 +5774,7 @@ pub enum Page {
     Genres,
     Podcasts,
     Radio,
+    Convert,
     Settings,
 }
 
