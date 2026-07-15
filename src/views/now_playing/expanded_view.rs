@@ -41,20 +41,13 @@ pub(super) const BACKDROP_SUBTEXT: Color = Color {
 
 /// Plain COSMIC surface background — used whenever there is no blurred
 /// cover-art backdrop to sit on top of, so panels match the active theme
-/// (light or dark) instead of a hard-coded color.
+/// (light or dark) and respect frosted-glass blur when the user has it
+/// enabled (`theme.transparent`, set by libcosmic from `frosted_windows`).
 fn theme_surface_class() -> cosmic::theme::Container<'static> {
     cosmic::theme::Container::custom(|theme| {
         let cosmic = theme.cosmic();
         cosmic::iced::widget::container::Style {
-            background: Some(
-                Color::from_rgba(
-                    cosmic.background(false).base.red,
-                    cosmic.background(false).base.green,
-                    cosmic.background(false).base.blue,
-                    1.0,
-                )
-                .into(),
-            ),
+            background: Some(cosmic.background(theme.transparent).base.into()),
             ..Default::default()
         }
     })
