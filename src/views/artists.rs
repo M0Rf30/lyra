@@ -5,7 +5,7 @@
 use crate::fl;
 use crate::library::{Album, Artist, CoverArt};
 use crate::views::common;
-use crate::views::list_row_button_class;
+use crate::views::{card_button_class, list_row_button_class};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::{Alignment, Length};
@@ -24,12 +24,23 @@ pub enum ArtistMessage {
     SetRating(String, u8),
     /// Filter by genre.
     FilterByGenre(String),
+    /// Toggle between grid and list layout.
+    ToggleViewMode,
 }
 
-/// Render the artist list.
-pub fn artist_list_view<'a>(
+/// Card artwork/label width for the grid layout — the avatar frame and
+/// clipped labels all share this so a card's art and caption line up.
+const CARD_WIDTH: f32 = 160.0;
+
+/// Fixed height for the two-line label block under each grid card, so
+/// every card in a row stays the same height regardless of text length.
+const CARD_LABEL_HEIGHT: f32 = 40.0;
+
+/// Render the artists view: card grid or list, depending on `mode`.
+pub fn artists_view<'a>(
     artists: &'a [Artist],
     artist_avatars: &'a std::collections::HashMap<String, widget::icon::Handle>,
+    mode: crate::config::ViewMode,
 ) -> cosmic::Element<'a, ArtistMessage> {
     if artists.is_empty() {
         return common::empty_state(
@@ -39,41 +50,141 @@ pub fn artist_list_view<'a>(
         );
     }
 
-    let mut list = widget::Column::new().spacing(2);
+    use crate::config::ViewMode;
 
-    for (index, artist) in artists.iter().enumerate() {
-        let avatar: cosmic::Element<'_, ArtistMessage> =
-            if let Some(handle) = artist_avatars.get(&artist.name) {
-                widget::icon::icon(handle.clone()).size(48).into()
-            } else {
-                widget::icon::from_name("avatar-default-symbolic")
-                    .size(48)
-                    .into()
-            };
+    let toggle_icon = match mode {
+        ViewMode::Grid => "view-list-symbolic",
+        ViewMode::List => "view-grid-symbolic",
+    };
+    let toggle_label = match mode {
+        ViewMode::Grid => fl!("switch-to-list"),
+        ViewMode::List => fl!("switch-to-grid"),
+    };
+    let toggle_btn = widget::tooltip(
+        widget::button::icon(widget::icon::from_name(toggle_icon).size(16))
+            .on_press(ArtistMessage::ToggleViewMode),
+        widget::text::caption(toggle_label),
+        widget::tooltip::Position::Bottom,
+    );
+    let header = widget::Row::new()
+        .push(widget::Space::new().width(Length::Fill))
+        .push(toggle_btn)
+        .padding(16);
 
-        let info = widget::Column::new()
-            .push(common::cell_text(artist.name.as_str()))
-            .push(common::cell_caption(artist_summary(artist)))
-            .spacing(2);
+    let content: cosmic::Element<'_, ArtistMessage> = match mode {
+        ViewMode::List => {
+            let mut list = widget::Column::new().spacing(2);
 
-        let row = widget::button::custom(
-            widget::Row::new()
-                .push(avatar)
-                .push(common::clipped_cell(info.into()))
-                .spacing(14)
-                .align_y(Alignment::Center)
-                .padding([10, 8]),
-        )
-        .on_press(ArtistMessage::SelectArtist(index))
-        .width(Length::Fill)
-        .class(list_row_button_class(false));
+            for (index, artist) in artists.iter().enumerate() {
+                let avatar: cosmic::Element<'_, ArtistMessage> =
+                    if let Some(handle) = artist_avatars.get(&artist.name) {
+                        widget::icon::icon(handle.clone()).size(48).into()
+                    } else {
+                        widget::icon::from_name("avatar-default-symbolic")
+                            .size(48)
+                            .into()
+                    };
 
-        list = list.push(row);
-    }
+                let info = widget::Column::new()
+                    .push(common::cell_text(artist.name.as_str()))
+                    .push(common::cell_caption(artist_summary(artist)))
+                    .spacing(2);
 
-    widget::scrollable(widget::container(list).padding(16).width(Length::Fill))
-        .height(Length::Fill)
-        .into()
+                let row = widget::button::custom(
+                    widget::Row::new()
+                        .push(avatar)
+                        .push(common::clipped_cell(info.into()))
+                        .spacing(14)
+                        .align_y(Alignment::Center)
+                        .padding([10, 8]),
+                )
+                .on_press(ArtistMessage::SelectArtist(index))
+                .width(Length::Fill)
+                .class(list_row_button_class(false));
+
+                list = list.push(row);
+            }
+
+            widget::scrollable(widget::container(list).padding(16).width(Length::Fill))
+                .height(Length::Fill)
+                .into()
+        }
+        ViewMode::Grid => {
+            let cards: Vec<cosmic::Element<'_, ArtistMessage>> = artists
+                .iter()
+                .enumerate()
+                .map(|(index, artist)| {
+                    let art_widget: cosmic::Element<'_, ArtistMessage> =
+                        if let Some(handle) = artist_avatars.get(&artist.name) {
+                            widget::icon::icon(handle.clone()).size(160).into()
+                        } else {
+                            let placeholder_icon: cosmic::Element<'_, ArtistMessage> =
+                                widget::icon::from_name("avatar-default-symbolic")
+                                    .size(64)
+                                    .into();
+                            widget::container(placeholder_icon)
+                                .width(CARD_WIDTH)
+                                .height(CARD_WIDTH)
+                                .align_x(Horizontal::Center)
+                                .align_y(Vertical::Center)
+                                .class(cosmic::theme::Container::Card)
+                                .into()
+                        };
+
+                    let label_block = widget::container(
+                        widget::Column::new()
+                            .push(
+                                widget::container(common::clipped_cell(
+                                    common::cell_text(artist.name.as_str()).into(),
+                                ))
+                                .width(CARD_WIDTH),
+                            )
+                            .push(
+                                widget::container(common::clipped_cell(
+                                    common::cell_caption(artist_summary(artist)).into(),
+                                ))
+                                .width(CARD_WIDTH),
+                            )
+                            .spacing(2),
+                    )
+                    .height(Length::Fixed(CARD_LABEL_HEIGHT));
+
+                    let artist_card = widget::Column::new()
+                        .push(
+                            widget::container(art_widget)
+                                .width(CARD_WIDTH)
+                                .height(CARD_WIDTH)
+                                .align_x(Horizontal::Center)
+                                .align_y(Vertical::Center),
+                        )
+                        .push(label_block)
+                        .spacing(8);
+
+                    widget::button::custom(artist_card)
+                        .on_press(ArtistMessage::SelectArtist(index))
+                        .padding(8)
+                        .class(card_button_class())
+                        .into()
+                })
+                .collect();
+
+            widget::scrollable(
+                widget::container(
+                    widget::flex_row(cards)
+                        .column_spacing(20)
+                        .row_spacing(20)
+                        .width(Length::Fill)
+                        .justify_content(widget::JustifyContent::Center),
+                )
+                .padding(16)
+                .width(Length::Fill),
+            )
+            .height(Length::Fill)
+            .into()
+        }
+    };
+
+    widget::Column::new().push(header).push(content).into()
 }
 
 /// Render the detail view for a selected artist.

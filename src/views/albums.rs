@@ -2,6 +2,7 @@
 
 //! Albums grid view - displays album covers in a responsive grid (Lollypop-style).
 
+use crate::config::ViewMode;
 use crate::fl;
 use crate::library::{Album, CoverArt, Playlist};
 use crate::views::common;
@@ -30,6 +31,8 @@ pub enum AlbumMessage {
     FilterByGenre(String),
     /// Add track to playlist (source_uri, playlist_id).
     AddToPlaylist(String, String),
+    /// Toggle between grid and list layout.
+    ToggleViewMode,
 }
 
 /// Card artwork/label width — the grid, art frame, and clipped labels all
@@ -61,10 +64,11 @@ fn secondary_caption<'a>(content: impl Into<std::borrow::Cow<'a, str>> + 'a) -> 
     }))
 }
 
-/// Render the album grid view.
-pub fn album_grid_view<'a>(
+/// Render the albums view: card grid or list, depending on `mode`.
+pub fn albums_view<'a>(
     albums: &'a [Album],
     cover_images: &'a std::collections::HashMap<String, widget::icon::Handle>,
+    mode: ViewMode,
 ) -> cosmic::Element<'a, AlbumMessage> {
     if albums.is_empty() {
         return common::empty_state(
@@ -74,110 +78,181 @@ pub fn album_grid_view<'a>(
         );
     }
 
-    let cards: Vec<cosmic::Element<'_, AlbumMessage>> = albums
-        .iter()
-        .enumerate()
-        .map(|(index, album)| {
-            let key = CoverArt::album_key(&album.artist, &album.name);
-            let art_widget: cosmic::Element<'_, AlbumMessage> =
-                if let Some(handle) = cover_images.get(&key) {
-                    widget::icon::icon(handle.clone()).size(160).into()
-                } else {
-                    let placeholder_icon: cosmic::Element<'_, AlbumMessage> =
+    let toggle_icon = match mode {
+        ViewMode::Grid => "view-list-symbolic",
+        ViewMode::List => "view-grid-symbolic",
+    };
+    let toggle_label = match mode {
+        ViewMode::Grid => fl!("switch-to-list"),
+        ViewMode::List => fl!("switch-to-grid"),
+    };
+    let toggle_btn = widget::tooltip(
+        widget::button::icon(widget::icon::from_name(toggle_icon).size(16))
+            .on_press(AlbumMessage::ToggleViewMode),
+        widget::text::caption(toggle_label),
+        widget::tooltip::Position::Bottom,
+    );
+    let header = widget::Row::new()
+        .push(widget::Space::new().width(Length::Fill))
+        .push(toggle_btn)
+        .padding(16);
+
+    let content: cosmic::Element<'a, AlbumMessage> = match mode {
+        ViewMode::Grid => {
+            let cards: Vec<cosmic::Element<'_, AlbumMessage>> = albums
+                .iter()
+                .enumerate()
+                .map(|(index, album)| {
+                    let key = CoverArt::album_key(&album.artist, &album.name);
+                    let art_widget: cosmic::Element<'_, AlbumMessage> =
+                        if let Some(handle) = cover_images.get(&key) {
+                            widget::icon::icon(handle.clone()).size(160).into()
+                        } else {
+                            let placeholder_icon: cosmic::Element<'_, AlbumMessage> =
+                                widget::icon::from_name("media-optical-cd-audio-symbolic")
+                                    .size(64)
+                                    .into();
+                            widget::container(placeholder_icon)
+                                .width(CARD_WIDTH)
+                                .height(CARD_WIDTH)
+                                .align_x(Horizontal::Center)
+                                .align_y(Vertical::Center)
+                                .class(cosmic::theme::Container::Card)
+                                .into()
+                        };
+
+                    // A missing or title-echoing artist still reserves the caption
+                    // line's height (a non-breaking space) so every card's label
+                    // block is exactly two lines tall and rows stay aligned.
+                    let has_distinct_artist = !album.artist.trim().is_empty()
+                        && !album.artist.trim().eq_ignore_ascii_case(album.name.trim());
+                    let artist_display = if has_distinct_artist {
+                        album.artist.as_str()
+                    } else {
+                        "\u{a0}"
+                    };
+
+                    let label_block = widget::container(
+                        widget::Column::new()
+                            .push(
+                                widget::container(common::clipped_cell(
+                                    common::cell_text(album.name.as_str()).into(),
+                                ))
+                                .width(CARD_WIDTH),
+                            )
+                            .push(
+                                widget::container(common::clipped_cell(
+                                    secondary_caption(artist_display).into(),
+                                ))
+                                .width(CARD_WIDTH),
+                            )
+                            .spacing(2),
+                    )
+                    .height(Length::Fixed(CARD_LABEL_HEIGHT));
+
+                    let album_card = widget::Column::new()
+                        .push(
+                            widget::container(art_widget)
+                                .width(CARD_WIDTH)
+                                .height(CARD_WIDTH)
+                                .align_x(Horizontal::Center)
+                                .align_y(Vertical::Center),
+                        )
+                        .push(label_block)
+                        .spacing(8);
+
+                    let tooltip_label = if has_distinct_artist {
+                        fl!(
+                            "album-tooltip",
+                            title = album.name.clone(),
+                            artist = album.artist.clone()
+                        )
+                    } else {
+                        album.name.clone()
+                    };
+
+                    widget::tooltip(
+                        widget::button::custom(album_card)
+                            .on_press(AlbumMessage::SelectAlbum(index))
+                            .padding(8)
+                            .class(card_button_class()),
+                        widget::text::caption(tooltip_label),
+                        widget::tooltip::Position::Top,
+                    )
+                    .into()
+                })
+                .collect();
+
+            let spacing = cosmic::theme::active().cosmic().spacing;
+
+            let grid = widget::flex_row(cards)
+                .column_spacing(20)
+                .row_spacing(20)
+                .width(Length::Fill)
+                .justify_content(widget::JustifyContent::Center);
+
+            widget::scrollable(
+                widget::container(grid)
+                    .padding(Padding {
+                        top: f32::from(spacing.space_m),
+                        right: f32::from(spacing.space_m) + SCROLLBAR_CLEARANCE,
+                        bottom: f32::from(spacing.space_m),
+                        left: f32::from(spacing.space_m),
+                    })
+                    .width(Length::Fill),
+            )
+            .height(Length::Fill)
+            .into()
+        }
+        ViewMode::List => {
+            let mut list = widget::Column::new().spacing(2);
+
+            for (index, album) in albums.iter().enumerate() {
+                let key = CoverArt::album_key(&album.artist, &album.name);
+                let art_widget: cosmic::Element<'_, AlbumMessage> =
+                    if let Some(handle) = cover_images.get(&key) {
+                        widget::icon::icon(handle.clone()).size(48).into()
+                    } else {
                         widget::icon::from_name("media-optical-cd-audio-symbolic")
-                            .size(64)
-                            .into();
-                    widget::container(placeholder_icon)
-                        .width(CARD_WIDTH)
-                        .height(CARD_WIDTH)
-                        .align_x(Horizontal::Center)
-                        .align_y(Vertical::Center)
-                        .class(cosmic::theme::Container::Card)
-                        .into()
+                            .size(48)
+                            .into()
+                    };
+
+                let has_distinct_artist = !album.artist.trim().is_empty()
+                    && !album.artist.trim().eq_ignore_ascii_case(album.name.trim());
+                let caption = if has_distinct_artist {
+                    album.artist.as_str()
+                } else {
+                    ""
                 };
 
-            // A missing or title-echoing artist still reserves the caption
-            // line's height (a non-breaking space) so every card's label
-            // block is exactly two lines tall and rows stay aligned.
-            let has_distinct_artist = !album.artist.trim().is_empty()
-                && !album.artist.trim().eq_ignore_ascii_case(album.name.trim());
-            let artist_display = if has_distinct_artist {
-                album.artist.as_str()
-            } else {
-                "\u{a0}"
-            };
+                let info = widget::Column::new()
+                    .push(common::cell_text(album.name.as_str()))
+                    .push(common::cell_caption(caption))
+                    .spacing(2);
 
-            let label_block = widget::container(
-                widget::Column::new()
-                    .push(
-                        widget::container(common::clipped_cell(
-                            common::cell_text(album.name.as_str()).into(),
-                        ))
-                        .width(CARD_WIDTH),
-                    )
-                    .push(
-                        widget::container(common::clipped_cell(
-                            secondary_caption(artist_display).into(),
-                        ))
-                        .width(CARD_WIDTH),
-                    )
-                    .spacing(2),
-            )
-            .height(Length::Fixed(CARD_LABEL_HEIGHT));
-
-            let album_card = widget::Column::new()
-                .push(
-                    widget::container(art_widget)
-                        .width(CARD_WIDTH)
-                        .height(CARD_WIDTH)
-                        .align_x(Horizontal::Center)
-                        .align_y(Vertical::Center),
+                let row = widget::button::custom(
+                    widget::Row::new()
+                        .push(art_widget)
+                        .push(common::clipped_cell(info.into()))
+                        .spacing(14)
+                        .align_y(Alignment::Center)
+                        .padding([10, 8]),
                 )
-                .push(label_block)
-                .spacing(8);
+                .on_press(AlbumMessage::SelectAlbum(index))
+                .width(Length::Fill)
+                .class(list_row_button_class(false));
 
-            let tooltip_label = if has_distinct_artist {
-                fl!(
-                    "album-tooltip",
-                    title = album.name.clone(),
-                    artist = album.artist.clone()
-                )
-            } else {
-                album.name.clone()
-            };
+                list = list.push(row);
+            }
 
-            widget::tooltip(
-                widget::button::custom(album_card)
-                    .on_press(AlbumMessage::SelectAlbum(index))
-                    .padding(8)
-                    .class(card_button_class()),
-                widget::text::caption(tooltip_label),
-                widget::tooltip::Position::Top,
-            )
-            .into()
-        })
-        .collect();
+            widget::scrollable(widget::container(list).padding(16).width(Length::Fill))
+                .height(Length::Fill)
+                .into()
+        }
+    };
 
-    let spacing = cosmic::theme::active().cosmic().spacing;
-
-    let grid = widget::flex_row(cards)
-        .column_spacing(20)
-        .row_spacing(20)
-        .width(Length::Fill)
-        .justify_content(widget::JustifyContent::Center);
-
-    widget::scrollable(
-        widget::container(grid)
-            .padding(Padding {
-                top: f32::from(spacing.space_m),
-                right: f32::from(spacing.space_m) + SCROLLBAR_CLEARANCE,
-                bottom: f32::from(spacing.space_m),
-                left: f32::from(spacing.space_m),
-            })
-            .width(Length::Fill),
-    )
-    .height(Length::Fill)
-    .into()
+    widget::Column::new().push(header).push(content).into()
 }
 
 pub fn album_detail_view<'a>(

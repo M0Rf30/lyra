@@ -114,6 +114,24 @@ impl RepeatMode {
     }
 }
 
+/// Layout mode for library browsing views (albums, artists, genres).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewMode {
+    Grid,
+    List,
+}
+
+impl ViewMode {
+    /// The other mode — used by the view-toggle button.
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Grid => Self::List,
+            Self::List => Self::Grid,
+        }
+    }
+}
+
 /// Replay gain mode for volume normalization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -154,6 +172,12 @@ pub struct Config {
     pub crossfade_duration_secs: f32,
     /// Replay gain mode.
     pub replay_gain_mode: ReplayGainMode,
+    /// Layout mode for the albums view.
+    pub albums_view_mode: ViewMode,
+    /// Layout mode for the artists view.
+    pub artists_view_mode: ViewMode,
+    /// Layout mode for the genres view.
+    pub genres_view_mode: ViewMode,
 }
 
 impl Default for Config {
@@ -180,6 +204,9 @@ impl Default for Config {
             subsonic_servers: Vec::new(),
             crossfade_duration_secs: 0.0,
             replay_gain_mode: ReplayGainMode::Off,
+            albums_view_mode: ViewMode::Grid,
+            artists_view_mode: ViewMode::List,
+            genres_view_mode: ViewMode::Grid,
         }
     }
 }

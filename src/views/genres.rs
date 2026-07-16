@@ -21,10 +21,15 @@ pub enum GenreMessage {
     BackToGrid,
     /// Play a specific track in the genre detail view.
     PlayTrack(usize),
+    /// Toggle between grid and list layout.
+    ToggleViewMode,
 }
 
-/// Render the genre grid view.
-pub fn genre_grid_view(genres: &[String]) -> cosmic::Element<'_, GenreMessage> {
+/// Render the genres view: card grid or list, depending on `mode`.
+pub fn genres_view(
+    genres: &[String],
+    mode: crate::config::ViewMode,
+) -> cosmic::Element<'_, GenreMessage> {
     if genres.is_empty() {
         return common::empty_state(
             "audio-x-generic-symbolic",
@@ -33,55 +38,110 @@ pub fn genre_grid_view(genres: &[String]) -> cosmic::Element<'_, GenreMessage> {
         );
     }
 
-    let cards: Vec<cosmic::Element<'_, GenreMessage>> = genres
-        .iter()
-        .enumerate()
-        .map(|(index, genre)| {
-            let icon_name = genre_icon_name(genre);
-            let genre_icon: cosmic::Element<'_, GenreMessage> =
-                widget::icon::from_name(icon_name).size(48).into();
+    use crate::config::ViewMode;
 
-            let icon_container: cosmic::Element<'_, GenreMessage> = widget::container(genre_icon)
-                .width(140)
-                .height(100)
-                .align_x(Horizontal::Center)
-                .align_y(Vertical::Center)
-                .class(cosmic::theme::Container::Card)
-                .into();
+    let toggle_icon = match mode {
+        ViewMode::Grid => "view-list-symbolic",
+        ViewMode::List => "view-grid-symbolic",
+    };
+    let toggle_label = match mode {
+        ViewMode::Grid => fl!("switch-to-list"),
+        ViewMode::List => fl!("switch-to-grid"),
+    };
+    let toggle_btn = widget::tooltip(
+        widget::button::icon(widget::icon::from_name(toggle_icon).size(16))
+            .on_press(GenreMessage::ToggleViewMode),
+        widget::text::caption(toggle_label),
+        widget::tooltip::Position::Bottom,
+    );
+    let header = widget::Row::new()
+        .push(widget::Space::new().width(Length::Fill))
+        .push(toggle_btn)
+        .padding(16);
 
-            let label = widget::container(common::clipped_cell(
-                common::cell_text(genre.as_str())
+    let content: cosmic::Element<'_, GenreMessage> = match mode {
+        ViewMode::Grid => {
+            let cards: Vec<cosmic::Element<'_, GenreMessage>> = genres
+                .iter()
+                .enumerate()
+                .map(|(index, genre)| {
+                    let icon_name = genre_icon_name(genre);
+                    let genre_icon: cosmic::Element<'_, GenreMessage> =
+                        widget::icon::from_name(icon_name).size(48).into();
+
+                    let icon_container: cosmic::Element<'_, GenreMessage> =
+                        widget::container(genre_icon)
+                            .width(140)
+                            .height(100)
+                            .align_x(Horizontal::Center)
+                            .align_y(Vertical::Center)
+                            .class(cosmic::theme::Container::Card)
+                            .into();
+
+                    let label = widget::container(common::clipped_cell(
+                        common::cell_text(genre.as_str())
+                            .width(140)
+                            .align_x(Horizontal::Center)
+                            .into(),
+                    ))
                     .width(140)
+                    .height(Length::Fixed(20.0))
                     .align_x(Horizontal::Center)
-                    .into(),
-            ))
-            .width(140)
-            .height(Length::Fixed(20.0))
-            .align_x(Horizontal::Center)
-            .align_y(Vertical::Center);
+                    .align_y(Vertical::Center);
 
-            let card = widget::Column::new()
-                .push(icon_container)
-                .push(label)
-                .spacing(6)
-                .align_x(Alignment::Center);
+                    let card = widget::Column::new()
+                        .push(icon_container)
+                        .push(label)
+                        .spacing(6)
+                        .align_x(Alignment::Center);
 
-            widget::button::custom(card)
-                .on_press(GenreMessage::SelectGenre(index))
-                .padding(8)
-                .class(card_button_class())
+                    widget::button::custom(card)
+                        .on_press(GenreMessage::SelectGenre(index))
+                        .padding(8)
+                        .class(card_button_class())
+                        .into()
+                })
+                .collect();
+
+            let grid = widget::flex_row(cards)
+                .column_spacing(20)
+                .row_spacing(20)
+                .width(Length::Fill);
+
+            widget::scrollable(widget::container(grid).padding(16).width(Length::Fill))
+                .height(Length::Fill)
                 .into()
-        })
-        .collect();
+        }
+        ViewMode::List => {
+            let mut list = widget::Column::new().spacing(2);
 
-    let grid = widget::flex_row(cards)
-        .column_spacing(20)
-        .row_spacing(20)
-        .width(Length::Fill);
+            for (index, genre) in genres.iter().enumerate() {
+                let icon_name = genre_icon_name(genre);
+                let genre_icon: cosmic::Element<'_, GenreMessage> =
+                    widget::icon::from_name(icon_name).size(48).into();
 
-    widget::scrollable(widget::container(grid).padding(16).width(Length::Fill))
-        .height(Length::Fill)
-        .into()
+                let row = widget::button::custom(
+                    widget::Row::new()
+                        .push(genre_icon)
+                        .push(common::clipped_cell(common::cell_text(genre.as_str()).into()))
+                        .spacing(14)
+                        .align_y(Alignment::Center)
+                        .padding([10, 8]),
+                )
+                .on_press(GenreMessage::SelectGenre(index))
+                .width(Length::Fill)
+                .class(list_row_button_class(false));
+
+                list = list.push(row);
+            }
+
+            widget::scrollable(widget::container(list).padding(16).width(Length::Fill))
+                .height(Length::Fill)
+                .into()
+        }
+    };
+
+    widget::Column::new().push(header).push(content).into()
 }
 
 /// Render the detail view for a selected genre, showing filtered tracks.

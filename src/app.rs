@@ -325,8 +325,12 @@ pub enum Message {
     // Navigation / chrome
     LaunchUrl(String),
     ToggleContextPage(ContextPage),
-    /// Activates the Settings nav page (from the View menu).
-    OpenSettings,
+    /// Toggle albums view between grid and list.
+    ToggleAlbumsViewMode,
+    /// Toggle artists view between grid and list.
+    ToggleArtistsViewMode,
+    /// Toggle genres view between grid and list.
+    ToggleGenresViewMode,
     /// Tracks text input focus state for keyboard shortcuts.
     /// When true, text input has focus; when false, input lost focus.
     TextInputFocused(bool),
@@ -679,6 +683,7 @@ impl From<albums::AlbumMessage> for Message {
             albums::AlbumMessage::SetRating(id, r) => Message::SetRating(id, r),
             albums::AlbumMessage::FilterByGenre(g) => Message::FilterByGenre(g),
             albums::AlbumMessage::AddToPlaylist(uri, pid) => Message::AddToPlaylist(uri, pid),
+            albums::AlbumMessage::ToggleViewMode => Message::ToggleAlbumsViewMode,
         }
     }
 }
@@ -693,6 +698,7 @@ impl From<artists::ArtistMessage> for Message {
             artists::ArtistMessage::ToggleFavorite(id) => Message::ToggleFavorite(id),
             artists::ArtistMessage::SetRating(id, r) => Message::SetRating(id, r),
             artists::ArtistMessage::FilterByGenre(g) => Message::FilterByGenre(g),
+            artists::ArtistMessage::ToggleViewMode => Message::ToggleArtistsViewMode,
         }
     }
 }
@@ -812,10 +818,6 @@ impl cosmic::Application for AppModel {
             .data::<Page>(Page::Convert)
             .icon(icon::from_name("media-import-audio-symbolic"));
 
-        nav.insert()
-            .text(fl!("settings"))
-            .data::<Page>(Page::Settings)
-            .icon(icon::from_name("preferences-system-symbolic"));
         let about = About::default()
             .name(fl!("app-title"))
             .icon(widget::icon::from_svg_bytes(APP_ICON))
@@ -1428,6 +1430,44 @@ impl cosmic::Application for AppModel {
                 )
                 .title(fl!("providers"))
             }
+            ContextPage::Settings => {
+                let volume = self
+                    .player
+                    .as_ref()
+                    .map(|p| p.volume())
+                    .unwrap_or(self.config.volume);
+
+                let settings_content = settings::view(
+                    &self.config.music_dirs,
+                    self.config.crossfade_duration_secs,
+                    self.config.replay_gain_mode,
+                    volume,
+                )
+                .map(|msg| match msg {
+                    settings::SettingsMessage::AddMusicDir => Message::AddMusicDir,
+                    settings::SettingsMessage::RemoveMusicDir(i) => Message::RemoveMusicDir(i),
+                    settings::SettingsMessage::SetCrossfade(v) => Message::SetCrossfade(v),
+                    settings::SettingsMessage::SetReplayGainMode(m) => {
+                        Message::SetReplayGainMode(m)
+                    }
+                    settings::SettingsMessage::SetVolume(v) => Message::SetVolume(v),
+                    settings::SettingsMessage::OpenEqualizer => {
+                        Message::ToggleContextPage(ContextPage::Equalizer)
+                    }
+                    settings::SettingsMessage::OpenProviders => {
+                        Message::ToggleContextPage(ContextPage::Providers)
+                    }
+                    settings::SettingsMessage::OpenAbout => {
+                        Message::ToggleContextPage(ContextPage::About)
+                    }
+                });
+
+                context_drawer::context_drawer(
+                    settings_content,
+                    Message::ToggleContextPage(ContextPage::Settings),
+                )
+                .title(fl!("settings"))
+            }
             ContextPage::Lyrics => {
                 let (title, artist) = self
                     .current_track
@@ -1490,7 +1530,12 @@ impl cosmic::Application for AppModel {
                         } else {
                             (&self.all_albums, None)
                         };
-                    albums::album_grid_view(albums_data, &self.cover_images).map(move |msg| {
+                    albums::albums_view(
+                        albums_data,
+                        &self.cover_images,
+                        self.config.albums_view_mode,
+                    )
+                    .map(move |msg| {
                         Message::from(match msg {
                             albums::AlbumMessage::SelectAlbum(i) => {
                                 albums::AlbumMessage::SelectAlbum(unfilter_index(album_map, i))
@@ -1528,7 +1573,12 @@ impl cosmic::Application for AppModel {
                         } else {
                             (&self.all_artists, None)
                         };
-                    artists::artist_list_view(artists_data, &self.artist_avatars).map(move |msg| {
+                    artists::artists_view(
+                        artists_data,
+                        &self.artist_avatars,
+                        self.config.artists_view_mode,
+                    )
+                    .map(move |msg| {
                         Message::from(match msg {
                             artists::ArtistMessage::SelectArtist(i) => {
                                 artists::ArtistMessage::SelectArtist(unfilter_index(artist_map, i))
@@ -1679,6 +1729,9 @@ impl cosmic::Application for AppModel {
                                 genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
                                 genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
                                 genres::GenreMessage::SelectGenre(i) => Message::SelectGenre(i),
+                                genres::GenreMessage::ToggleViewMode => {
+                                    Message::ToggleGenresViewMode
+                                }
                             }
                         })
                     } else {
@@ -1694,13 +1747,16 @@ impl cosmic::Application for AppModel {
                         } else {
                             (&self.all_genres, None)
                         };
-                    genres::genre_grid_view(genres_data).map(move |msg| match msg {
+                    genres::genres_view(genres_data, self.config.genres_view_mode).map(
+                        move |msg| match msg {
                         genres::GenreMessage::SelectGenre(i) => {
                             Message::SelectGenre(unfilter_index(genre_map, i))
                         }
                         genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
                         genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
-                    })
+                        genres::GenreMessage::ToggleViewMode => Message::ToggleGenresViewMode,
+                        },
+                    )
                 }
             }
 
@@ -1743,39 +1799,6 @@ impl cosmic::Application for AppModel {
                     current_radio_url,
                 )
                 .map(Message::from)
-            }
-
-            Page::Settings => {
-                let volume = self
-                    .player
-                    .as_ref()
-                    .map(|p| p.volume())
-                    .unwrap_or(self.config.volume);
-
-                settings::view(
-                    &self.config.music_dirs,
-                    self.config.crossfade_duration_secs,
-                    self.config.replay_gain_mode,
-                    volume,
-                )
-                .map(|msg| match msg {
-                    settings::SettingsMessage::AddMusicDir => Message::AddMusicDir,
-                    settings::SettingsMessage::RemoveMusicDir(i) => Message::RemoveMusicDir(i),
-                    settings::SettingsMessage::SetCrossfade(v) => Message::SetCrossfade(v),
-                    settings::SettingsMessage::SetReplayGainMode(m) => {
-                        Message::SetReplayGainMode(m)
-                    }
-                    settings::SettingsMessage::SetVolume(v) => Message::SetVolume(v),
-                    settings::SettingsMessage::OpenEqualizer => {
-                        Message::ToggleContextPage(ContextPage::Equalizer)
-                    }
-                    settings::SettingsMessage::OpenProviders => {
-                        Message::ToggleContextPage(ContextPage::Providers)
-                    }
-                    settings::SettingsMessage::OpenAbout => {
-                        Message::ToggleContextPage(ContextPage::About)
-                    }
-                })
             }
 
             Page::Convert => convert::convert_view(
@@ -3146,18 +3169,17 @@ impl cosmic::Application for AppModel {
                 }
             }
 
-            Message::OpenSettings => {
-                let entities: Vec<_> = self.nav.iter().collect();
-                for entity in entities {
-                    if self
-                        .nav
-                        .data::<Page>(entity)
-                        .is_some_and(|p| *p == Page::Settings)
-                    {
-                        self.nav.activate(entity);
-                        break;
-                    }
-                }
+            Message::ToggleAlbumsViewMode => {
+                self.config.albums_view_mode = self.config.albums_view_mode.toggled();
+                self.save_config();
+            }
+            Message::ToggleArtistsViewMode => {
+                self.config.artists_view_mode = self.config.artists_view_mode.toggled();
+                self.save_config();
+            }
+            Message::ToggleGenresViewMode => {
+                self.config.genres_view_mode = self.config.genres_view_mode.toggled();
+                self.save_config();
             }
 
             // -- Settings --
@@ -6030,7 +6052,6 @@ pub enum Page {
     Podcasts,
     Radio,
     Convert,
-    Settings,
 }
 
 /// Context drawer pages.
@@ -6041,6 +6062,7 @@ pub enum ContextPage {
     Equalizer,
     Lyrics,
     Providers,
+    Settings,
 }
 
 /// Menu bar actions.
@@ -6064,7 +6086,7 @@ impl menu::action::MenuAction for MenuAction {
             MenuAction::About => Message::ToggleContextPage(ContextPage::About),
             MenuAction::Equalizer => Message::ToggleContextPage(ContextPage::Equalizer),
             MenuAction::Providers => Message::ToggleContextPage(ContextPage::Providers),
-            MenuAction::Settings => Message::OpenSettings,
+            MenuAction::Settings => Message::ToggleContextPage(ContextPage::Settings),
             MenuAction::ScanLibrary => Message::ScanLibrary,
             MenuAction::AddMusicDir => Message::AddMusicDir,
             MenuAction::Search => Message::ToggleLibrarySearch,
