@@ -119,6 +119,8 @@ pub struct AppModel {
     /// Last whole-second position persisted for `current_podcast_episode_id`,
     /// so the tick handler only writes to the DB roughly every 5 seconds.
     last_saved_podcast_position_secs: u64,
+    /// Episode ids currently being downloaded for offline playback.
+    downloading_episodes: std::collections::HashSet<i64>,
 
     // Radio
     radio_stations: Vec<RadioStation>,
@@ -626,12 +628,25 @@ pub enum Message {
     PodcastEpisodesLoaded(i64, Vec<Episode>),
     PlayPodcastEpisode(usize),
     TogglePodcastEpisodePlayed(usize),
+    /// Download an episode's enclosure for offline playback, by its index
+    /// in `podcast_episodes`.
+    DownloadEpisode(usize),
+    /// An episode download finished: episode id plus the resulting local
+    /// file path, or a failure reason.
+    EpisodeDownloaded(i64, Result<String, String>),
+    /// Delete a downloaded episode's local file, by its index in
+    /// `podcast_episodes`.
+    DeleteEpisodeDownload(usize),
     /// A podcast/radio icon (artwork or favicon) finished downloading.
     OnlineIconLoaded(String, Vec<u8>),
 
     // Radio
     RadioSearchChanged(String),
     RadioSearchSubmit,
+    /// Fetch globally popular stations (reuses `RadioSearchResults` to
+    /// complete, since finishing a discovery fetch behaves identically to
+    /// finishing a name search).
+    RadioDiscover,
     RadioSearchResults(Result<Vec<StationSearchResult>, String>),
     RadioAddNameChanged(String),
     RadioAddUrlChanged(String),
@@ -718,6 +733,8 @@ impl From<podcasts::PodcastMessage> for Message {
             podcasts::PodcastMessage::RefreshAll => Message::RefreshAllPodcasts,
             podcasts::PodcastMessage::PlayEpisode(i) => Message::PlayPodcastEpisode(i),
             podcasts::PodcastMessage::TogglePlayed(i) => Message::TogglePodcastEpisodePlayed(i),
+            podcasts::PodcastMessage::Download(i) => Message::DownloadEpisode(i),
+            podcasts::PodcastMessage::DeleteDownload(i) => Message::DeleteEpisodeDownload(i),
         }
     }
 }
@@ -740,6 +757,7 @@ impl From<radio_view::RadioMessage> for Message {
             radio_view::RadioMessage::RemoveStation(i) => Message::RemoveRadioStation(i),
             radio_view::RadioMessage::PlayStation(i) => Message::PlayRadioStation(i),
             radio_view::RadioMessage::PlaySearchResult(i) => Message::PlayRadioSearchResult(i),
+            radio_view::RadioMessage::Discover => Message::RadioDiscover,
         }
     }
 }
@@ -1094,6 +1112,7 @@ impl cosmic::Application for AppModel {
             podcast_add_url: String::new(),
             current_podcast_episode_id: None,
             last_saved_podcast_position_secs: 0,
+            downloading_episodes: std::collections::HashSet::new(),
             radio_stations: Vec::new(),
             radio_search_query: String::new(),
             radio_search_results: Vec::new(),
@@ -1769,6 +1788,7 @@ impl cosmic::Application for AppModel {
                     &self.podcast_episodes,
                     self.current_podcast_episode_id,
                     &self.online_icons,
+                    &self.downloading_episodes,
                 )
                 .map(Message::from),
                 None => podcasts::podcast_list_view(
@@ -4108,6 +4128,15 @@ impl cosmic::Application for AppModel {
             Message::RemovePodcast(idx) => {
                 if let Some(podcast) = self.podcasts.get(idx) {
                     let id = podcast.id;
+                    if let Ok(store) = open_online_store() {
+                        if let Ok(episodes) = store.list_episodes(id) {
+                            for episode in episodes {
+                                if !episode.downloaded_path.is_empty() {
+                                    let _ = std::fs::remove_file(&episode.downloaded_path);
+                                }
+                            }
+                        }
+                    }
                     match open_online_store().and_then(|store| store.remove_podcast(id)) {
                         Ok(()) => {
                             if self.selected_podcast == Some(idx) {
@@ -4180,7 +4209,11 @@ impl cosmic::Application for AppModel {
                 };
                 let track = Track {
                     id: -1,
-                    path: PathBuf::new(),
+                    path: if episode.downloaded_path.is_empty() {
+                        PathBuf::new()
+                    } else {
+                        PathBuf::from(&episode.downloaded_path)
+                    },
                     title: episode.title.clone(),
                     artist: podcast.title.clone(),
                     album_artist: podcast.title.clone(),
@@ -4229,6 +4262,54 @@ impl cosmic::Application for AppModel {
                 }
             }
 
+            Message::DownloadEpisode(idx) => {
+                let Some(episode) = self.podcast_episodes.get(idx).cloned() else {
+                    return Task::none();
+                };
+                if !self.downloading_episodes.insert(episode.id) {
+                    // Already downloading — ignore the duplicate request.
+                    return Task::none();
+                }
+                return download_episode_task(episode);
+            }
+
+            Message::EpisodeDownloaded(episode_id, result) => {
+                self.downloading_episodes.remove(&episode_id);
+                match result {
+                    Ok(path) => {
+                        if let Some(ep) =
+                            self.podcast_episodes.iter_mut().find(|e| e.id == episode_id)
+                        {
+                            ep.downloaded_path = path;
+                        }
+                    }
+                    Err(e) => {
+                        return self.push_toast(widget::toaster::Toast::new(fl!(
+                            "toast-episode-download-failed",
+                            reason = e
+                        )));
+                    }
+                }
+            }
+
+            Message::DeleteEpisodeDownload(idx) => {
+                if let Some(episode) = self.podcast_episodes.get(idx).cloned() {
+                    if !episode.downloaded_path.is_empty() {
+                        let _ = std::fs::remove_file(&episode.downloaded_path);
+                    }
+                    match open_online_store()
+                        .and_then(|store| store.set_episode_downloaded_path(episode.id, ""))
+                    {
+                        Ok(()) => {
+                            if let Some(ep) = self.podcast_episodes.get_mut(idx) {
+                                ep.downloaded_path = String::new();
+                            }
+                        }
+                        Err(e) => tracing::error!("Failed to clear episode download: {e}"),
+                    }
+                }
+            }
+
             Message::OnlineIconLoaded(url, bytes) => {
                 if !bytes.is_empty() {
                     self.online_icons.insert(url, widget::icon::from_raster_bytes(bytes));
@@ -4250,6 +4331,19 @@ impl cosmic::Application for AppModel {
                     let result = tokio::task::spawn_blocking(move || {
                         let client = reqwest::blocking::Client::new();
                         radio::search_stations(&client, &query)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    cosmic::Action::App(Message::RadioSearchResults(result))
+                });
+            }
+
+            Message::RadioDiscover => {
+                self.radio_search_loading = true;
+                return cosmic::task::future(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let client = reqwest::blocking::Client::new();
+                        radio::popular_stations(&client, 50)
                     })
                     .await
                     .unwrap_or_else(|e| Err(e.to_string()));
@@ -6024,6 +6118,74 @@ fn refresh_podcast_task(id: i64, feed_url: String) -> Task<cosmic::Action<Messag
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
         cosmic::Action::App(Message::PodcastRefreshed(id, result))
+    })
+}
+
+/// Infer the file extension for a downloaded episode from its MIME type,
+/// falling back to the enclosure URL's own extension, then `mp3`.
+fn episode_file_extension(mime: &str, enclosure_url: &str) -> String {
+    match mime {
+        "audio/mpeg" => return "mp3".to_string(),
+        "audio/mp4" | "audio/x-m4a" => return "m4a".to_string(),
+        "audio/ogg" => return "ogg".to_string(),
+        "audio/flac" => return "flac".to_string(),
+        "audio/wav" => return "wav".to_string(),
+        _ => {}
+    }
+    let path_part = enclosure_url.split(['?', '#']).next().unwrap_or(enclosure_url);
+    std::path::Path::new(path_part)
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| !e.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "mp3".to_string())
+}
+
+/// Download an episode's enclosure to `dirs::data_dir()/lyra/podcast_downloads`
+/// for offline playback, persisting the resulting path via
+/// `OnlineStore::set_episode_downloaded_path` and dispatching
+/// `EpisodeDownloaded` with the outcome. Mirrors `refresh_podcast_task`'s
+/// blocking-task idiom.
+fn download_episode_task(episode: Episode) -> Task<cosmic::Action<Message>> {
+    cosmic::task::future(async move {
+        let episode_id = episode.id;
+        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let dir = dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("lyra")
+                .join("podcast_downloads");
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("Create download dir error: {e}"))?;
+            let ext = episode_file_extension(&episode.mime, &episode.enclosure_url);
+            let dest = dir.join(format!("{episode_id}.{ext}"));
+
+            let write_result = (|| -> Result<(), String> {
+                let client = reqwest::blocking::Client::new();
+                let mut response = client
+                    .get(&episode.enclosure_url)
+                    .send()
+                    .map_err(|e| format!("Download request error: {e}"))?
+                    .error_for_status()
+                    .map_err(|e| format!("Download response error: {e}"))?;
+                let mut file = std::fs::File::create(&dest)
+                    .map_err(|e| format!("Create download file error: {e}"))?;
+                std::io::copy(&mut response, &mut file)
+                    .map_err(|e| format!("Write download error: {e}"))?;
+                Ok(())
+            })();
+
+            if let Err(e) = write_result {
+                let _ = std::fs::remove_file(&dest);
+                return Err(e);
+            }
+
+            let path = dest.to_string_lossy().into_owned();
+            open_online_store()?.set_episode_downloaded_path(episode_id, &path)?;
+            Ok(path)
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        cosmic::Action::App(Message::EpisodeDownloaded(episode_id, result))
     })
 }
 

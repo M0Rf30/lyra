@@ -40,6 +40,7 @@ pub struct Episode {
     pub description: String,
     pub position_ms: i64,
     pub played: bool,
+    pub downloaded_path: String,
 }
 
 /// A saved internet radio station.
@@ -201,7 +202,7 @@ impl OnlineStore {
             .conn
             .prepare(
                 "SELECT id, podcast_id, guid, title, enclosure_url, mime, duration_secs, pub_date,
-                        description, position_ms, played
+                        description, position_ms, played, downloaded_path
                  FROM podcast_episodes WHERE podcast_id = ?1 ORDER BY pub_date DESC",
             )
             .map_err(|e| format!("List episodes error: {e}"))?;
@@ -226,6 +227,7 @@ impl OnlineStore {
             description: row.get(8)?,
             position_ms: row.get(9)?,
             played: row.get::<_, i64>(10)? != 0,
+            downloaded_path: row.get(11)?,
         })
     }
 
@@ -242,6 +244,19 @@ impl OnlineStore {
                 params![position_ms, played as i64, episode_id],
             )
             .map_err(|e| format!("Save episode position error: {e}"))?;
+        Ok(())
+    }
+
+    /// Set (or, passing `""`, clear) an episode's locally downloaded file
+    /// path. One method serves both set and clear — there's no separate
+    /// `clear_*` variant.
+    pub fn set_episode_downloaded_path(&self, episode_id: i64, path: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE podcast_episodes SET downloaded_path = ?1 WHERE id = ?2",
+                params![path, episode_id],
+            )
+            .map_err(|e| format!("Set episode downloaded path error: {e}"))?;
         Ok(())
     }
 
@@ -332,7 +347,8 @@ mod tests {
                  enclosure_url TEXT NOT NULL, mime TEXT NOT NULL DEFAULT '',
                  duration_secs INTEGER NOT NULL DEFAULT 0, pub_date INTEGER NOT NULL DEFAULT 0,
                  description TEXT NOT NULL DEFAULT '', position_ms INTEGER NOT NULL DEFAULT 0,
-                 played INTEGER NOT NULL DEFAULT 0, UNIQUE(podcast_id, guid)
+                 played INTEGER NOT NULL DEFAULT 0, downloaded_path TEXT NOT NULL DEFAULT '',
+                 UNIQUE(podcast_id, guid)
              );
              CREATE TABLE radio_stations (
                  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,

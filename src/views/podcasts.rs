@@ -39,6 +39,10 @@ pub enum PodcastMessage {
     PlayEpisode(usize),
     /// Toggle the played marker for an episode by index.
     TogglePlayed(usize),
+    /// Download an episode's enclosure for offline playback, by index.
+    Download(usize),
+    /// Delete an episode's downloaded local file, by index.
+    DeleteDownload(usize),
 }
 
 fn podcast_icon<'a, M: 'a + 'static>(
@@ -201,6 +205,7 @@ pub fn podcast_detail_view<'a>(
     episodes: &'a [Episode],
     current_episode_id: Option<i64>,
     icons: &'a HashMap<String, widget::icon::Handle>,
+    downloading: &std::collections::HashSet<i64>,
 ) -> cosmic::Element<'a, PodcastMessage> {
     let header = widget::Row::new()
         .push(widget::tooltip(
@@ -246,11 +251,40 @@ pub fn podcast_detail_view<'a>(
             widget::tooltip::Position::Top,
         );
 
+        let download_control: cosmic::Element<'a, PodcastMessage> =
+            if !episode.downloaded_path.is_empty() {
+                widget::Row::new()
+                    .push(widget::icon::from_name("emblem-downloads-symbolic").size(16))
+                    .push(widget::tooltip(
+                        widget::button::icon(widget::icon::from_name("user-trash-symbolic").size(16))
+                            .class(cosmic::theme::Button::Destructive)
+                            .on_press(PodcastMessage::DeleteDownload(index)),
+                        widget::text::caption(fl!("delete-download-tooltip")),
+                        widget::tooltip::Position::Top,
+                    ))
+                    .spacing(4)
+                    .align_y(Alignment::Center)
+                    .into()
+            } else if downloading.contains(&episode.id) {
+                widget::button::icon(widget::icon::from_name("content-loading-symbolic").size(16))
+                    .on_press_maybe(None::<PodcastMessage>)
+                    .into()
+            } else {
+                widget::tooltip(
+                    widget::button::icon(widget::icon::from_name("document-save-symbolic").size(16))
+                        .on_press(PodcastMessage::Download(index)),
+                    widget::text::caption(fl!("download-episode-tooltip")),
+                    widget::tooltip::Position::Top,
+                )
+                .into()
+            };
+
         let row = widget::button::custom(
             widget::Row::new()
                 .push(common::clipped_cell(info.into()))
                 .push(common::duration_cell(episode.duration_secs.max(0) as u64))
                 .push(played_btn)
+                .push(download_control)
                 .spacing(8)
                 .width(Length::Fill)
                 .align_y(Alignment::Center)

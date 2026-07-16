@@ -58,6 +58,27 @@ pub fn search_stations(
     Ok(map_station_results(raw))
 }
 
+/// Fetch the globally most-clicked stations from the radio-browser.info
+/// directory, letting users discover popular stations without already
+/// knowing a name to search for.
+pub fn popular_stations(
+    client: &reqwest::blocking::Client,
+    limit: u32,
+) -> Result<Vec<StationSearchResult>, String> {
+    let url = format!(
+        "https://all.api.radio-browser.info/json/stations/topclick/{limit}?hidebroken=true"
+    );
+    let response = client
+        .get(&url)
+        .header("User-Agent", "lyra/0.1")
+        .send()
+        .map_err(|e| format!("Radio search failed: {e}"))?;
+    let raw: Vec<StationRaw> = response
+        .json()
+        .map_err(|e| format!("Radio response parse failed: {e}"))?;
+    Ok(map_station_results(raw))
+}
+
 fn map_station_results(raw: Vec<StationRaw>) -> Vec<StationSearchResult> {
     raw.into_iter()
         .map(|s| {
@@ -143,28 +164,54 @@ pub fn parse_playlist(body: &str, format: PlaylistFormat) -> Option<String> {
     }
 }
 
+/// Maximum number of chained playlist fetches `resolve_stream_url` will
+/// follow. Some Shoutcast/Icecast directories publish a playlist whose
+/// first (lowest-numbered/first-listed) entry is itself another playlist —
+/// e.g. a `.pls` wrapping a mirrored `.m3u` — so one fetch-and-parse pass
+/// doesn't always land on a direct stream. The cap bounds the number of
+/// network round-trips so a pathological or self-referential chain can
+/// never recurse indefinitely or block the caller forever.
+const MAX_PLAYLIST_HOPS: u32 = 3;
+
 /// Resolve a station URL to a directly playable stream URL. If `url` looks
 /// like a `.pls`/`.m3u`/`.m3u8` playlist (by extension, or by the response's
 /// `Content-Type` once fetched), fetches it and extracts the first stream
-/// entry; otherwise returns `url` unchanged.
+/// entry; otherwise returns `url` unchanged. Some directories chain
+/// playlists (the extracted entry is itself another playlist), so this
+/// repeats the fetch-and-extract step for up to `MAX_PLAYLIST_HOPS` hops,
+/// stopping as soon as a hop's result no longer looks like a playlist. If
+/// the chain is still unresolved at the cap, that's a clear error rather
+/// than silently handing back a playlist URL as if it were a direct stream.
 pub fn resolve_stream_url(client: &reqwest::blocking::Client, url: &str) -> Result<String, String> {
-    let Some(extension_hint) = sniff_playlist_format(url, None) else {
-        return Ok(url.to_string());
-    };
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|e| format!("Failed to fetch playlist: {e}"))?;
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let format = sniff_playlist_format(url, content_type.as_deref()).unwrap_or(extension_hint);
-    let body = response
-        .text()
-        .map_err(|e| format!("Failed to read playlist: {e}"))?;
-    parse_playlist(&body, format).ok_or_else(|| "Playlist contained no stream URL".to_string())
+    let mut current = url.to_string();
+    for _ in 0..MAX_PLAYLIST_HOPS {
+        let Some(extension_hint) = sniff_playlist_format(&current, None) else {
+            return Ok(current);
+        };
+        let response = client
+            .get(&current)
+            .send()
+            .map_err(|e| format!("Failed to fetch playlist: {e}"))?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let format =
+            sniff_playlist_format(&current, content_type.as_deref()).unwrap_or(extension_hint);
+        let body = response
+            .text()
+            .map_err(|e| format!("Failed to read playlist: {e}"))?;
+        current = parse_playlist(&body, format)
+            .ok_or_else(|| "Playlist contained no stream URL".to_string())?;
+    }
+    if sniff_playlist_format(&current, None).is_some() {
+        Err(format!(
+            "Playlist resolution exceeded {MAX_PLAYLIST_HOPS} hops without reaching a stream URL"
+        ))
+    } else {
+        Ok(current)
+    }
 }
 
 #[cfg(test)]

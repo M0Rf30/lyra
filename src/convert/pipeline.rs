@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::picture::{Picture, PictureType};
 use lofty::prelude::*;
 use lofty::probe::Probe;
 use lofty::tag::Tag;
@@ -45,7 +46,7 @@ pub fn run(job: &ConvertJob) -> Result<(), ConvertError> {
         JobKind::Convert => {
             let stem = job.source.file_stem().and_then(|s| s.to_str()).unwrap_or("track");
             let out_path = unique_out_path(&job.out_dir, stem, job.format.extension());
-            transcode(job, &job.source, &out_path, None, None)?;
+            transcode(job, &job.source, &out_path, None, None, 0, 1000)?;
             copy_tags(&job.source, &out_path);
             Ok(())
         }
@@ -54,7 +55,12 @@ pub fn run(job: &ConvertJob) -> Result<(), ConvertError> {
 }
 
 /// Splits the audio file referenced by a `.cue` sheet (`job.source`) into
-/// one tagged output file per track.
+/// one tagged output file per track. Each track's slice of the overall
+/// `job.progress` permille range is fixed up front by
+/// [`track_progress_range`] (equal-weight per track), so progress climbs
+/// monotonically across the whole rip instead of resetting to ~0 at every
+/// track boundary — `transcode` alone can't know it's one of several calls
+/// sharing a single job's progress bar.
 fn cue_split(job: &ConvertJob) -> Result<(), ConvertError> {
     let cue_text = std::fs::read_to_string(&job.source)?;
     let tracks = cue::parse(&cue_text).map_err(|e| ConvertError::Cue(e.to_string()))?;
@@ -66,7 +72,16 @@ fn cue_split(job: &ConvertJob) -> Result<(), ConvertError> {
         .map(|dir| dir.join(&file_name))
         .unwrap_or_else(|| PathBuf::from(&file_name));
 
-    for track in &tracks {
+    // Read the whole album's tag once so every track can carry over the
+    // fields the CUE sheet itself doesn't encode (album, genre, date, cover
+    // art), rather than each track ending up untagged beyond its title.
+    let src_tag = Probe::open(&audio_path)
+        .ok()
+        .and_then(|p| p.read().ok())
+        .and_then(|f| f.primary_tag().or_else(|| f.first_tag()).cloned());
+
+    let track_count = tracks.len();
+    for (i, track) in tracks.iter().enumerate() {
         if job.cancel.load(Ordering::Relaxed) {
             return Err(ConvertError::Cancelled);
         }
@@ -75,26 +90,52 @@ fn cue_split(job: &ConvertJob) -> Result<(), ConvertError> {
         let out_path = unique_out_path(&job.out_dir, &stem, job.format.extension());
         let start = track.start.as_secs_f64();
         let end = track.end.map(|d| d.as_secs_f64());
-        transcode(job, &audio_path, &out_path, Some(start), end)?;
+        let (progress_base, progress_span) = track_progress_range(i, track_count);
+        transcode(job, &audio_path, &out_path, Some(start), end, progress_base, progress_span)?;
 
         let mut tag = Tag::new(detect_tag_type(&out_path));
         tag.set_title(track.title.clone());
         tag.set_artist(track.performer.clone());
         tag.set_track(track.number);
+        tag.set_track_total(track_count as u32);
+        if let Some(src_tag) = &src_tag {
+            copy_shared_tag_fields(src_tag, &mut tag);
+        }
         write_tag(&out_path, tag);
     }
     Ok(())
 }
 
+/// Computes the `(progress_base, progress_span)` permille slice that CUE
+/// track `index` (0-based) of `total` tracks owns within the job's overall
+/// progress bar. Allocates equal weight per track rather than by duration —
+/// exact duration-weighting would need a separate full-file probe pass,
+/// which isn't worth the complexity here. Integer division keeps the spans
+/// exact: they sum to 1000 with no drift, for any `total >= 1`.
+fn track_progress_range(index: usize, total: usize) -> (u32, u32) {
+    let total = total.max(1) as u32;
+    let index = index as u32;
+    let base = 1000 * index / total;
+    let next_base = 1000 * (index + 1) / total;
+    (base, next_base - base)
+}
+
 /// Decodes `[start, end)` seconds of `source_path` (the whole file when
 /// both are `None`) and encodes it to `out_path` per `job.format` /
-/// `job.target_rate`.
+/// `job.target_rate`. `progress_base`/`progress_span` place this call's own
+/// 0-1000 permille progress within a larger `[progress_base, progress_base
+/// + progress_span]` slice of `job.progress` — `(0, 1000)` for a plain
+/// whole-file conversion, or a per-track slice when `cue_split` calls this
+/// once per track and needs the job's progress to climb monotonically
+/// across all of them instead of restarting at each track.
 fn transcode(
     job: &ConvertJob,
     source_path: &Path,
     out_path: &Path,
     start: Option<f64>,
     end: Option<f64>,
+    progress_base: u32,
+    progress_span: u32,
 ) -> Result<(), ConvertError> {
     let mut source = AudioSource::open(source_path)?;
     if let Some(start) = start.filter(|&s| s > 0.0) {
@@ -150,15 +191,19 @@ fn transcode(
             None => sink.write(chunk)?,
         }
 
-        job.progress.store(source.progress_permille(frames_done), Ordering::Relaxed);
+        job.progress.store(
+            progress_base + source.progress_permille(frames_done) * progress_span / 1000,
+            Ordering::Relaxed,
+        );
     }
 
     sink.finish()?;
-    job.progress.store(1000, Ordering::Relaxed);
+    job.progress.store(progress_base + progress_span, Ordering::Relaxed);
     Ok(())
 }
 
-/// Copies title/artist/album/genre/track/disk tags from `src` to `dst`,
+/// Copies title/artist/track/disk plus the shared album/genre/date/cover
+/// art fields (see [`copy_shared_tag_fields`]) from `src` to `dst`,
 /// best-effort — a missing source tag or an unwritable field is skipped,
 /// never a hard error, since the encoded output is already valid without it.
 fn copy_tags(src: &Path, dst: &Path) {
@@ -179,20 +224,45 @@ fn copy_tags(src: &Path, dst: &Path) {
     if let Some(v) = src_tag.artist() {
         tag.set_artist(v.into_owned());
     }
-    if let Some(v) = src_tag.album() {
-        tag.set_album(v.into_owned());
-    }
-    if let Some(v) = src_tag.genre() {
-        tag.set_genre(v.into_owned());
-    }
     if let Some(v) = src_tag.track() {
         tag.set_track(v);
     }
     if let Some(v) = src_tag.disk() {
         tag.set_disk(v);
     }
+    copy_shared_tag_fields(&src_tag, &mut tag);
 
     write_tag(dst, tag);
+}
+
+/// Copies the release-level fields both `copy_tags` (whole-file convert)
+/// and `cue_split` (per-track rip) need from the same source tag — album,
+/// genre, release date, and front-cover artwork — but neither title,
+/// artist, nor track number, since those differ per output (CUE tracks get
+/// their own title/artist/number from the cue sheet, not the source tag).
+/// Best-effort: a missing field is skipped, never an error.
+fn copy_shared_tag_fields(src_tag: &Tag, dst_tag: &mut Tag) {
+    if let Some(v) = src_tag.album() {
+        dst_tag.set_album(v.into_owned());
+    }
+    if let Some(v) = src_tag.genre() {
+        dst_tag.set_genre(v.into_owned());
+    }
+    if let Some(v) = src_tag.date() {
+        dst_tag.set_date(v);
+    }
+    if let Some(picture) = front_cover(src_tag) {
+        dst_tag.push_picture(picture.clone());
+    }
+}
+
+/// Returns `tag`'s front-cover picture, falling back to the first embedded
+/// picture if none is explicitly typed as the front cover — most rips only
+/// embed a single (untyped-as-front) picture, and that's still the one
+/// users expect to see as artwork.
+fn front_cover(tag: &Tag) -> Option<&Picture> {
+    let pictures = tag.pictures();
+    pictures.iter().find(|p| p.pic_type() == PictureType::CoverFront).or_else(|| pictures.first())
 }
 
 /// Probes `path` for the tag type its container actually supports, falling
@@ -488,5 +558,61 @@ mod tests {
         assert_eq!(tag.title().map(|c| c.into_owned()), Some("Pipeline Test Track".to_owned()));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_copies_date_and_cover_art_end_to_end() {
+        use lofty::picture::{MimeType, Picture};
+        use lofty::tag::items::Timestamp;
+
+        let dir = std::env::temp_dir().join(format!("lyra-pipeline-art-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.wav");
+        write_test_wav(&source);
+
+        // Layer a date and a front-cover picture onto the tag `write_test_wav`
+        // already wrote, so this test exercises exactly the fields
+        // `copy_shared_tag_fields` is responsible for.
+        let mut tagged = Probe::open(&source).and_then(|p| p.read()).unwrap();
+        let mut tag = tagged.primary_tag().cloned().unwrap();
+        tag.set_date(Timestamp { year: 2024, ..Default::default() });
+        let cover_bytes = vec![0xFFu8, 0xD8, 0xFF, 0xD9]; // minimal fake JPEG payload
+        tag.push_picture(Picture::unchecked(cover_bytes.clone()).mime_type(MimeType::Jpeg).build());
+        tagged.insert_tag(tag);
+        tagged.save_to_path(&source, WriteOptions::default()).unwrap();
+
+        let out_dir = dir.join("out");
+        let job = ConvertJob::new(
+            1,
+            source,
+            JobKind::Convert,
+            encoder::OutputFormat::Flac,
+            None,
+            out_dir.clone(),
+        );
+        run(&job).expect("conversion job should succeed");
+
+        let out_tagged = Probe::open(out_dir.join("source.flac")).unwrap().read().unwrap();
+        let out_tag = out_tagged.primary_tag().expect("output should have a tag");
+        assert_eq!(out_tag.date().map(|t| t.year), Some(2024), "release date should carry over");
+        let pictures = out_tag.pictures();
+        assert_eq!(pictures.len(), 1, "expected exactly one carried-over picture");
+        assert_eq!(pictures[0].data(), &cover_bytes[..], "cover art bytes should be preserved");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn track_progress_range_allocates_equal_monotonic_spans() {
+        for total in [1usize, 2, 3, 7] {
+            let mut prev_end = 0u32;
+            for index in 0..total {
+                let (base, span) = track_progress_range(index, total);
+                assert_eq!(base, prev_end, "track {index}/{total} should start where the previous one ended");
+                assert!(span > 0, "track {index}/{total} got a zero-width progress span");
+                prev_end = base + span;
+            }
+            assert_eq!(prev_end, 1000, "spans for {total} tracks should sum to exactly 1000");
+        }
     }
 }

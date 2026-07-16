@@ -46,7 +46,13 @@ fn resolve_track_source(track: &Track) -> TrackSource {
     } else if track.provider_id.starts_with("radio") {
         TrackSource::LiveStream(track.source_uri.clone())
     } else if track.provider_id.starts_with("podcast") {
-        TrackSource::HttpStream(track.source_uri.clone())
+        if track.path.as_os_str().is_empty() {
+            TrackSource::HttpStream(track.source_uri.clone())
+        } else {
+            // A downloaded episode — play the local file instead of
+            // streaming, but keep `source_uri` (checked elsewhere) intact.
+            TrackSource::LocalFile(track.path.clone())
+        }
     } else {
         // Default: local file
         TrackSource::LocalFile(track.path.clone())

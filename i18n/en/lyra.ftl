@@ -141,15 +141,19 @@ unsubscribe-tooltip = Unsubscribe
 back-to-podcasts = Back to podcasts
 resume-at = Resume at { $position }
 mark-played-tooltip = Toggle played
+download-episode-tooltip = Download for offline playback
+delete-download-tooltip = Delete download
 no-episodes = No episodes found
 no-episodes-hint = This podcast's feed has no episodes yet
 toast-podcast-search-failed = Podcast search failed: { $reason }
 toast-podcast-subscribe-failed = Failed to subscribe: { $reason }
 toast-podcast-refresh-failed = Failed to refresh podcast: { $reason }
+toast-episode-download-failed = Failed to download episode: { $reason }
 
 # RadioView
 radio = Radio
 radio-search-placeholder = Search radio stations...
+radio-discover = Discover popular stations
 play-station-tooltip = Play station
 add-station = Add
 station-name-placeholder = Station name...

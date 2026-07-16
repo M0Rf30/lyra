@@ -228,6 +228,21 @@ impl LibraryDb {
                 .map_err(|e| format!("Migration v3 commit error: {e}"))?;
         }
 
+        if version < 4 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v4 transaction error: {e}"))?;
+
+            tx.execute_batch(
+                "ALTER TABLE podcast_episodes ADD COLUMN downloaded_path TEXT NOT NULL DEFAULT '';
+                 PRAGMA user_version=4;",
+            )
+            .map_err(|e| format!("Migration v4 error (schema): {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v4 commit error: {e}"))?;
+        }
+
         let tx = self
             .conn
             .unchecked_transaction()
@@ -1062,7 +1077,7 @@ mod tests {
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            3
+            4
         );
     }
 

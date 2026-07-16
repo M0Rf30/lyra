@@ -19,6 +19,8 @@ pub enum RadioMessage {
     SearchChanged(String),
     /// Run the directory search for the current query.
     SearchSubmit,
+    /// Fetch globally popular stations into the same search-results list.
+    Discover,
     /// The add-by-URL name field changed.
     AddNameChanged(String),
     /// The add-by-URL stream URL field changed.
@@ -80,6 +82,14 @@ pub fn radio_view<'a>(
         .spacing(8)
         .align_y(Alignment::Center);
     col = col.push(search_row);
+
+    // Only offer discovery while the search box is idle and empty, so it
+    // never competes with an active name search for the same results list.
+    if search_query.trim().is_empty() && search_results.is_empty() {
+        col = col.push(
+            widget::button::standard(fl!("radio-discover")).on_press(RadioMessage::Discover),
+        );
+    }
 
     if search_loading {
         col = col.push(common::cell_caption(fl!("searching")));
