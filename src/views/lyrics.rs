@@ -4,6 +4,7 @@
 //!
 //! Tasks 104-105: Synced lyrics rendering with highlighted current line.
 
+use crate::library::palette::Accent;
 use crate::library::{LyricLine, Lyrics};
 use cosmic::iced::alignment::{Horizontal, Vertical};
 use cosmic::iced::core::Color;
@@ -39,13 +40,21 @@ fn find_current_line_index(lines: &[LyricLine], position: Duration) -> Option<us
 /// Render the lyrics panel (shown in the context drawer).
 ///
 /// Task 104-105: `playback_position` drives synced lyrics highlighting.
+/// `accent` (cover-art accent, when one was extracted) tints the current
+/// line instead of the theme accent; `None` falls back to
+/// `cosmic().accent_color()`.
 pub fn lyrics_view<'a>(
     lyrics: Option<&'a Lyrics>,
     track_title: &'a str,
     track_artist: &'a str,
     is_loading: bool,
     playback_position: Duration,
+    accent: Option<&Accent>,
 ) -> cosmic::Element<'a, LyricsMessage> {
+    let current_line_color = accent
+        .map(|a| Color::from_rgb(a.color[0], a.color[1], a.color[2]))
+        .unwrap_or_else(|| cosmic::theme::active().cosmic().accent_color().into());
+
     let header = widget::Column::new()
         .push(widget::text::title4(track_title))
         .push(widget::text::caption(track_artist))
@@ -63,7 +72,7 @@ pub fn lyrics_view<'a>(
                 let mut col = widget::Column::new().spacing(4);
                 for (i, line) in lines.iter().enumerate() {
                     let is_current = current_idx == Some(i);
-                    col = col.push(synced_line_widget(line, is_current));
+                    col = col.push(synced_line_widget(line, is_current, current_line_color));
                 }
                 widget::scrollable(widget::container(col).padding(8))
                     .height(Length::Fill)
@@ -103,16 +112,21 @@ pub fn lyrics_view<'a>(
 
 /// Render a single synced lyric line with a timestamp prefix.
 ///
-/// Task 104: The current line is rendered with accent color (bright), others are dimmed.
-fn synced_line_widget(line: &LyricLine, is_current: bool) -> cosmic::Element<'_, LyricsMessage> {
+/// Task 104: the current line uses `current_color` (the cover-art accent
+/// when available, else the theme accent — resolved once by the caller);
+/// others are dimmed gray.
+fn synced_line_widget(
+    line: &LyricLine,
+    is_current: bool,
+    current_color: Color,
+) -> cosmic::Element<'_, LyricsMessage> {
     let total_secs = line.timestamp_ms / 1000;
     let mins = total_secs / 60;
     let secs = total_secs % 60;
     let timestamp = format!("[{mins:02}:{secs:02}]");
 
-    // Current line: bright accent color; others: dimmed gray.
     let color = if is_current {
-        Color::from_rgb(0.3, 0.7, 1.0) // accent blue
+        current_color
     } else {
         Color::from_rgba(0.6, 0.6, 0.6, 0.7) // dimmed
     };
@@ -132,14 +146,21 @@ fn synced_line_widget(line: &LyricLine, is_current: bool) -> cosmic::Element<'_,
 /// `expanded_view::BACKDROP_TEXT`/`BACKDROP_SUBTEXT`). Unlike `lyrics_view`
 /// there's no "Search Online" affordance here — that stays on the sidebar
 /// panel reachable from the collapsed bar, keeping this overlay read-only
-/// and free of extra message plumbing.
+/// and free of extra message plumbing. `accent`, when present, tints the
+/// current line in place of `text_color`; dimmed lines always stay
+/// `subtext_color` regardless of accent.
 pub fn lyrics_overlay_view<'a, M: 'static>(
     lyrics: Option<&'a Lyrics>,
     is_loading: bool,
     playback_position: Duration,
     text_color: Color,
     subtext_color: Color,
+    accent: Option<&Accent>,
 ) -> cosmic::Element<'a, M> {
+    let current_line_color = accent
+        .map(|a| Color::from_rgb(a.color[0], a.color[1], a.color[2]))
+        .unwrap_or(text_color);
+
     let content: cosmic::Element<'_, M> = if is_loading {
         widget::container(
             widget::text("Loading lyrics…").class(cosmic::theme::Text::Color(subtext_color)),
@@ -159,7 +180,7 @@ pub fn lyrics_overlay_view<'a, M: 'static>(
                     col = col.push(overlay_line_widget(
                         line,
                         is_current,
-                        text_color,
+                        current_line_color,
                         subtext_color,
                     ));
                 }

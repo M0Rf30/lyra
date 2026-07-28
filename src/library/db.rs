@@ -2,6 +2,7 @@
 
 //! SQLite-backed music library database.
 
+use super::smart_playlist::SmartPlaylist;
 use super::{Album, Artist, Track};
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
@@ -241,6 +242,26 @@ impl LibraryDb {
             .map_err(|e| format!("Migration v4 error (schema): {e}"))?;
             tx.commit()
                 .map_err(|e| format!("Migration v4 commit error: {e}"))?;
+        }
+
+        if version < 5 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v5 transaction error: {e}"))?;
+
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS smart_playlists (
+                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                     name       TEXT NOT NULL,
+                     definition TEXT NOT NULL,
+                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                 );
+                 PRAGMA user_version=5;",
+            )
+            .map_err(|e| format!("Migration v5 error (schema): {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v5 commit error: {e}"))?;
         }
 
         let tx = self
@@ -961,6 +982,125 @@ impl LibraryDb {
         Ok(tracks)
     }
 
+    // ---- Smart Playlists ----
+
+    /// List all smart playlists, each with a live-resolved track count.
+    ///
+    /// The count re-runs the playlist's query across every provider (it
+    /// is not scoped, since the list view isn't tied to one provider) —
+    /// with realistically few saved smart playlists, re-querying to size
+    /// the result costs nothing worth caching.
+    pub fn list_smart_playlists(&self) -> Result<Vec<SmartPlaylist>, String> {
+        let rows: Vec<(i64, String, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, name, definition FROM smart_playlists ORDER BY name")
+                .map_err(|e| format!("List smart playlists error: {e}"))?;
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .map_err(|e| format!("List smart playlists error: {e}"))?
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+
+        let mut playlists = Vec::with_capacity(rows.len());
+        for (id, name, definition) in rows {
+            match serde_json::from_str::<SmartPlaylist>(&definition) {
+                Ok(mut playlist) => {
+                    playlist.id = id;
+                    playlist.name = name;
+                    playlist.track_count = self
+                        .smart_playlist_tracks(&playlist, None)
+                        .map(|t| t.len())
+                        .unwrap_or(0);
+                    playlists.push(playlist);
+                }
+                Err(e) => tracing::warn!("Corrupt smart playlist definition (id {id}): {e}"),
+            }
+        }
+
+        Ok(playlists)
+    }
+
+    /// Create a new smart playlist. Returns the assigned row id.
+    pub fn create_smart_playlist(&self, playlist: &SmartPlaylist) -> Result<i64, String> {
+        let definition = serde_json::to_string(playlist)
+            .map_err(|e| format!("Serialize smart playlist error: {e}"))?;
+        self.conn
+            .execute(
+                "INSERT INTO smart_playlists (name, definition) VALUES (?1, ?2)",
+                params![playlist.name, definition],
+            )
+            .map_err(|e| format!("Create smart playlist error: {e}"))?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Update an existing smart playlist's name and rule definition.
+    pub fn update_smart_playlist(&self, playlist: &SmartPlaylist) -> Result<(), String> {
+        let definition = serde_json::to_string(playlist)
+            .map_err(|e| format!("Serialize smart playlist error: {e}"))?;
+        self.conn
+            .execute(
+                "UPDATE smart_playlists SET name = ?1, definition = ?2 WHERE id = ?3",
+                params![playlist.name, definition, playlist.id],
+            )
+            .map_err(|e| format!("Update smart playlist error: {e}"))?;
+        Ok(())
+    }
+
+    /// Delete a smart playlist by id.
+    pub fn delete_smart_playlist(&self, id: i64) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM smart_playlists WHERE id = ?1", params![id])
+            .map_err(|e| format!("Delete smart playlist error: {e}"))?;
+        Ok(())
+    }
+
+    /// Resolve a smart playlist's rules into matching tracks, optionally
+    /// scoped to one provider (mirrors `all_tracks`/`search_tracks`).
+    ///
+    /// Splices a `provider = ?N` clause onto whatever `to_sql` produced.
+    /// The extra parameter is appended (never inserted into the middle of
+    /// the vector) and given the next sequential placeholder number, since
+    /// SQLite resolves a numbered `?N` parameter by its number, not by
+    /// where it appears in the query text.
+    pub fn smart_playlist_tracks(
+        &self,
+        playlist: &SmartPlaylist,
+        provider: Option<&str>,
+    ) -> Result<Vec<Track>, String> {
+        let (mut sql, mut param_values) = playlist.to_sql();
+
+        if let Some(p) = provider {
+            let order_pos = sql
+                .find(" ORDER BY")
+                .ok_or_else(|| "Smart playlist query malformed: no ORDER BY".to_string())?;
+            let next_n = param_values.len() + 1;
+            let clause = if playlist.rules.is_empty() {
+                format!(" WHERE provider = ?{next_n}")
+            } else {
+                format!(" AND provider = ?{next_n}")
+            };
+            sql.insert_str(order_pos, &clause);
+            param_values.push(Box::new(p.to_string()));
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| format!("Smart playlist query error: {e}"))?;
+
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|v| v.as_ref()).collect();
+
+        let tracks = stmt
+            .query_map(params_ref.as_slice(), Self::row_to_track)
+            .map_err(|e| format!("Smart playlist query error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(tracks)
+    }
+
     /// Map a database row to a Track struct.
     fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         let path_str: String = row.get(1)?;
@@ -1073,11 +1213,22 @@ mod tests {
         db.run_migration().unwrap();
         db.run_migration().unwrap();
         assert!(db.column_exists("tracks", "rg_album_gain").unwrap());
+        // v5 added the smart_playlists table; assert both the table and the
+        // version so this test keeps pinning the migration ladder's head.
+        assert!(
+            db.conn
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='smart_playlists'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .is_ok()
+        );
         assert_eq!(
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            4
+            5
         );
     }
 

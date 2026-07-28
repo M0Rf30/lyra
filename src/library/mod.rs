@@ -2,10 +2,14 @@
 
 //! Music library: scanning, database, metadata, and cover art.
 
+pub mod artist_tags;
 mod cover_art;
 mod db;
 mod lyrics;
+pub mod palette;
+pub mod quality;
 mod scanner;
+pub mod smart_playlist;
 
 pub use cover_art::CoverArt;
 pub use db::LibraryDb;

@@ -213,6 +213,51 @@ pub fn favorite_button<'a, M: Clone + 'static>(
     .into()
 }
 
+/// Fixed width for the audio-quality pill: every known tier's icon+label
+/// combination fits within it, so a column of these badges never resizes
+/// row-to-row the way an unconstrained label would (`"HI-RES"` is much
+/// wider than `"CD"`).
+pub const QUALITY_BADGE_WIDTH: f32 = 64.0;
+
+/// Compact icon-and-label pill for a track or album's audio quality tier.
+///
+/// Renders a zero-size element for
+/// [`AudioQuality::Unknown`](crate::library::quality::AudioQuality::Unknown)
+/// rather than an empty pill, so a track that fails to classify leaves its
+/// column blank instead of drawing an empty box; callers still wrap the
+/// result in a fixed-width container (the same way `star_rating`'s column
+/// is wrapped) so the column itself never jitters.
+pub fn quality_badge<'a, M: 'static>(
+    quality: crate::library::quality::AudioQuality,
+) -> cosmic::Element<'a, M> {
+    if !quality.is_known() {
+        return widget::Space::new().into();
+    }
+    let pill = widget::Row::new()
+        .push(widget::icon::from_name(quality.icon_name()).size(12))
+        .push(widget::text::caption(quality.label()))
+        .spacing(4)
+        .align_y(Alignment::Center);
+    widget::container(pill)
+        .padding([2, 6])
+        .width(QUALITY_BADGE_WIDTH)
+        .align_x(Horizontal::Center)
+        .class(cosmic::theme::Container::custom(|theme| {
+            let cosmic = theme.cosmic();
+            cosmic::iced::widget::container::Style {
+                background: Some(Background::Color(
+                    cosmic.background(false).component.divider.into(),
+                )),
+                border: cosmic::iced::Border {
+                    radius: cosmic.corner_radii.radius_xs.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }))
+        .into()
+}
+
 /// Icon button wrapped in a caption tooltip — for transport/utility controls.
 pub fn icon_button<'a, M: Clone + 'static>(
     icon_name: &'static str,

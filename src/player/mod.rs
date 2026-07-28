@@ -269,6 +269,23 @@ impl Player {
         self.next_pre_queued = false;
     }
 
+    /// Append tracks to the end of the play queue, leaving the current
+    /// track and queue position untouched.
+    ///
+    /// Clears `next_pre_queued` because appending invalidates the gapless
+    /// look-ahead decision: when the queue was previously exhausted at the
+    /// current index, the engine's pre-queued "next" slot no longer matches
+    /// what now follows.
+    pub fn extend_queue(&mut self, tracks: impl IntoIterator<Item = Track>) {
+        self.queue.extend(tracks);
+        self.next_pre_queued = false;
+    }
+
+    /// Whether the queue holds no tracks.
+    pub fn queue_is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
     /// Play the next track in the queue.
     /// Returns the track that is now playing, or None if queue is empty.
     ///

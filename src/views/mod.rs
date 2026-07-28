@@ -5,6 +5,7 @@ pub mod artists;
 pub mod common;
 pub mod convert;
 pub mod equalizer;
+pub mod folders;
 pub mod genres;
 pub mod lyrics;
 pub mod now_playing;
@@ -13,6 +14,7 @@ pub mod podcasts;
 pub mod providers;
 pub mod radio;
 pub mod settings;
+pub mod smart_playlists;
 pub mod songs;
 pub mod tag_editor;
 

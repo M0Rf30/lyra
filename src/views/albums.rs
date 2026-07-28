@@ -141,9 +141,17 @@ pub fn albums_view<'a>(
                                 .width(CARD_WIDTH),
                             )
                             .push(
-                                widget::container(common::clipped_cell(
-                                    secondary_caption(artist_display).into(),
-                                ))
+                                widget::container(
+                                    widget::Row::new()
+                                        .push(common::clipped_cell(
+                                            secondary_caption(artist_display).into(),
+                                        ))
+                                        .push(common::quality_badge(
+                                            crate::library::quality::album_quality(&album.tracks),
+                                        ))
+                                        .spacing(4)
+                                        .align_y(Alignment::Center),
+                                )
                                 .width(CARD_WIDTH),
                             )
                             .spacing(2),
@@ -228,7 +236,15 @@ pub fn albums_view<'a>(
 
                 let info = widget::Column::new()
                     .push(common::cell_text(album.name.as_str()))
-                    .push(common::cell_caption(caption))
+                    .push(
+                        widget::Row::new()
+                            .push(common::cell_caption(caption))
+                            .push(common::quality_badge(
+                                crate::library::quality::album_quality(&album.tracks),
+                            ))
+                            .spacing(6)
+                            .align_y(Alignment::Center),
+                    )
                     .spacing(2);
 
                 let row = widget::button::custom(
@@ -386,6 +402,12 @@ pub fn album_detail_view<'a>(
         }))
         .width(112);
 
+        // Audio quality badge, fixed-width so columns stay aligned.
+        let quality_row = widget::container(common::quality_badge(
+            crate::library::quality::classify(&track.path, track.sample_rate, track.bitrate),
+        ))
+        .width(common::QUALITY_BADGE_WIDTH);
+
         // Task 103: Genre chip per track, fixed-width so columns stay aligned.
         let genre_widget: cosmic::Element<'_, AlbumMessage> = if !track.genre.is_empty() {
             widget::button::custom(common::clipped_cell(
@@ -438,6 +460,7 @@ pub fn album_detail_view<'a>(
                 )
                 .push(heart_btn)
                 .push(rating_row)
+                .push(quality_row)
                 .push(genre_widget)
                 .push(playlist_btn)
                 .push(common::duration_cell(track.duration.as_secs()))

@@ -278,6 +278,12 @@ pub fn artist_detail_view<'a>(
             }))
             .width(112);
 
+            // Audio quality badge, fixed-width so columns stay aligned.
+            let quality_row = widget::container(common::quality_badge(
+                crate::library::quality::classify(&track.path, track.sample_rate, track.bitrate),
+            ))
+            .width(common::QUALITY_BADGE_WIDTH);
+
             let genre_widget: cosmic::Element<'_, ArtistMessage> = if !track.genre.is_empty() {
                 widget::button::custom(common::cell_caption(track.genre.as_str()))
                     .on_press(ArtistMessage::FilterByGenre(track.genre.clone()))
@@ -288,10 +294,17 @@ pub fn artist_detail_view<'a>(
             };
             let genre_col = widget::container(common::clipped_cell(genre_widget)).width(130);
 
-            let title_col = widget::container(common::clipped_cell(
-                common::cell_text(track.title.as_str()).into(),
-            ))
-            .width(Length::FillPortion(4));
+            let title_col =
+                widget::container(common::clipped_cell(if track.artist != artist.name {
+                    widget::Column::new()
+                        .push(common::cell_text(track.title.as_str()))
+                        .push(common::cell_caption(track.artist.as_str()))
+                        .spacing(1)
+                        .into()
+                } else {
+                    common::cell_text(track.title.as_str()).into()
+                }))
+                .width(Length::FillPortion(4));
 
             let row = widget::button::custom(
                 widget::Row::new()
@@ -303,6 +316,7 @@ pub fn artist_detail_view<'a>(
                     .push(title_col)
                     .push(heart_btn)
                     .push(rating_row)
+                    .push(quality_row)
                     .push(genre_col)
                     .push(common::duration_cell(track.duration.as_secs()))
                     .spacing(8)

@@ -391,6 +391,10 @@ fn build_header<'a>(
         row = row.push(widget::Space::new().width(RATING_WIDTH));
     }
 
+    if show_rating {
+        row = row.push(widget::Space::new().width(common::QUALITY_BADGE_WIDTH));
+    }
+
     row = row.push(widget::Space::new().width(ADD_WIDTH));
 
     row = row.push(
@@ -502,6 +506,18 @@ fn build_row<'a>(
                 SongMessage::SetRating(rating_track_id.clone(), r)
             }))
             .width(RATING_WIDTH)
+            .align_x(Horizontal::Center),
+        );
+    }
+
+    if show_rating {
+        row = row.push(
+            widget::container(common::quality_badge(crate::library::quality::classify(
+                &track.path,
+                track.sample_rate,
+                track.bitrate,
+            )))
+            .width(common::QUALITY_BADGE_WIDTH)
             .align_x(Horizontal::Center),
         );
     }

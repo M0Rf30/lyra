@@ -14,11 +14,11 @@ use crate::provider::local::LocalProvider;
 use crate::provider::mpd::{MpdConfig, MpdProvider};
 use crate::provider::subsonic::{SubsonicConfig, SubsonicProvider};
 use crate::provider::{MusicProvider, ProviderRegistry};
+use crate::views::radio as radio_view;
 use crate::views::{
     albums, artists, convert, equalizer, genres, lyrics, now_playing, playlists, podcasts,
     providers, settings, songs,
 };
-use crate::views::radio as radio_view;
 use cosmic::app::context_drawer;
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::{Alignment, Length, Subscription};
@@ -139,10 +139,18 @@ pub struct AppModel {
     player: Option<Player>,
     playback_position: Duration,
     current_track: Option<Track>,
+    /// MPRIS2 D-Bus handle, once the session-bus server has started (see
+    /// `crate::mpris::mpris_stream`). `None` before `Ready` arrives or if no
+    /// session bus is available — media-key integration degrades quietly.
+    mpris: Option<crate::mpris::MprisHandle>,
     /// While the user is dragging the seek slider, holds the preview fraction
     /// (0.0–1.0). `None` when not dragging. The actual backend seek happens
     /// only on release (`SeekCommit`).
     seeking_preview: Option<f32>,
+    /// Volume level captured when the mute shortcut silenced playback, so
+    /// unmuting restores it instead of a fixed default. `None` whenever
+    /// audio is not muted-by-shortcut.
+    pre_mute_volume: Option<f32>,
 
     // Scrobble state (Subsonic)
     /// Whether a "now playing" notification has been sent for the current track.
@@ -169,12 +177,25 @@ pub struct AppModel {
     /// Live-edited text for the rename field in `playlist_detail_view`,
     /// seeded from the playlist's current name when its detail view opens.
     rename_playlist_input: String,
+    /// Saved smart (rule-based) playlists.
+    smart_playlists: Vec<crate::library::smart_playlist::SmartPlaylist>,
+    /// Currently selected smart playlist index (for detail/editor view).
+    selected_smart_playlist: Option<usize>,
+    /// Resolved tracks for the currently viewed smart playlist.
+    smart_playlist_tracks: Vec<Track>,
+    /// In-progress rules-editor state; `Some` shows the editor instead of
+    /// the list/detail view.
+    smart_playlist_editor: Option<crate::views::smart_playlists::EditorState>,
     /// All distinct genres from the active provider.
     all_genres: Vec<String>,
     /// Currently selected genre index (for detail view).
     selected_genre: Option<usize>,
     /// Tracks filtered by the currently selected genre.
     genre_tracks: Vec<Track>,
+    /// In-memory directory-hierarchy browse state for the Folders view;
+    /// rebuilt from `all_tracks` whenever the page is opened or the
+    /// library reloads (see `FolderTree::build`).
+    folder_state: crate::views::folders::FolderState,
     cover_images: HashMap<String, widget::icon::Handle>,
     artist_avatars: HashMap<String, widget::icon::Handle>,
 
@@ -207,6 +228,12 @@ pub struct AppModel {
     /// Current search query for filtering AutoEQ profiles in the dropdown.
     autoeq_search: String,
 
+    // Settings — multi-artist tag splitting
+    /// Live-edited text for the delimiter list editor in the Settings
+    /// drawer, seeded from `config.artist_tag_delimiters.join(" | ")` and
+    /// only committed into `config` on submit.
+    artist_tag_delimiters_input: String,
+
     // Provider settings (editing state)
     mpd_edit_states: Vec<providers::MpdEditState>,
     mpd_connection_status: Vec<Option<String>>,
@@ -217,11 +244,17 @@ pub struct AppModel {
 
     // Expanded now-playing view
     /// Raw cover art bytes keyed by album_key, for blur processing.
-    cover_art_bytes: HashMap<String, Vec<u8>>,
+    cover_art_bytes: crate::library::palette::CoverByteCache,
     /// Cached blurred cover art for the current album.
     blurred_cover: Option<widget::icon::Handle>,
     /// Album key for the cached blurred cover.
     blurred_cover_key: Option<String>,
+    /// Accent colour extracted from the current track's cover art via
+    /// `library::palette::extract`, computed alongside the blur (same
+    /// bytes, same trigger — see `maybe_update_blurred_cover`). `None`
+    /// when there is no current cover or extraction found no legible
+    /// dominant hue; consumers fall back to the theme accent.
+    accent: Option<crate::library::palette::Accent>,
     /// 0.0 = fully collapsed (compact bar), 1.0 = fully expanded.
     expand_progress: f32,
     /// Animation target: 0.0 for collapsing, 1.0 for expanding. None when idle.
@@ -333,6 +366,12 @@ pub enum Message {
     ToggleArtistsViewMode,
     /// Toggle genres view between grid and list.
     ToggleGenresViewMode,
+    /// A global keyboard shortcut resolved by `crate::keybinds::resolve`
+    /// from a raw key press (`on_key_press` in `subscription()`).
+    /// Interpreted contextually in `update()` -- the resolver has no
+    /// access to `self`, since `on_key_press` requires a bare `fn`
+    /// pointer.
+    Shortcut(crate::keybinds::Shortcut),
     /// Tracks text input focus state for keyboard shortcuts.
     /// When true, text input has focus; when false, input lost focus.
     TextInputFocused(bool),
@@ -453,6 +492,10 @@ pub enum Message {
     /// Playlists have been loaded from the provider.
     PlaylistsLoaded(Vec<crate::library::Playlist>),
 
+    // Smart playlists view — a single wrapped variant keeps this feature's
+    // full message vocabulary (list/detail/editor) out of the top-level enum.
+    SmartPlaylists(crate::views::smart_playlists::SmartPlaylistMessage),
+
     // Genre filtering
     /// Filter tracks by genre name.
     FilterByGenre(String),
@@ -468,6 +511,11 @@ pub enum Message {
     GenresLoaded(Vec<String>),
     /// Genre tracks have been loaded.
     GenreTracksLoaded(Vec<Track>),
+
+    // Folders view
+    /// Messages from the folder browse view (navigation, playback,
+    /// favorite/rating delegation) — see `views::folders::FolderMessage`.
+    Folders(crate::views::folders::FolderMessage),
 
     // Lyrics
     ShowLyrics,
@@ -510,6 +558,14 @@ pub enum Message {
     DirPickerResult(Result<PathBuf, String>),
     RemoveMusicDir(usize),
     UpdateConfig(Config),
+    /// Toggle multi-artist tag splitting on/off.
+    SetSplitArtistTags(bool),
+    /// Live text of the delimiter list editor changed (before submit).
+    ArtistTagDelimitersInputChanged(String),
+    /// Commit the edited delimiter text (parsed on the `" | "` separator).
+    SubmitArtistTagDelimiters(String),
+    /// Reset the delimiter list to `artist_tags::DEFAULT_DELIMITERS`.
+    ResetArtistTagDelimiters,
 
     // Provider switching
     SwitchProvider(usize),
@@ -565,8 +621,15 @@ pub enum Message {
     ExpandNowPlaying,
     CollapseNowPlaying,
     ExpandAnimTick,
-    /// Blurred cover art is ready (album_key, blurred handle).
-    BlurReady(String, widget::icon::Handle),
+    /// Blurred cover art and accent colour are ready for `album_key`.
+    /// The blur handle is `None` when blur computation failed (still
+    /// worth delivering the accent); the accent is `None` when
+    /// extraction found no legible dominant hue.
+    BlurReady(
+        String,
+        Option<widget::icon::Handle>,
+        Option<crate::library::palette::Accent>,
+    ),
 
     // Visualizer (behind feature flag)
     #[cfg(feature = "visualizer")]
@@ -685,6 +748,9 @@ pub enum Message {
 
     // Application lifecycle
     Quit,
+    /// An MPRIS2 D-Bus event: either the server handle becoming available,
+    /// or a command relayed from a media-key/shell-applet D-Bus call.
+    Mpris(crate::mpris::MprisEvent),
 }
 
 impl From<albums::AlbumMessage> for Message {
@@ -817,9 +883,19 @@ impl cosmic::Application for AppModel {
             .icon(icon::from_name("playlist-symbolic"));
 
         nav.insert()
+            .text(fl!("smart-playlists"))
+            .data::<Page>(Page::SmartPlaylists)
+            .icon(icon::from_name("starred-symbolic"));
+
+        nav.insert()
             .text(fl!("genres"))
             .data::<Page>(Page::Genres)
             .icon(icon::from_name("folder-music-symbolic"));
+
+        nav.insert()
+            .text(fl!("folders"))
+            .data::<Page>(Page::Folders)
+            .icon(icon::from_name("folder-symbolic"));
 
         nav.insert()
             .text(fl!("podcasts"))
@@ -1072,6 +1148,8 @@ impl cosmic::Application for AppModel {
         #[cfg(feature = "visualizer")]
         let viz_current_preset_shared: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
+        let artist_tag_delimiters_input = config.artist_tag_delimiters.join(" | ");
+
         let mut app = AppModel {
             core,
             nav,
@@ -1123,7 +1201,9 @@ impl cosmic::Application for AppModel {
             player,
             playback_position: Duration::ZERO,
             current_track: None,
+            mpris: None,
             seeking_preview: None,
+            pre_mute_volume: None,
             scrobble_now_playing_sent: false,
             scrobble_sent: false,
             selected_album: None,
@@ -1136,9 +1216,14 @@ impl cosmic::Application for AppModel {
             selected_playlist: None,
             new_playlist_name: String::new(),
             rename_playlist_input: String::new(),
+            smart_playlists: Vec::new(),
+            selected_smart_playlist: None,
+            smart_playlist_tracks: Vec::new(),
+            smart_playlist_editor: None,
             all_genres: Vec::new(),
             selected_genre: None,
             genre_tracks: Vec::new(),
+            folder_state: crate::views::folders::FolderState::default(),
             cover_images: HashMap::new(),
             artist_avatars: HashMap::new(),
             text_input_focused: false,
@@ -1161,14 +1246,16 @@ impl cosmic::Application for AppModel {
             autoeq_profiles: Vec::new(),
             autoeq_loading: false,
             autoeq_search: String::new(),
+            artist_tag_delimiters_input,
             mpd_edit_states,
             mpd_connection_status,
             subsonic_edit_states,
             subsonic_connection_status,
             subsonic_providers,
-            cover_art_bytes: HashMap::new(),
+            cover_art_bytes: crate::library::palette::CoverByteCache::new(),
             blurred_cover: None,
             blurred_cover_key: None,
+            accent: None,
             expand_progress: 0.0,
             expand_target: None,
             expand_anim_start: None,
@@ -1461,6 +1548,8 @@ impl cosmic::Application for AppModel {
                     self.config.crossfade_duration_secs,
                     self.config.replay_gain_mode,
                     volume,
+                    self.config.split_artist_tags,
+                    &self.artist_tag_delimiters_input,
                 )
                 .map(|msg| match msg {
                     settings::SettingsMessage::AddMusicDir => Message::AddMusicDir,
@@ -1478,6 +1567,18 @@ impl cosmic::Application for AppModel {
                     }
                     settings::SettingsMessage::OpenAbout => {
                         Message::ToggleContextPage(ContextPage::About)
+                    }
+                    settings::SettingsMessage::SetSplitArtistTags(v) => {
+                        Message::SetSplitArtistTags(v)
+                    }
+                    settings::SettingsMessage::EditArtistTagDelimiters(v) => {
+                        Message::ArtistTagDelimitersInputChanged(v)
+                    }
+                    settings::SettingsMessage::SubmitArtistTagDelimiters(v) => {
+                        Message::SubmitArtistTagDelimiters(v)
+                    }
+                    settings::SettingsMessage::ResetArtistTagDelimiters => {
+                        Message::ResetArtistTagDelimiters
                     }
                 });
 
@@ -1500,6 +1601,7 @@ impl cosmic::Application for AppModel {
                     artist,
                     self.lyrics_loading,
                     self.playback_position,
+                    self.accent.as_ref(),
                 )
                 .map(|msg| match msg {
                     lyrics::LyricsMessage::FetchLyrics => Message::FetchLyricsOnline,
@@ -1740,6 +1842,27 @@ impl cosmic::Application for AppModel {
                 }
             }
 
+            Page::SmartPlaylists => {
+                if let Some(editor) = &self.smart_playlist_editor {
+                    crate::views::smart_playlists::editor_view(editor).map(Message::SmartPlaylists)
+                } else if let Some(idx) = self.selected_smart_playlist {
+                    if let Some(playlist) = self.smart_playlists.get(idx) {
+                        crate::views::smart_playlists::smart_playlist_detail_view(
+                            playlist,
+                            idx,
+                            &self.smart_playlist_tracks,
+                            self.current_track.as_ref().map(|t| t.id),
+                        )
+                        .map(Message::SmartPlaylists)
+                    } else {
+                        widget::text("Smart playlist not found").into()
+                    }
+                } else {
+                    crate::views::smart_playlists::smart_playlists_view(&self.smart_playlists)
+                        .map(Message::SmartPlaylists)
+                }
+            }
+
             Page::Genres => {
                 if let Some(genre_idx) = self.selected_genre {
                     if let Some(genre_name) = self.all_genres.get(genre_idx) {
@@ -1766,18 +1889,25 @@ impl cosmic::Application for AppModel {
                         } else {
                             (&self.all_genres, None)
                         };
-                    genres::genres_view(genres_data, self.config.genres_view_mode).map(
-                        move |msg| match msg {
-                        genres::GenreMessage::SelectGenre(i) => {
-                            Message::SelectGenre(unfilter_index(genre_map, i))
+                    genres::genres_view(genres_data, self.config.genres_view_mode).map(move |msg| {
+                        match msg {
+                            genres::GenreMessage::SelectGenre(i) => {
+                                Message::SelectGenre(unfilter_index(genre_map, i))
+                            }
+                            genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
+                            genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
+                            genres::GenreMessage::ToggleViewMode => Message::ToggleGenresViewMode,
                         }
-                        genres::GenreMessage::BackToGrid => Message::BackToGenreGrid,
-                        genres::GenreMessage::PlayTrack(i) => Message::PlayGenreTrack(i),
-                        genres::GenreMessage::ToggleViewMode => Message::ToggleGenresViewMode,
-                        },
-                    )
+                    })
                 }
             }
+
+            Page::Folders => crate::views::folders::folder_view(
+                &self.folder_state,
+                &self.all_tracks,
+                self.current_track.as_ref(),
+            )
+            .map(Message::Folders),
 
             Page::Podcasts => match self
                 .selected_podcast
@@ -1911,6 +2041,7 @@ impl cosmic::Application for AppModel {
             current_cover,
             self.seeking_preview,
             self.blurred_cover.as_ref(),
+            self.accent.as_ref(),
         )
         .map(map_now_playing_msg);
 
@@ -1932,6 +2063,7 @@ impl cosmic::Application for AppModel {
                 self.config.repeat_mode,
                 current_cover,
                 self.blurred_cover.as_ref(),
+                self.accent.as_ref(),
                 self.seeking_preview,
                 self.expand_progress,
                 self.lyrics_overlay_active,
@@ -2010,6 +2142,10 @@ impl cosmic::Application for AppModel {
                 .map(|update| Message::UpdateConfig(update.config)),
         ];
 
+        // MPRIS2 D-Bus server — unconditional and keyed by the zero-argument
+        // `mpris_stream` function, so it starts once and never restarts.
+        subs.push(Subscription::run(crate::mpris::mpris_stream).map(Message::Mpris));
+
         // Playback position ticker (every 500ms when playing)
         let is_playing = self
             .player
@@ -2057,7 +2193,11 @@ impl cosmic::Application for AppModel {
         }
 
         // Convert queue progress ticker (every 500ms while jobs are running)
-        if self.convert_jobs.iter().any(|j| j.state == JobState::Running) {
+        if self
+            .convert_jobs
+            .iter()
+            .any(|j| j.state == JobState::Running)
+        {
             subs.push(Subscription::run(convert_tick_stream));
         }
 
@@ -2116,28 +2256,6 @@ impl cosmic::Application for AppModel {
             }
         }
 
-        // Escape key to collapse expanded view
-        if self.expand_progress > 0.0 || self.expand_target.is_some() {
-            subs.push(cosmic::iced::event::listen_with(
-                |event, _status, _id| {
-                    if let cosmic::iced::Event::Keyboard(
-                        cosmic::iced::keyboard::Event::KeyPressed {
-                            key:
-                                cosmic::iced::keyboard::Key::Named(
-                                    cosmic::iced::keyboard::key::Named::Escape,
-                                ),
-                            ..
-                        },
-                    ) = event
-                    {
-                        Some(Message::CollapseNowPlaying)
-                    } else {
-                        None
-                    }
-                },
-            ));
-        }
-
         // Mouse movement while the visualizer is fullscreen resets the HUD
         // control-card auto-hide idle counter (see `viz_hud_idle_frames`).
         // Scoped to `viz_fullscreen` so ordinary app usage never emits this.
@@ -2155,73 +2273,30 @@ impl cosmic::Application for AppModel {
             }));
         }
 
-        // Space bar to toggle playback (unless captured by a text input widget)
+        // Global keyboard shortcuts (play/pause, seek, volume, shuffle,
+        // repeat, favorite, lyrics, expand/collapse, nav-page jumps,
+        // search focus, escape). Replaces the old ad hoc Space/Escape/
+        // Ctrl+F listeners this block used to hold. This libcosmic revision
+        // exposes no `keyboard::on_key_press`, so we filter the raw event
+        // stream ourselves; `event::listen_with` only yields events a
+        // focused widget didn't already capture (`Status::Ignored`), which
+        // is exactly the guard those hand-rolled listeners implemented.
+        // `crate::keybinds::resolve` is the pure, unit-tested mapping from
+        // a raw key press to a `Shortcut`; `update()` decides what each one
+        // does given the current app state.
         subs.push(cosmic::iced::event::listen_with(|event, status, _id| {
-            if let cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
-                key: cosmic::iced::keyboard::Key::Character(s),
-                modifiers,
-                ..
-            }) = &event
-            {
-                // Only toggle playback if:
-                // 1. Space key pressed
-                // 2. No modifier keys (Ctrl, Shift, Alt, etc.)
-                // 3. Event not captured by a widget (e.g., text input)
-                if s.as_str() == " "
-                    && modifiers.is_empty()
-                    && status != cosmic::iced::event::Status::Captured
-                {
-                    return Some(Message::TogglePlayback);
-                }
-            }
-            None
-        }));
-
-        // Global key bindings (e.g. Ctrl+F to toggle library search).
-        // `listen_with` requires a non-capturing `fn` pointer, so this
-        // rebuilds the (tiny) key_binds map on each event rather than
-        // capturing `self.key_binds` — both are sourced from the same
-        // `key_binds()` function, so the menu's displayed shortcut and
-        // this runtime check never drift apart.
-        subs.push(cosmic::iced::event::listen_with(|event, status, _id| {
-            if status == cosmic::iced::event::Status::Captured {
+            if status != cosmic::iced::event::Status::Ignored {
                 return None;
             }
-            if let cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
-                key,
-                physical_key,
-                modifiers,
-                ..
-            }) = &event
-            {
-                for (bind, action) in &key_binds() {
-                    if bind.matches(*modifiers, key, Some(physical_key)) {
-                        return Some(menu::action::MenuAction::message(action));
-                    }
-                }
+            match event {
+                cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
+                    key,
+                    modifiers,
+                    ..
+                }) => crate::keybinds::resolve(&key, modifiers).map(Message::Shortcut),
+                _ => None,
             }
-            None
         }));
-
-        // Escape closes the library search (in addition to collapsing the
-        // expanded now-playing view, handled above).
-        if self.search_active {
-            subs.push(cosmic::iced::event::listen_with(|event, _status, _id| {
-                if let cosmic::iced::Event::Keyboard(
-                    cosmic::iced::keyboard::Event::KeyPressed {
-                        key: cosmic::iced::keyboard::Key::Named(
-                            cosmic::iced::keyboard::key::Named::Escape,
-                        ),
-                        ..
-                    },
-                ) = event
-                {
-                    Some(Message::ClearLibrarySearch)
-                } else {
-                    None
-                }
-            }));
-        }
 
         Subscription::batch(subs)
     }
@@ -2334,7 +2409,7 @@ impl cosmic::Application for AppModel {
                 provider_id,
                 tracks,
                 albums,
-                artists,
+                artists: _artists,
                 cover_images,
                 artist_avatars,
                 cover_art_bytes,
@@ -2345,10 +2420,18 @@ impl cosmic::Application for AppModel {
                 self.library_scanning = false;
                 self.all_tracks = tracks;
                 self.all_albums = albums;
-                self.all_artists = artists;
                 self.cover_images = cover_images;
                 self.artist_avatars = artist_avatars;
-                self.cover_art_bytes = cover_art_bytes;
+                self.rebuild_all_artists();
+                self.cover_art_bytes = cover_art_bytes.into();
+                // Rebuild the folder tree only if it's already in use —
+                // never-opened Folders view pays nothing on reload.
+                if self.folder_state.is_populated()
+                    || self.nav.active_data::<Page>() == Some(&Page::Folders)
+                {
+                    self.folder_state
+                        .set_tree(crate::views::folders::FolderTree::build(&self.all_tracks));
+                }
                 self.refresh_search_filter();
                 // Re-trigger blur now that cover art bytes are available
                 let blur_task = self.maybe_update_blurred_cover();
@@ -2467,7 +2550,11 @@ impl cosmic::Application for AppModel {
 
             // -- Playback --
             Message::TogglePlayback => {
-                if let Some(ref mut player) = self.player {
+                // Collect the follow-up task rather than returning inline, so
+                // the MPRIS snapshot is refreshed on every path — pausing is
+                // exactly when the periodic publish stops running.
+                let mut task = Task::none();
+                if let Some(player) = &mut self.player {
                     if player.state() == PlaybackState::Stopped && !self.all_tracks.is_empty() {
                         // If stopped, start playing first track
                         player.set_queue(self.all_tracks.clone());
@@ -2478,7 +2565,7 @@ impl cosmic::Application for AppModel {
                             {
                                 self.viz_metadata_opacity = 1.0;
                             }
-                            return self.dispatch_mpd_after_play();
+                            task = self.dispatch_mpd_after_play();
                         }
                     } else {
                         let was_playing = player.state() == PlaybackState::Playing;
@@ -2486,7 +2573,7 @@ impl cosmic::Application for AppModel {
                             tracing::error!("Playback toggle failed: {e}");
                         } else if let Some(client) = self.mpd_client() {
                             // Dispatch async SetPause to MPD.
-                            return self.dispatch_mpd(async move {
+                            task = self.dispatch_mpd(async move {
                                 client
                                     .command(mpd_client::commands::SetPause(was_playing))
                                     .await
@@ -2495,6 +2582,8 @@ impl cosmic::Application for AppModel {
                         }
                     }
                 }
+                self.publish_mpris();
+                return task;
             }
 
             Message::NextTrack => {
@@ -2581,6 +2670,10 @@ impl cosmic::Application for AppModel {
                     tracing::error!("Set volume failed: {e}");
                 }
                 self.config.volume = vol;
+                // Mirror the new level to MPRIS right away: the periodic
+                // publish only runs while playing, so a volume change made
+                // while paused/stopped would otherwise read stale on D-Bus.
+                self.publish_mpris();
                 // Dispatch async SetVolume to MPD.
                 if let Some(client) = self.mpd_client() {
                     let vol_u8 = (vol.clamp(0.0, 1.0) * 100.0) as u8;
@@ -2602,6 +2695,7 @@ impl cosmic::Application for AppModel {
                         tracing::error!("MPD send_random: {e}");
                     }
                 }
+                self.publish_mpris();
             }
 
             // Task 112: Wire repeat mode for MPD
@@ -2626,6 +2720,7 @@ impl cosmic::Application for AppModel {
                         tracing::error!("MPD send_single: {e}");
                     }
                 }
+                self.publish_mpris();
             }
 
             Message::MpdStatusUpdate {
@@ -2672,6 +2767,7 @@ impl cosmic::Application for AppModel {
                 if let Some(track) = self.current_track.clone() {
                     self.handle_scrobble(track);
                 }
+                self.publish_mpris();
             }
 
             Message::MpdCommandError(err) => {
@@ -2736,6 +2832,7 @@ impl cosmic::Application for AppModel {
                     }
                     self.handle_scrobble(track);
                 }
+                self.publish_mpris();
                 return position_save_task;
             }
 
@@ -2743,6 +2840,50 @@ impl cosmic::Application for AppModel {
             Message::PlayTrackIndex(index) => {
                 return self.play_track_list(self.all_tracks.clone(), index);
             }
+
+            Message::Folders(msg) => match msg {
+                crate::views::folders::FolderMessage::Open(dir) => self.folder_state.open(dir),
+                crate::views::folders::FolderMessage::Up => self.folder_state.up(),
+                crate::views::folders::FolderMessage::GoTo(index) => {
+                    self.folder_state.go_to(index);
+                }
+                crate::views::folders::FolderMessage::PlayTrack(index) => {
+                    return self.play_track_list(self.all_tracks.clone(), index);
+                }
+                crate::views::folders::FolderMessage::PlayFolder => {
+                    let tracks = self.current_folder_tracks();
+                    if !tracks.is_empty() {
+                        return self.play_track_list(tracks, 0);
+                    }
+                }
+                crate::views::folders::FolderMessage::QueueFolder => {
+                    let tracks = self.current_folder_tracks();
+                    if tracks.is_empty() {
+                        return Task::none();
+                    }
+                    // Appending only makes sense on top of an existing
+                    // queue; with nothing queued, "add to queue" has to
+                    // start playback or the tracks would sit unreachable.
+                    let can_append = self.player.as_ref().is_some_and(|p| !p.queue_is_empty());
+                    if !can_append {
+                        return self.play_track_list(tracks, 0);
+                    }
+                    let added = tracks.len();
+                    if let Some(player) = self.player.as_mut() {
+                        player.extend_queue(tracks);
+                    }
+                    return self.push_toast(widget::toaster::Toast::new(fl!(
+                        "queued-tracks",
+                        count = added
+                    )));
+                }
+                crate::views::folders::FolderMessage::ToggleFavorite(id) => {
+                    return self.update(Message::ToggleFavorite(id));
+                }
+                crate::views::folders::FolderMessage::SetRating(id, r) => {
+                    return self.update(Message::SetRating(id, r));
+                }
+            },
 
             Message::PlayAlbum(album_idx) => {
                 if let Some(album) = self.all_albums.get(album_idx) {
@@ -3276,7 +3417,46 @@ impl cosmic::Application for AppModel {
             }
 
             Message::UpdateConfig(config) => {
+                let artist_split_changed = config.split_artist_tags
+                    != self.config.split_artist_tags
+                    || config.artist_tag_delimiters != self.config.artist_tag_delimiters;
                 self.config = config;
+                if artist_split_changed {
+                    self.artist_tag_delimiters_input =
+                        self.config.artist_tag_delimiters.join(" | ");
+                    self.rebuild_all_artists();
+                    self.refresh_search_filter();
+                }
+            }
+
+            Message::SetSplitArtistTags(enabled) => {
+                self.config.split_artist_tags = enabled;
+                self.save_config();
+                self.rebuild_all_artists();
+                self.refresh_search_filter();
+            }
+
+            Message::ArtistTagDelimitersInputChanged(text) => {
+                self.artist_tag_delimiters_input = text;
+            }
+
+            Message::SubmitArtistTagDelimiters(text) => {
+                self.artist_tag_delimiters_input = text.clone();
+                self.config.artist_tag_delimiters = parse_delimiters_input(&text);
+                self.save_config();
+                self.rebuild_all_artists();
+                self.refresh_search_filter();
+            }
+
+            Message::ResetArtistTagDelimiters => {
+                self.config.artist_tag_delimiters = crate::library::artist_tags::DEFAULT_DELIMITERS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                self.artist_tag_delimiters_input = self.config.artist_tag_delimiters.join(" | ");
+                self.save_config();
+                self.rebuild_all_artists();
+                self.refresh_search_filter();
             }
 
             // -- Provider switching --
@@ -3714,7 +3894,7 @@ impl cosmic::Application for AppModel {
                 }
             }
 
-            Message::BlurReady(key, handle) => {
+            Message::BlurReady(key, handle, accent) => {
                 // Guard against stale results: only apply if this blur is still
                 // for the current track's album. A slow computation may finish
                 // after the user has already moved to a different track.
@@ -3727,8 +3907,17 @@ impl cosmic::Application for AppModel {
                     crate::library::CoverArt::album_key(artist, &t.album)
                 });
                 if current_key.as_ref() == Some(&key) {
-                    self.blurred_cover = Some(handle);
-                    self.blurred_cover_key = Some(key);
+                    // Blur only applies on success — a failed decode leaves
+                    // the previous blur/black base showing and
+                    // `blurred_cover_key` unset so the next trigger retries.
+                    // The accent always reflects this key's result
+                    // (including `None`): it has no equivalent "keep the
+                    // old value and retry" behaviour to preserve.
+                    if let Some(handle) = handle {
+                        self.blurred_cover = Some(handle);
+                        self.blurred_cover_key = Some(key);
+                    }
+                    self.accent = accent;
                 }
                 // If stale, discard silently — the correct blur is either already
                 // cached or will be requested by the next maybe_update_blurred_cover call.
@@ -3984,6 +4173,255 @@ impl cosmic::Application for AppModel {
             Message::PlaylistsLoaded(playlists) => {
                 self.playlists = playlists;
                 self.refresh_search_filter();
+            }
+
+            // -- Smart playlists view --
+            Message::SmartPlaylists(msg) => {
+                use crate::views::smart_playlists::SmartPlaylistMessage;
+
+                match msg {
+                    // List view
+                    SmartPlaylistMessage::New => {
+                        self.smart_playlist_editor =
+                            Some(crate::views::smart_playlists::EditorState::new());
+                    }
+                    SmartPlaylistMessage::Edit(idx) => {
+                        if let Some(playlist) = self.smart_playlists.get(idx) {
+                            self.smart_playlist_editor =
+                                Some(crate::views::smart_playlists::EditorState::from_existing(
+                                    playlist.clone(),
+                                ));
+                        }
+                    }
+                    SmartPlaylistMessage::EditorCancel => {
+                        self.smart_playlist_editor = None;
+                    }
+                    SmartPlaylistMessage::EditorSave => {
+                        if let Some(state) = &self.smart_playlist_editor
+                            && state.errors.is_empty()
+                        {
+                            let playlist = state.playlist.clone();
+                            self.smart_playlist_editor = None;
+                            let db_path = dirs::data_dir()
+                                .unwrap_or_else(|| PathBuf::from("."))
+                                .join("lyra")
+                                .join("library.db");
+                            return cosmic::task::future(async move {
+                                let playlists = tokio::task::spawn_blocking(move || {
+                                    let outcome: Result<
+                                        Vec<crate::library::smart_playlist::SmartPlaylist>,
+                                        String,
+                                    > = (|| {
+                                        let db = crate::library::LibraryDb::open(&db_path)?;
+                                        if playlist.id == 0 {
+                                            db.create_smart_playlist(&playlist)?;
+                                        } else {
+                                            db.update_smart_playlist(&playlist)?;
+                                        }
+                                        db.list_smart_playlists()
+                                    })();
+                                    outcome.unwrap_or_else(|e| {
+                                        tracing::warn!("Save smart playlist failed: {e}");
+                                        Vec::new()
+                                    })
+                                })
+                                .await
+                                .unwrap_or_default();
+                                cosmic::Action::App(Message::SmartPlaylists(
+                                    SmartPlaylistMessage::Loaded(playlists),
+                                ))
+                            });
+                        }
+                    }
+                    SmartPlaylistMessage::Delete(idx) => {
+                        if let Some(playlist) = self.smart_playlists.get(idx) {
+                            let id = playlist.id;
+                            if self.selected_smart_playlist == Some(idx) {
+                                self.selected_smart_playlist = None;
+                            }
+                            let db_path = dirs::data_dir()
+                                .unwrap_or_else(|| PathBuf::from("."))
+                                .join("lyra")
+                                .join("library.db");
+                            return cosmic::task::future(async move {
+                                let playlists = tokio::task::spawn_blocking(move || {
+                                    let outcome: Result<
+                                        Vec<crate::library::smart_playlist::SmartPlaylist>,
+                                        String,
+                                    > = (|| {
+                                        let db = crate::library::LibraryDb::open(&db_path)?;
+                                        db.delete_smart_playlist(id)?;
+                                        db.list_smart_playlists()
+                                    })();
+                                    outcome.unwrap_or_else(|e| {
+                                        tracing::warn!("Delete smart playlist failed: {e}");
+                                        Vec::new()
+                                    })
+                                })
+                                .await
+                                .unwrap_or_default();
+                                cosmic::Action::App(Message::SmartPlaylists(
+                                    SmartPlaylistMessage::Loaded(playlists),
+                                ))
+                            });
+                        }
+                    }
+                    SmartPlaylistMessage::Loaded(playlists) => {
+                        self.smart_playlists = playlists;
+                    }
+
+                    // Selecting / playing a saved smart playlist
+                    SmartPlaylistMessage::Select(idx) => {
+                        self.selected_smart_playlist = Some(idx);
+                        self.smart_playlist_tracks.clear();
+                        if let Some(playlist) = self.smart_playlists.get(idx).cloned() {
+                            let db_path = dirs::data_dir()
+                                .unwrap_or_else(|| PathBuf::from("."))
+                                .join("lyra")
+                                .join("library.db");
+                            return cosmic::task::future(async move {
+                                let tracks = tokio::task::spawn_blocking(move || {
+                                    crate::library::LibraryDb::open(&db_path)
+                                        .and_then(|db| db.smart_playlist_tracks(&playlist, None))
+                                        .unwrap_or_else(|e| {
+                                            tracing::warn!("smart_playlist_tracks failed: {e}");
+                                            Vec::new()
+                                        })
+                                })
+                                .await
+                                .unwrap_or_default();
+                                cosmic::Action::App(Message::SmartPlaylists(
+                                    SmartPlaylistMessage::TracksLoaded(tracks),
+                                ))
+                            });
+                        }
+                    }
+                    SmartPlaylistMessage::BackToList => {
+                        self.selected_smart_playlist = None;
+                        self.smart_playlist_editor = None;
+                    }
+                    SmartPlaylistMessage::TracksLoaded(tracks) => {
+                        self.smart_playlist_tracks = tracks;
+                    }
+                    SmartPlaylistMessage::Play(idx) => {
+                        if let Some(playlist) = self.smart_playlists.get(idx).cloned() {
+                            let db_path = dirs::data_dir()
+                                .unwrap_or_else(|| PathBuf::from("."))
+                                .join("lyra")
+                                .join("library.db");
+                            return cosmic::task::future(async move {
+                                let tracks = tokio::task::spawn_blocking(move || {
+                                    crate::library::LibraryDb::open(&db_path)
+                                        .and_then(|db| db.smart_playlist_tracks(&playlist, None))
+                                        .unwrap_or_else(|e| {
+                                            tracing::warn!("smart_playlist_tracks failed: {e}");
+                                            Vec::new()
+                                        })
+                                })
+                                .await
+                                .unwrap_or_default();
+                                cosmic::Action::App(Message::SmartPlaylists(
+                                    SmartPlaylistMessage::PlayResolved(tracks),
+                                ))
+                            });
+                        }
+                    }
+                    SmartPlaylistMessage::PlayResolved(tracks) => {
+                        if !tracks.is_empty() {
+                            return self.play_track_list(tracks, 0);
+                        }
+                    }
+                    SmartPlaylistMessage::PlayTrack(idx) => {
+                        if !self.smart_playlist_tracks.is_empty() {
+                            return self.play_track_list(self.smart_playlist_tracks.clone(), idx);
+                        }
+                    }
+
+                    // Detail view: favorite/rating on a resolved track
+                    SmartPlaylistMessage::ToggleFavorite(track_id) => {
+                        if let Some(track) = self
+                            .smart_playlist_tracks
+                            .iter_mut()
+                            .find(|t| t.id.to_string() == track_id)
+                        {
+                            track.is_favorite = !track.is_favorite;
+                        }
+                        return self.update(Message::ToggleFavorite(track_id));
+                    }
+                    SmartPlaylistMessage::SetRating(track_id, rating) => {
+                        let new_rating = if rating == 0 { None } else { Some(rating) };
+                        if let Some(track) = self
+                            .smart_playlist_tracks
+                            .iter_mut()
+                            .find(|t| t.id.to_string() == track_id)
+                        {
+                            track.rating = new_rating;
+                        }
+                        return self.update(Message::SetRating(track_id, rating));
+                    }
+
+                    // Rules editor
+                    SmartPlaylistMessage::EditorNameChanged(name) => {
+                        if let Some(state) = &mut self.smart_playlist_editor {
+                            state.set_name(name);
+                        }
+                    }
+                    SmartPlaylistMessage::EditorMatchModeChanged(i) => {
+                        if let Some(state) = &mut self.smart_playlist_editor {
+                            state.set_match_mode(i);
+                        }
+                    }
+                    SmartPlaylistMessage::EditorAddRule => {
+                        if let Some(state) = &mut self.smart_playlist_editor {
+                            state.add_rule();
+                        }
+                    }
+                    SmartPlaylistMessage::EditorRemoveRule(i) => {
+                        if let Some(state) = &mut self.smart_playlist_editor {
+                            state.remove_rule(i);
+                        }
+                    }
+                    SmartPlaylistMessage::EditorRuleFieldChanged(i, f) => {
+                        if let Some(state) = &mut self.smart_playlist_editor {
+                            state.set_rule_field(i, f);
+                        }
+                    }
+                    SmartPlaylistMessage::EditorRuleOpChanged(i, o) => {
+                        if let Some(state) = &mut self.smart_playlist_editor {
+                            state.set_rule_op(i, o);
+                        }
+                    }
+                    SmartPlaylistMessage::EditorRuleValueChanged(i, v) => {
+                        if let Some(state) = &mut self.smart_playlist_editor {
+                            state.set_rule_value(i, v);
+                        }
+                    }
+                    SmartPlaylistMessage::EditorRuleValue2Changed(i, v) => {
+                        if let Some(state) = &mut self.smart_playlist_editor {
+                            state.set_rule_value2(i, v);
+                        }
+                    }
+                    SmartPlaylistMessage::EditorOrderByChanged(i) => {
+                        if let Some(state) = &mut self.smart_playlist_editor {
+                            state.set_order_by(i);
+                        }
+                    }
+                    SmartPlaylistMessage::EditorOrderDescToggled(v) => {
+                        if let Some(state) = &mut self.smart_playlist_editor {
+                            state.set_order_desc(v);
+                        }
+                    }
+                    SmartPlaylistMessage::EditorLimitToggled(v) => {
+                        if let Some(state) = &mut self.smart_playlist_editor {
+                            state.set_limit_enabled(v);
+                        }
+                    }
+                    SmartPlaylistMessage::EditorLimitChanged(v) => {
+                        if let Some(state) = &mut self.smart_playlist_editor {
+                            state.set_limit_input(v);
+                        }
+                    }
+                }
             }
 
             // -- Genres view --
@@ -4277,8 +4715,10 @@ impl cosmic::Application for AppModel {
                 self.downloading_episodes.remove(&episode_id);
                 match result {
                     Ok(path) => {
-                        if let Some(ep) =
-                            self.podcast_episodes.iter_mut().find(|e| e.id == episode_id)
+                        if let Some(ep) = self
+                            .podcast_episodes
+                            .iter_mut()
+                            .find(|e| e.id == episode_id)
                         {
                             ep.downloaded_path = path;
                         }
@@ -4312,7 +4752,8 @@ impl cosmic::Application for AppModel {
 
             Message::OnlineIconLoaded(url, bytes) => {
                 if !bytes.is_empty() {
-                    self.online_icons.insert(url, widget::icon::from_raster_bytes(bytes));
+                    self.online_icons
+                        .insert(url, widget::icon::from_raster_bytes(bytes));
                 }
             }
 
@@ -4428,7 +4869,10 @@ impl cosmic::Application for AppModel {
 
             Message::PlayRadioStation(idx) => {
                 if let Some(station) = self.radio_stations.get(idx) {
-                    return resolve_and_play_radio(station.name.clone(), station.stream_url.clone());
+                    return resolve_and_play_radio(
+                        station.name.clone(),
+                        station.stream_url.clone(),
+                    );
                 }
             }
 
@@ -4632,6 +5076,220 @@ impl cosmic::Application for AppModel {
             Message::Quit => {
                 return cosmic::iced::exit();
             }
+            Message::Mpris(event) => match event {
+                crate::mpris::MprisEvent::Ready(handle) => {
+                    self.mpris = Some(handle);
+                    self.publish_mpris();
+                }
+                crate::mpris::MprisEvent::Command(cmd) => {
+                    use crate::mpris::{LoopMode, MprisCommand};
+
+                    let playing = self
+                        .player
+                        .as_ref()
+                        .map(|p| p.state() == PlaybackState::Playing)
+                        .unwrap_or(false);
+
+                    // Each branch yields the task to run; the snapshot is
+                    // republished afterwards so clients observe the result
+                    // immediately. Without this, properties changed while
+                    // stopped or paused would stay stale until the next
+                    // playback tick — which only fires while playing.
+                    let task = match cmd {
+                        MprisCommand::Play => {
+                            if playing {
+                                Task::none()
+                            } else {
+                                self.update(Message::TogglePlayback)
+                            }
+                        }
+                        MprisCommand::Pause | MprisCommand::Stop => {
+                            // Lyra has no distinct "stop" state; degrade Stop
+                            // to Pause, which is the closest real behavior.
+                            if playing {
+                                self.update(Message::TogglePlayback)
+                            } else {
+                                Task::none()
+                            }
+                        }
+                        MprisCommand::PlayPause => self.update(Message::TogglePlayback),
+                        MprisCommand::Next => self.update(Message::NextTrack),
+                        MprisCommand::Previous => self.update(Message::PreviousTrack),
+                        MprisCommand::Seek(offset_us) | MprisCommand::SetPosition(offset_us) => {
+                            let seek = self.current_track.as_ref().and_then(|track| {
+                                let duration_us = track.duration.as_micros() as i64;
+                                (duration_us > 0).then(|| {
+                                    let target_us = if matches!(cmd, MprisCommand::Seek(_)) {
+                                        self.playback_position.as_micros() as i64 + offset_us
+                                    } else {
+                                        offset_us
+                                    };
+                                    (target_us.clamp(0, duration_us) as f32) / duration_us as f32
+                                })
+                            });
+                            match seek {
+                                Some(fraction) => {
+                                    self.seeking_preview = Some(fraction);
+                                    self.update(Message::SeekCommit)
+                                }
+                                None => Task::none(),
+                            }
+                        }
+                        MprisCommand::SetVolume(vol) => {
+                            self.update(Message::SetVolume(vol.clamp(0.0, 1.0) as f32))
+                        }
+                        MprisCommand::Shuffle(enabled) => {
+                            if self.config.shuffle == enabled {
+                                Task::none()
+                            } else {
+                                self.update(Message::ToggleShuffle)
+                            }
+                        }
+                        MprisCommand::Loop(mode) => {
+                            let desired = match mode {
+                                LoopMode::None => crate::config::RepeatMode::None,
+                                LoopMode::Playlist => crate::config::RepeatMode::All,
+                                LoopMode::Track => crate::config::RepeatMode::One,
+                            };
+                            // `CycleRepeat` only steps one position at a time
+                            // around the 3-variant cycle; drive it around
+                            // until it lands on `desired`, reusing its exact
+                            // MPD-dispatch logic at each step.
+                            let mut tasks = Vec::new();
+                            for _ in 0..3 {
+                                if self.config.repeat_mode == desired {
+                                    break;
+                                }
+                                tasks.push(self.update(Message::CycleRepeat));
+                            }
+                            Task::batch(tasks)
+                        }
+                        MprisCommand::Raise => {
+                            tracing::debug!(
+                                "MPRIS: Raise requested (no-op, Lyra has no window-raise hook)"
+                            );
+                            Task::none()
+                        }
+                        MprisCommand::Quit => self.update(Message::Quit),
+                    };
+                    self.publish_mpris();
+                    return task;
+                }
+            },
+            // Global keyboard shortcuts resolved by `crate::keybinds::resolve`
+            // (see `on_key_press` in `subscription()`). The resolver is a bare
+            // `fn` pointer with no access to `self`, so every shortcut arrives
+            // here as a self-describing `Shortcut` and is interpreted against
+            // the current application state -- each arm below just forwards to
+            // the existing message/helper that already does the real work.
+            Message::Shortcut(shortcut) => {
+                use crate::keybinds::Shortcut;
+
+                // The library-search field can be visible without holding
+                // keyboard focus (a focused text input already captures its
+                // own key presses before `on_key_press` ever sees them), so
+                // this is the extra guard that stops transport/navigation
+                // shortcuts from firing while the user is meant to be typing
+                // a query. `FocusSearch`/`Escape` must keep working.
+                if self.search_active
+                    && !matches!(shortcut, Shortcut::FocusSearch | Shortcut::Escape)
+                {
+                    return Task::none();
+                }
+
+                match shortcut {
+                    Shortcut::PlayPause => return self.update(Message::TogglePlayback),
+                    Shortcut::Stop => {
+                        if let Some(player) = &mut self.player {
+                            match player.stop() {
+                                Ok(()) => self.playback_position = Duration::ZERO,
+                                Err(e) => tracing::error!("Stop failed: {e}"),
+                            }
+                        }
+                    }
+                    Shortcut::Next => return self.update(Message::NextTrack),
+                    Shortcut::Previous => return self.update(Message::PreviousTrack),
+                    Shortcut::SeekForward | Shortcut::SeekBackward => {
+                        if let Some(track) = &self.current_track
+                            && track.duration > Duration::ZERO
+                        {
+                            let step = Duration::from_secs(5);
+                            let target = if shortcut == Shortcut::SeekForward {
+                                (self.playback_position + step).min(track.duration)
+                            } else {
+                                self.playback_position.saturating_sub(step)
+                            };
+                            self.seeking_preview =
+                                Some(target.as_secs_f32() / track.duration.as_secs_f32());
+                            return self.update(Message::SeekCommit);
+                        }
+                    }
+                    Shortcut::VolumeUp | Shortcut::VolumeDown => {
+                        let current = self
+                            .player
+                            .as_ref()
+                            .map_or(self.config.volume, |p| p.volume());
+                        let step = 0.05;
+                        let target = if shortcut == Shortcut::VolumeUp {
+                            (current + step).min(1.0)
+                        } else {
+                            (current - step).max(0.0)
+                        };
+                        return self.update(Message::SetVolume(target));
+                    }
+                    Shortcut::Mute => {
+                        let current = self
+                            .player
+                            .as_ref()
+                            .map_or(self.config.volume, |p| p.volume());
+                        let target = if current > 0.0 {
+                            // Remember the level so unmuting restores it
+                            // rather than jumping to some fixed default.
+                            self.pre_mute_volume = Some(current);
+                            0.0
+                        } else {
+                            // Fall back to full volume only when we have no
+                            // record of a pre-mute level (e.g. the app
+                            // started at zero).
+                            self.pre_mute_volume.take().unwrap_or(1.0)
+                        };
+                        return self.update(Message::SetVolume(target));
+                    }
+                    Shortcut::ToggleShuffle => return self.update(Message::ToggleShuffle),
+                    Shortcut::CycleRepeat => return self.update(Message::CycleRepeat),
+                    Shortcut::ToggleFavorite => {
+                        if let Some(id) = self.current_track.as_ref().map(|t| t.id.to_string()) {
+                            return self.update(Message::ToggleFavorite(id));
+                        }
+                    }
+                    Shortcut::ToggleLyrics => return self.update(Message::ShowLyrics),
+                    Shortcut::ToggleExpanded => {
+                        return if self.expand_progress > 0.0 || self.expand_target.is_some() {
+                            self.update(Message::CollapseNowPlaying)
+                        } else {
+                            self.update(Message::ExpandNowPlaying)
+                        };
+                    }
+                    Shortcut::FocusSearch => return self.update(Message::ToggleLibrarySearch),
+                    Shortcut::NavPage(n) => {
+                        // Bind the entity first: `nav.iter()` borrows `self`
+                        // immutably and `on_nav_select` needs it mutably.
+                        let target = self.nav.iter().nth((n as usize).saturating_sub(1));
+                        if let Some(entity) = target {
+                            return self.on_nav_select(entity);
+                        }
+                    }
+                    Shortcut::Escape => {
+                        if self.core.window.show_context {
+                            self.core.window.show_context = false;
+                        } else if self.expand_progress > 0.0 || self.expand_target.is_some() {
+                            return self.update(Message::CollapseNowPlaying);
+                        } else if self.search_active {
+                            return self.update(Message::ClearLibrarySearch);
+                        }
+                    }
+                }
+            }
         }
 
         Task::none()
@@ -4644,6 +5302,8 @@ impl cosmic::Application for AppModel {
         self.selected_artist = None;
         self.selected_playlist = None;
         self.selected_genre = None;
+        self.selected_smart_playlist = None;
+        self.smart_playlist_editor = None;
 
         // Collapse expanded now-playing view when navigating
         if self.expand_progress > 0.0 || self.expand_target.is_some() {
@@ -4657,7 +5317,33 @@ impl cosmic::Application for AppModel {
         let page = self.nav.active_data::<Page>().cloned();
         let page_task = match page {
             Some(Page::Playlists) => self.load_playlists(),
+            Some(Page::SmartPlaylists) => {
+                let db_path = dirs::data_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("lyra")
+                    .join("library.db");
+                cosmic::task::future(async move {
+                    let playlists = tokio::task::spawn_blocking(move || {
+                        crate::library::LibraryDb::open(&db_path)
+                            .and_then(|db| db.list_smart_playlists())
+                            .unwrap_or_else(|e| {
+                                tracing::warn!("list_smart_playlists failed: {e}");
+                                Vec::new()
+                            })
+                    })
+                    .await
+                    .unwrap_or_default();
+                    cosmic::Action::App(Message::SmartPlaylists(
+                        crate::views::smart_playlists::SmartPlaylistMessage::Loaded(playlists),
+                    ))
+                })
+            }
             Some(Page::Genres) => self.load_genres(),
+            Some(Page::Folders) => {
+                self.folder_state
+                    .set_tree(crate::views::folders::FolderTree::build(&self.all_tracks));
+                Task::none()
+            }
             Some(Page::Podcasts) => self.load_podcasts(),
             Some(Page::Radio) => self.load_radio_stations(),
             _ => Task::none(),
@@ -5716,10 +6402,14 @@ impl AppModel {
         }
     }
 
-    /// Incrementally merge new albums into `all_artists`.
-    ///
+    /// Incrementally merge new albums into `all_artists`, splitting each
+    /// album's primary-artist tag into individual collaborators when
+    /// `split_artist_tags` is enabled — one album can then contribute to
+    /// several `Artist` entries so browsing by any collaborator finds it.
+    /// Albums keep a single primary attribution (`album.artist`, set by
+    /// the provider) for the Albums view; only the artist index widens.
     /// Only processes the `new_albums` slice (the batch that just arrived),
-    /// appending to existing artists or creating new ones.  Avatars are only
+    /// appending to existing artists or creating new ones. Avatars are only
     /// generated for newly-seen artist names — existing entries in
     /// `artist_avatars` are reused.
     fn merge_artists_from_batch(&mut self, new_albums: &[Album]) {
@@ -5731,25 +6421,56 @@ impl AppModel {
             .map(|(i, a)| (a.name.clone(), i))
             .collect();
 
-        for album in new_albums {
-            if let Some(&idx) = index.get(&album.artist) {
-                self.all_artists[idx].albums.push(album.clone());
-            } else {
-                let idx = self.all_artists.len();
-                index.insert(album.artist.clone(), idx);
-                self.all_artists.push(Artist {
-                    name: album.artist.clone(),
-                    albums: vec![album.clone()],
-                });
+        let split_enabled = self.config.split_artist_tags;
+        let delimiters = self.config.artist_tag_delimiters.clone();
 
-                // Generate avatar only for new artists.
-                if !self.artist_avatars.contains_key(&album.artist) {
-                    let bytes = crate::library::CoverArt::generate_artist_avatar(&album.artist, 64);
-                    let handle = widget::icon::from_raster_bytes(bytes);
-                    self.artist_avatars.insert(album.artist.clone(), handle);
+        for album in new_albums {
+            let names: Vec<String> = if split_enabled {
+                crate::library::artist_tags::split(&album.artist, &delimiters)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            } else {
+                vec![album.artist.clone()]
+            };
+
+            for name in names {
+                if let Some(&idx) = index.get(&name) {
+                    self.all_artists[idx].albums.push(album.clone());
+                } else {
+                    let idx = self.all_artists.len();
+                    index.insert(name.clone(), idx);
+                    self.all_artists.push(Artist {
+                        name: name.clone(),
+                        albums: vec![album.clone()],
+                    });
+
+                    // Generate an avatar only for artists we've never seen,
+                    // in a single hash lookup.
+                    if let std::collections::hash_map::Entry::Vacant(slot) =
+                        self.artist_avatars.entry(name)
+                    {
+                        let bytes =
+                            crate::library::CoverArt::generate_artist_avatar(slot.key(), 64);
+                        slot.insert(widget::icon::from_raster_bytes(bytes));
+                    }
                 }
             }
         }
+    }
+
+    /// Rebuild `all_artists` from scratch by re-running the batch-merge
+    /// aggregation (`merge_artists_from_batch`) over every album currently
+    /// in `all_albums`. This is the single aggregation path — used
+    /// whenever `split_artist_tags` or `artist_tag_delimiters` changes, so
+    /// the artist index picks up the new split rules immediately, without
+    /// a rescan.
+    fn rebuild_all_artists(&mut self) {
+        self.all_artists.clear();
+        let albums = std::mem::take(&mut self.all_albums);
+        self.merge_artists_from_batch(&albums);
+        self.all_artists.sort_by(|a, b| a.name.cmp(&b.name));
+        self.all_albums = albums;
     }
 
     /// Start playback from the given queue at `start_index`.
@@ -5786,10 +6507,60 @@ impl AppModel {
                 }
                 let mpd_task = self.dispatch_mpd_after_play();
                 let blur_task = self.maybe_update_blurred_cover();
+                self.publish_mpris();
                 return Task::batch([podcast_save_task, mpd_task, blur_task]);
             }
         }
         podcast_save_task
+    }
+
+    /// Builds an `MprisSnapshot` from current player/config state and
+    /// forwards it to the MPRIS D-Bus handle, if the session-bus server is
+    /// up. `MprisHandle::publish` diffs internally, so calling this
+    /// unconditionally on every tick is cheap.
+    fn publish_mpris(&self) {
+        let Some(handle) = self.mpris.as_ref() else {
+            return;
+        };
+
+        let status = match self.player.as_ref().map(|p| p.state()) {
+            Some(PlaybackState::Playing) => crate::mpris::MprisStatus::Playing,
+            Some(PlaybackState::Paused) => crate::mpris::MprisStatus::Paused,
+            Some(PlaybackState::Stopped) | None => crate::mpris::MprisStatus::Stopped,
+        };
+
+        let loop_mode = match self.config.repeat_mode {
+            crate::config::RepeatMode::None => crate::mpris::LoopMode::None,
+            crate::config::RepeatMode::All => crate::mpris::LoopMode::Playlist,
+            crate::config::RepeatMode::One => crate::mpris::LoopMode::Track,
+        };
+
+        let track = self.current_track.as_ref();
+        let art_url = track.and_then(|t| handle.art_url_for_track(t));
+        let has_queue = !self.all_tracks.is_empty();
+
+        handle.publish(crate::mpris::MprisSnapshot {
+            status,
+            title: track.map(|t| t.title.clone()).unwrap_or_default(),
+            artist: track.map(|t| t.artist.clone()).unwrap_or_default(),
+            album: track.map(|t| t.album.clone()).unwrap_or_default(),
+            album_artist: track.map(|t| t.album_artist.clone()).unwrap_or_default(),
+            genre: track.map(|t| t.genre.clone()).unwrap_or_default(),
+            track_id: track.map(|t| t.id).unwrap_or(0),
+            length_us: track.map(|t| t.duration.as_micros() as i64).unwrap_or(0),
+            position_us: self.playback_position.as_micros() as i64,
+            art_url,
+            volume: self
+                .player
+                .as_ref()
+                .map(|p| p.volume() as f64)
+                .unwrap_or(self.config.volume as f64),
+            shuffle: self.config.shuffle,
+            loop_mode,
+            can_go_next: track.is_some() && has_queue,
+            can_go_previous: track.is_some() && has_queue,
+            can_seek: track.is_some_and(|t| &*t.provider_id != "radio"),
+        });
     }
 
     fn sort_tracks(&mut self, field: songs::SortField) {
@@ -5868,6 +6639,18 @@ impl AppModel {
         }
     }
 
+    /// Every track under the folder view's current directory, recursively,
+    /// in path order. Shared by "play folder" and "add folder to queue".
+    fn current_folder_tracks(&self) -> Vec<Track> {
+        let dir = self.folder_state.current().to_path_buf();
+        self.folder_state
+            .tree()
+            .tracks_in(&dir, true)
+            .into_iter()
+            .filter_map(|i| self.all_tracks.get(i).cloned())
+            .collect()
+    }
+
     /// Pushes a toast notification, mapping its auto-dismiss timer task into
     /// the `cosmic::Action`-wrapped message type `update()` returns.
     fn push_toast(
@@ -5889,11 +6672,14 @@ impl AppModel {
         }
     }
 
-    /// Trigger blur computation for the current track if the album changed.
+    /// Trigger blur + accent-colour computation for the current track if
+    /// the album changed.
     ///
     /// Checks if the current track's album key differs from the cached blurred
     /// cover key. If so, looks up the raw bytes and spawns a background task
-    /// to compute the blur. Returns a Task that sends `Message::BlurReady`.
+    /// that computes both the blur and the cover-art accent colour from the
+    /// same bytes (see `library::palette::extract`). Returns a Task that
+    /// sends `Message::BlurReady`.
     fn maybe_update_blurred_cover(&mut self) -> Task<cosmic::Action<Message>> {
         let track = match self.current_track.as_ref() {
             Some(t) => t,
@@ -5901,6 +6687,7 @@ impl AppModel {
                 // No track — clear everything.
                 self.blurred_cover = None;
                 self.blurred_cover_key = None;
+                self.accent = None;
                 return Task::none();
             }
         };
@@ -5933,7 +6720,7 @@ impl AppModel {
             }
         };
 
-        // Bytes are available — start the async blur computation.
+        // Bytes are available — start the async blur+accent computation.
         // Clear the key now so a concurrent track change will not skip
         // the next blur computation (BlurReady carries the key and will
         // only apply if it still matches the current track).
@@ -5941,21 +6728,20 @@ impl AppModel {
 
         let key_clone = key.clone();
         cosmic::task::future(async move {
-            // Compute blur in a blocking task to avoid stalling the async runtime.
-            let blurred = tokio::task::spawn_blocking(move || {
-                crate::views::now_playing::blur::compute_blurred_cover(&bytes)
+            // Compute blur and accent in the same blocking task, off the
+            // async runtime, from the same bytes. Accent extraction is
+            // bounded-cost (fixed 32x32 working set) regardless of source
+            // resolution, so it adds no meaningful overhead next to the blur.
+            let (blurred, accent) = tokio::task::spawn_blocking(move || {
+                let blurred = crate::views::now_playing::blur::compute_blurred_cover(&bytes);
+                let accent = crate::library::palette::extract(&bytes);
+                (blurred, accent)
             })
             .await
-            .ok()
-            .flatten();
+            .unwrap_or((None, None));
 
-            if let Some(blurred_bytes) = blurred {
-                let handle = widget::icon::from_raster_bytes(blurred_bytes);
-                cosmic::Action::App(Message::BlurReady(key_clone, handle))
-            } else {
-                // Blur computation failed — no-op; keep old blur or black base.
-                cosmic::Action::None
-            }
+            let handle = blurred.map(widget::icon::from_raster_bytes);
+            cosmic::Action::App(Message::BlurReady(key_clone, handle, accent))
         })
     }
 
@@ -6132,7 +6918,10 @@ fn episode_file_extension(mime: &str, enclosure_url: &str) -> String {
         "audio/wav" => return "wav".to_string(),
         _ => {}
     }
-    let path_part = enclosure_url.split(['?', '#']).next().unwrap_or(enclosure_url);
+    let path_part = enclosure_url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(enclosure_url);
     std::path::Path::new(path_part)
         .extension()
         .and_then(|e| e.to_str())
@@ -6154,8 +6943,7 @@ fn download_episode_task(episode: Episode) -> Task<cosmic::Action<Message>> {
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("lyra")
                 .join("podcast_downloads");
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("Create download dir error: {e}"))?;
+            std::fs::create_dir_all(&dir).map_err(|e| format!("Create download dir error: {e}"))?;
             let ext = episode_file_extension(&episode.mime, &episode.enclosure_url);
             let dest = dir.join(format!("{episode_id}.{ext}"));
 
@@ -6210,7 +6998,9 @@ pub enum Page {
     Artists,
     Songs,
     Playlists,
+    SmartPlaylists,
     Genres,
+    Folders,
     Podcasts,
     Radio,
     Convert,
@@ -6259,9 +7049,13 @@ impl menu::action::MenuAction for MenuAction {
 
 /// Builds the map of global keyboard shortcuts to menu actions.
 ///
-/// Consumed both by the menu bar (to display the shortcut label next to
-/// each item) and by the keyboard subscription in `subscription()` (to
-/// actually trigger the action when the shortcut is pressed).
+/// Consumed by the menu bar to display the shortcut label next to each
+/// item. Runtime shortcut handling lives in `crate::keybinds::resolve` /
+/// `Message::Shortcut` instead (see the `on_key_press` subscription in
+/// `subscription()`), so this map only carries an entry where the
+/// corresponding `Shortcut` also has a `MenuAction` counterpart worth
+/// labelling -- currently just `Search` (`Ctrl+F` doubles as
+/// `Shortcut::FocusSearch`).
 fn key_binds() -> HashMap<menu::KeyBind, MenuAction> {
     let mut key_binds = HashMap::new();
     key_binds.insert(
@@ -6279,6 +7073,17 @@ fn key_binds() -> HashMap<menu::KeyBind, MenuAction> {
 /// `None` (search inactive or the query is empty).
 fn unfilter_index(map: Option<&[usize]>, i: usize) -> usize {
     map.map_or(i, |m| m[i])
+}
+
+/// Parse the delimiter-list text box (delimiters joined by `" | "`) back
+/// into the `Vec<String>` stored in `Config::artist_tag_delimiters`,
+/// trimming each entry and dropping empties.
+fn parse_delimiters_input(text: &str) -> Vec<String> {
+    text.split(" | ")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Pure staleness check for an async library reload result.

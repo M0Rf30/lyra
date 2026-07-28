@@ -12,6 +12,7 @@ use super::{NowPlayingMessage, format_time};
 use crate::config::RepeatMode;
 use crate::fl;
 use crate::library::Track;
+use crate::library::palette::Accent;
 use crate::player::PlaybackState;
 use crate::views::common;
 use cosmic::iced::alignment::{Horizontal, Vertical};
@@ -19,6 +20,7 @@ use cosmic::iced::core::Background;
 use cosmic::iced::{Alignment, ContentFit, Length};
 use cosmic::widget;
 use cosmic::widget::tooltip::Position as TooltipPosition;
+use std::rc::Rc;
 use std::time::Duration;
 
 /// Fixed height of the compact bar — never grows regardless of content.
@@ -34,6 +36,28 @@ const SEEK_TRACK_HEIGHT: f32 = 16.0;
 
 /// Visible thickness of the inert seek-track placeholder's rail.
 const SEEK_TRACK_THICKNESS: f32 = 4.0;
+
+/// Slider class that tints only the active (played) portion of the rail
+/// and the drag handle with the cover-art accent colour, starting from
+/// `Slider::Standard`'s own computed style via `Catalog::style` so border,
+/// thickness and handle shape stay in sync with the theme — mirrors
+/// `expanded_view::accent_slider_class` but kept file-local since the two
+/// views don't otherwise share private helpers.
+fn accent_slider_class(accent: &Accent) -> cosmic::theme::iced::Slider {
+    let color = cosmic::iced::Color::from_rgb(accent.color[0], accent.color[1], accent.color[2]);
+    let style = move |theme: &cosmic::Theme, status: widget::slider::Status| {
+        let mut base =
+            widget::slider::Catalog::style(theme, &cosmic::theme::iced::Slider::default(), status);
+        base.rail.backgrounds.0 = Background::Color(color);
+        base.handle.background = Background::Color(color);
+        base
+    };
+    cosmic::theme::iced::Slider::Custom {
+        active: Rc::new(move |t| style(t, widget::slider::Status::Active)),
+        hovered: Rc::new(move |t| style(t, widget::slider::Status::Hovered)),
+        dragging: Rc::new(move |t| style(t, widget::slider::Status::Dragged)),
+    }
+}
 
 /// An icon button with a caption tooltip, disabled (and non-interactive)
 /// whenever `enabled` is false — for every transport/utility control whose
@@ -112,6 +136,7 @@ pub fn playback_bar<'a>(
     cover_art: Option<&'a widget::icon::Handle>,
     seeking_preview: Option<f32>,
     _blurred_cover: Option<&'a widget::icon::Handle>,
+    accent: Option<&'a Accent>,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     let has_track = current_track.is_some();
 
@@ -279,11 +304,15 @@ pub fn playback_bar<'a>(
     let seek_bar = widget::Row::new()
         .push(common::cell_caption(format_time(display_position)))
         .push(if has_track {
-            widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
-                .step(0.001_f32)
-                .on_release(NowPlayingMessage::SeekCommit)
-                .width(Length::Fill)
-                .into()
+            let mut seek_slider =
+                widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
+                    .step(0.001_f32)
+                    .on_release(NowPlayingMessage::SeekCommit)
+                    .width(Length::Fill);
+            if let Some(accent) = accent {
+                seek_slider = seek_slider.class(accent_slider_class(accent));
+            }
+            seek_slider.into()
         } else {
             inert_seek_track()
         })

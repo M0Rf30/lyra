@@ -89,6 +89,11 @@ keyring-core = "1"
 linux-keyutils-keyring-store = "1"
 zbus-secret-service-keyring-store = { version = "1", features = ["rt-tokio-crypto-rust"] }
 
+# MPRIS2 D-Bus media player interface (media keys, shell/panel integration).
+# Rides the zbus 5.x already pulled in by ashpd and the secret-service keyring
+# store, so this adds no new transitive D-Bus stack.
+mpris-server = { version = "0.10", features = ["tokio"] }
+
 # Misc
 open = "5"
 dirs = "6"

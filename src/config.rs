@@ -148,6 +148,14 @@ pub enum ReplayGainMode {
 pub struct Config {
     /// Music library directories to scan.
     pub music_dirs: Vec<PathBuf>,
+    /// Whether to split multi-artist tags (e.g. "A feat. B", "A; B") into
+    /// individual artists at aggregation time. The raw tag stored per
+    /// track is never modified — this only affects how albums/tracks are
+    /// grouped into `Artist` entries for browsing.
+    pub split_artist_tags: bool,
+    /// Delimiters tried (in order) when splitting a raw artist tag; see
+    /// `crate::library::artist_tags::split`.
+    pub artist_tag_delimiters: Vec<String>,
     /// Master volume (0.0 - 1.0).
     pub volume: f32,
     /// Whether shuffle is enabled.
@@ -191,6 +199,11 @@ impl Default for Config {
 
         Self {
             music_dirs: vec![music_dir],
+            split_artist_tags: true,
+            artist_tag_delimiters: crate::library::artist_tags::DEFAULT_DELIMITERS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             volume: 0.8,
             shuffle: false,
             repeat_mode: RepeatMode::None,

@@ -5,7 +5,7 @@
 
 use crate::config::ReplayGainMode;
 use crate::fl;
-use cosmic::iced::Length;
+use cosmic::iced::{Alignment, Length};
 use cosmic::widget;
 use std::path::PathBuf;
 
@@ -33,6 +33,14 @@ pub enum SettingsMessage {
     OpenProviders,
     /// Open the About dialog.
     OpenAbout,
+    /// Toggle multi-artist tag splitting on/off.
+    SetSplitArtistTags(bool),
+    /// Live text of the delimiter list editor, before submit.
+    EditArtistTagDelimiters(String),
+    /// Commit the edited delimiter text (parsed on the `" | "` separator).
+    SubmitArtistTagDelimiters(String),
+    /// Reset the delimiter list to the built-in defaults.
+    ResetArtistTagDelimiters,
 }
 
 /// All replay gain modes, in the order shown in the dropdown.
@@ -49,10 +57,16 @@ pub fn view<'a>(
     crossfade_secs: f32,
     replay_gain_mode: ReplayGainMode,
     volume: f32,
+    split_artist_tags: bool,
+    artist_tag_delimiters_input: &'a str,
 ) -> cosmic::Element<'a, SettingsMessage> {
     let col = widget::Column::new()
         .spacing(24)
-        .push(library_section(music_dirs))
+        .push(library_section(
+            music_dirs,
+            split_artist_tags,
+            artist_tag_delimiters_input,
+        ))
         .push(playback_section(crossfade_secs, replay_gain_mode, volume))
         .push(shortcuts_section())
         .push(about_section());
@@ -62,8 +76,13 @@ pub fn view<'a>(
         .into()
 }
 
-/// Library section: configured music directories, with add/remove.
-fn library_section<'a>(music_dirs: &'a [PathBuf]) -> cosmic::Element<'a, SettingsMessage> {
+/// Library section: configured music directories, with add/remove, plus
+/// the multi-artist-tag-splitting toggle and delimiter editor.
+fn library_section<'a>(
+    music_dirs: &'a [PathBuf],
+    split_artist_tags: bool,
+    artist_tag_delimiters_input: &'a str,
+) -> cosmic::Element<'a, SettingsMessage> {
     let mut section = widget::settings::section().title(fl!("settings-library"));
 
     if music_dirs.is_empty() {
@@ -78,9 +97,34 @@ fn library_section<'a>(music_dirs: &'a [PathBuf]) -> cosmic::Element<'a, Setting
         }
     }
 
-    section = section.add(
-        widget::button::text(fl!("add-music-folder")).on_press(SettingsMessage::AddMusicDir),
-    );
+    section = section
+        .add(widget::button::text(fl!("add-music-folder")).on_press(SettingsMessage::AddMusicDir));
+
+    let split_item = widget::settings::item::builder(fl!("split-artist-tags"))
+        .description(fl!("split-artist-tags-description"))
+        .control(widget::toggler(split_artist_tags).on_toggle(SettingsMessage::SetSplitArtistTags));
+    section = section.add(split_item);
+
+    let delimiters_row = widget::Row::new()
+        .push(
+            widget::text_input(
+                fl!("artist-tag-delimiters-placeholder"),
+                artist_tag_delimiters_input,
+            )
+            .on_input(SettingsMessage::EditArtistTagDelimiters)
+            .on_submit_maybe(Some(SettingsMessage::SubmitArtistTagDelimiters)),
+        )
+        .push(
+            widget::button::text(fl!("reset-to-defaults"))
+                .on_press(SettingsMessage::ResetArtistTagDelimiters),
+        )
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+    let delimiters_item = widget::settings::item::builder(fl!("artist-tag-delimiters"))
+        .description(fl!("artist-tag-delimiters-description"))
+        .control(delimiters_row);
+    section = section.add(delimiters_item);
 
     section.into()
 }
@@ -137,8 +181,14 @@ fn playback_section<'a>(
 fn shortcuts_section<'a>() -> cosmic::Element<'a, SettingsMessage> {
     widget::settings::section()
         .title(fl!("settings-shortcuts"))
-        .add(drawer_link_row(fl!("equalizer"), SettingsMessage::OpenEqualizer))
-        .add(drawer_link_row(fl!("providers"), SettingsMessage::OpenProviders))
+        .add(drawer_link_row(
+            fl!("equalizer"),
+            SettingsMessage::OpenEqualizer,
+        ))
+        .add(drawer_link_row(
+            fl!("providers"),
+            SettingsMessage::OpenProviders,
+        ))
         .into()
 }
 

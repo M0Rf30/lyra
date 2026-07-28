@@ -4,14 +4,17 @@ use super::{NowPlayingMessage, format_time};
 use crate::config::RepeatMode;
 use crate::fl;
 use crate::library::Track;
+use crate::library::palette::Accent;
 use crate::player::PlaybackState;
 use crate::views::common;
 use cosmic::iced::alignment::{Horizontal, Vertical};
+use cosmic::iced::core::Background;
 use cosmic::iced::core::text::{Ellipsize, EllipsizeHeightLimit, Wrapping};
 use cosmic::iced::widget::Stack;
 use cosmic::iced::{Alignment, Color, Length};
 use cosmic::widget;
 use cosmic::widget::tooltip::Position as TooltipPosition;
+use std::rc::Rc;
 use std::time::Duration;
 
 #[cfg(feature = "visualizer")]
@@ -79,17 +82,71 @@ fn transport_button<'a, M: Clone + 'static>(
 /// other four. `transport_button`'s shared signature has no class-override
 /// knob and backs four other buttons across three call sites in this file
 /// — rather than complicate it, this is a small dedicated variant used
-/// only for the play/pause button.
+/// only for the play/pause button. When cover-art `accent` is available it
+/// swaps in `accent_button_class` (accent-filled) instead of the plain
+/// theme-accent `Suggested` style; `None` keeps `Suggested` untouched.
 fn play_pause_button<'a, M: Clone + 'static>(
     icon_name: &'static str,
     icon_size: u16,
     label: String,
     on_press: M,
+    accent: Option<&Accent>,
 ) -> cosmic::Element<'a, M> {
+    let class = accent
+        .map(accent_button_class)
+        .unwrap_or(cosmic::theme::Button::Suggested);
     let button = widget::button::icon(widget::icon::from_name(icon_name).size(icon_size))
-        .class(cosmic::theme::Button::Suggested)
+        .class(class)
         .on_press(on_press);
     widget::tooltip(button, widget::text::caption(label), TooltipPosition::Top).into()
+}
+
+/// Button class that fills with the cover-art accent colour instead of the
+/// theme accent, mirroring `Button::Suggested`'s filled/pill shape via
+/// `radius_xl` corners so the play/pause button stays visually consistent
+/// while matching the current artwork. Hover/pressed/disabled states dim
+/// the same fill via alpha rather than deriving separate colours from the
+/// palette.
+fn accent_button_class(accent: &Accent) -> cosmic::theme::Button {
+    let background = Color::from_rgb(accent.color[0], accent.color[1], accent.color[2]);
+    let on = Color::from_rgb(accent.on_color[0], accent.on_color[1], accent.on_color[2]);
+    let style = move |theme: &cosmic::Theme, alpha: f32| cosmic::widget::button::Style {
+        background: Some(Background::Color(Color {
+            a: alpha,
+            ..background
+        })),
+        text_color: Some(on),
+        icon_color: Some(on),
+        border_radius: theme.cosmic().corner_radii.radius_xl.into(),
+        ..cosmic::widget::button::Style::new()
+    };
+    cosmic::theme::Button::Custom {
+        active: Box::new(move |_focused, theme| style(theme, 1.0)),
+        hovered: Box::new(move |_focused, theme| style(theme, 0.85)),
+        pressed: Box::new(move |_focused, theme| style(theme, 0.7)),
+        disabled: Box::new(move |theme| style(theme, 0.5)),
+    }
+}
+
+/// Slider class that tints only the active (played) portion of the rail
+/// and the drag handle with the cover-art accent colour. Starts from
+/// `Slider::Standard`'s own computed style via `Catalog::style` so border,
+/// rail thickness and handle shape stay perfectly in sync with the theme;
+/// only the two accent-carrying fields are overridden.
+fn accent_slider_class(accent: &Accent) -> cosmic::theme::iced::Slider {
+    let color = Color::from_rgb(accent.color[0], accent.color[1], accent.color[2]);
+    let style = move |theme: &cosmic::Theme, status: widget::slider::Status| {
+        let mut base =
+            widget::slider::Catalog::style(theme, &cosmic::theme::iced::Slider::default(), status);
+        base.rail.backgrounds.0 = Background::Color(color);
+        base.handle.background = Background::Color(color);
+        base
+    };
+    cosmic::theme::iced::Slider::Custom {
+        active: Rc::new(move |t| style(t, widget::slider::Status::Active)),
+        hovered: Rc::new(move |t| style(t, widget::slider::Status::Hovered)),
+        dragging: Rc::new(move |t| style(t, widget::slider::Status::Dragged)),
+    }
 }
 
 /// Standard collapse-to-compact-bar control, pinned top-right. 24px icon +
@@ -221,15 +278,18 @@ fn seek_bar_row<'a>(
     duration: Duration,
     progress: f32,
     space_s: f32,
+    accent: Option<&Accent>,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
+    let mut seek_slider = widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
+        .step(0.001_f32)
+        .on_release(NowPlayingMessage::SeekCommit)
+        .width(Length::Fill);
+    if let Some(accent) = accent {
+        seek_slider = seek_slider.class(accent_slider_class(accent));
+    }
     widget::Row::new()
         .push(widget::text::body(format_time(display_position)))
-        .push(
-            widget::slider(0.0..=1.0, progress, NowPlayingMessage::SeekPreview)
-                .step(0.001_f32)
-                .on_release(NowPlayingMessage::SeekCommit)
-                .width(Length::Fill),
-        )
+        .push(seek_slider)
         .push(widget::text::body(format_time(duration)))
         .spacing(space_s)
         .align_y(Alignment::Center)
@@ -248,6 +308,7 @@ fn transport_row<'a>(
     shuffle: bool,
     repeat_mode: RepeatMode,
     space_xxs: f32,
+    accent: Option<&Accent>,
 ) -> cosmic::Element<'a, NowPlayingMessage> {
     let play_icon = if state == PlaybackState::Playing {
         "media-playback-pause-symbolic"
@@ -280,6 +341,7 @@ fn transport_row<'a>(
             36,
             play_label,
             NowPlayingMessage::TogglePlayback,
+            accent,
         ))
         .push(transport_button(
             "media-skip-forward-symbolic",
@@ -464,6 +526,7 @@ pub fn expanded_now_playing<'a>(
     repeat_mode: RepeatMode,
     cover_art: Option<&'a widget::icon::Handle>,
     blurred_cover: Option<&'a widget::icon::Handle>,
+    accent: Option<&'a Accent>,
     seeking_preview: Option<f32>,
     expand_progress: f32,
     lyrics_overlay_active: bool,
@@ -621,7 +684,13 @@ pub fn expanded_now_playing<'a>(
 
         let card_col = widget::Column::new()
             .push(info_row)
-            .push(seek_bar_row(display_position, duration, progress, space_s))
+            .push(seek_bar_row(
+                display_position,
+                duration,
+                progress,
+                space_s,
+                accent,
+            ))
             .push(transport_centered)
             .push(utility_full)
             .spacing(space_xs);
@@ -670,6 +739,7 @@ pub fn expanded_now_playing<'a>(
                     position,
                     BACKDROP_TEXT,
                     BACKDROP_SUBTEXT,
+                    accent,
                 ),
             )
             .width(Length::Fill)
@@ -822,7 +892,13 @@ pub fn expanded_now_playing<'a>(
                 .height(Length::Fixed(space_m)),
         );
 
-        right_col = right_col.push(seek_bar_row(display_position, duration, progress, space_s));
+        right_col = right_col.push(seek_bar_row(
+            display_position,
+            duration,
+            progress,
+            space_s,
+            accent,
+        ));
 
         right_col = right_col.push(
             widget::Space::new()
@@ -830,7 +906,13 @@ pub fn expanded_now_playing<'a>(
                 .height(Length::Fixed(space_s)),
         );
 
-        right_col = right_col.push(transport_row(state, shuffle, repeat_mode, space_xxs));
+        right_col = right_col.push(transport_row(
+            state,
+            shuffle,
+            repeat_mode,
+            space_xxs,
+            accent,
+        ));
 
         right_col = right_col.push(
             widget::Space::new()
@@ -883,6 +965,7 @@ pub fn expanded_now_playing<'a>(
                 position,
                 lyrics_text_color,
                 lyrics_subtext_color,
+                accent,
             )
         } else {
             cover_col
