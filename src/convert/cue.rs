@@ -30,6 +30,8 @@ pub enum CueError {
     NoTracks,
     #[error("invalid INDEX timestamp on line {line}: {text:?}")]
     BadTimestamp { line: usize, text: String },
+    #[error("track {track}'s INDEX 01 doesn't come after the previous track's; CUE indexes must increase")]
+    OutOfOrder { track: u32 },
 }
 
 /// Parses a CUE sheet's tracks, in order, with `start`/`end` offsets
@@ -107,6 +109,11 @@ pub fn parse(input: &str) -> Result<Vec<CueTrack>, CueError> {
     }
 
     let starts: Vec<Duration> = tracks.iter().map(|t| t.start.unwrap_or_default()).collect();
+    for i in 1..starts.len() {
+        if starts[i] < starts[i - 1] {
+            return Err(CueError::OutOfOrder { track: tracks[i].number });
+        }
+    }
     Ok(tracks
         .into_iter()
         .enumerate()
@@ -214,5 +221,11 @@ FILE "animals.flac" WAVE
     fn rejects_bad_timestamp() {
         let bad = "TRACK 01 AUDIO\nINDEX 01 not-a-timestamp\n";
         assert!(matches!(parse(bad), Err(CueError::BadTimestamp { .. })));
+    }
+
+    #[test]
+    fn rejects_out_of_order_track_indexes() {
+        let sheet = "TRACK 01 AUDIO\nINDEX 01 02:00:00\nTRACK 02 AUDIO\nINDEX 01 01:00:00\n";
+        assert!(matches!(parse(sheet), Err(CueError::OutOfOrder { track: 2 })));
     }
 }

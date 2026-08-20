@@ -35,11 +35,14 @@ use crate::player::engine::resampler::{ResamplerQuality, StreamResampler};
 
 use super::cue;
 use super::encoder;
-use super::{ConvertError, ConvertJob, JobKind};
+use super::{ConvertError, ConvertJob, JobId, JobKind};
 
 /// Runs `job` to completion: decodes, optionally resamples, encodes, and
-/// tags the output(s). Checks `job.cancel` between packets and deletes any
-/// partial output on cancellation.
+/// tags the output(s). Checks `job.cancel` between packets. Encoding
+/// happens on a scratch file next to the real output; on cancellation, a
+/// decode error, or an encode error the scratch file is deleted and the
+/// real output path is never touched, so nothing partial is ever left
+/// behind at the name the caller asked for.
 pub fn run(job: &ConvertJob) -> Result<(), ConvertError> {
     std::fs::create_dir_all(&job.out_dir)?;
     match job.kind {
@@ -122,12 +125,15 @@ fn track_progress_range(index: usize, total: usize) -> (u32, u32) {
 
 /// Decodes `[start, end)` seconds of `source_path` (the whole file when
 /// both are `None`) and encodes it to `out_path` per `job.format` /
-/// `job.target_rate`. `progress_base`/`progress_span` place this call's own
-/// 0-1000 permille progress within a larger `[progress_base, progress_base
-/// + progress_span]` slice of `job.progress` — `(0, 1000)` for a plain
-/// whole-file conversion, or a per-track slice when `cue_split` calls this
-/// once per track and needs the job's progress to climb monotonically
-/// across all of them instead of restarting at each track.
+/// `job.target_rate`. `progress_base`/`progress_span` place this call's
+/// own 0-1000 permille progress within a larger slice of `job.progress` —
+/// `[progress_base, progress_base + progress_span]`, i.e. `(0, 1000)` for
+/// a plain whole-file conversion, or a per-track slice when `cue_split`
+/// calls this once per track and needs the job's progress to climb
+/// monotonically across all of them instead of restarting at each track.
+///
+/// Encodes into a same-directory scratch file and installs it with an
+/// atomic rename only once it's fully written — see [`TempFileGuard`].
 fn transcode(
     job: &ConvertJob,
     source_path: &Path,
@@ -149,9 +155,11 @@ fn transcode(
         .then(|| StreamResampler::new(src_rate, dst_rate, channels as usize, ResamplerQuality::SincMedium))
         .flatten();
 
+    let tmp_path = temp_out_path(out_path, job.id);
+    let mut tmp_guard = TempFileGuard::new(tmp_path.clone());
     let mut sink = encoder::create_sink(
         job.format,
-        out_path,
+        &tmp_path,
         channels,
         dst_rate,
         source.bits_per_sample,
@@ -166,7 +174,6 @@ fn transcode(
 
     loop {
         if job.cancel.load(Ordering::Relaxed) {
-            let _ = std::fs::remove_file(out_path);
             return Err(ConvertError::Cancelled);
         }
 
@@ -197,9 +204,60 @@ fn transcode(
         );
     }
 
+    // `StreamResampler::process` only emits output once a full internal
+    // chunk of input has accumulated, so it's always holding back a
+    // fractional chunk plus its filter's group delay. Without draining
+    // that here, every resampled conversion loses its true tail — for a
+    // clip shorter than one resampler chunk, the entire output is silently
+    // empty.
+    if let Some(rs) = resampler.as_mut() {
+        let tail = rs.flush();
+        if !tail.is_empty() {
+            sink.write(&tail)?;
+        }
+    }
+
     sink.finish()?;
+    std::fs::rename(&tmp_path, out_path)?;
+    tmp_guard.disarm();
     job.progress.store(progress_base + progress_span, Ordering::Relaxed);
     Ok(())
+}
+
+/// Same-directory scratch path for `out_path`'s encode, suffixed with
+/// `job_id` so two concurrently-running jobs never collide on the same
+/// temp file.
+fn temp_out_path(out_path: &Path, job_id: JobId) -> PathBuf {
+    let file_name = out_path.file_name().and_then(|f| f.to_str()).unwrap_or("output");
+    out_path.with_file_name(format!(".{file_name}.{job_id}.part"))
+}
+
+/// Deletes its file on drop unless [`disarm`](Self::disarm) was called
+/// first. `transcode` disarms it only after `sink.finish()` and the
+/// rename into the real output path both succeed, so every early return
+/// (cancellation, a decode error, an encode error) deletes the scratch
+/// file instead of leaving a partial result on disk.
+struct TempFileGuard {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, keep: false }
+    }
+
+    fn disarm(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 /// Copies title/artist/track/disk plus the shared album/genre/date/cover
@@ -285,14 +343,34 @@ fn write_tag(path: &Path, tag: Tag) {
     }
 }
 
-/// Strips characters that are awkward or invalid in filenames.
+/// Strips characters that are awkward, invalid, or path-traversing in
+/// filenames (path separators, NUL, other control characters); strips a
+/// leading `-` that could be misread as a flag by anything that later
+/// shells out on the name; trims surrounding `.`/whitespace so a name
+/// that's entirely dots can't resolve to `.`/`..` as a path component; and
+/// caps the result's byte length so a pathological tag can't exceed
+/// common filesystem name limits.
 fn sanitize_filename(name: &str) -> String {
-    let trimmed = name.trim();
-    let cleaned: String = trimmed
-        .chars()
-        .map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c })
-        .collect();
-    if cleaned.is_empty() { "track".to_owned() } else { cleaned }
+    const MAX_BYTES: usize = 150;
+
+    let mut cleaned = String::new();
+    for c in name.trim().chars() {
+        if c == '\0' || c.is_control() {
+            continue;
+        }
+        let c = if "/\\:*?\"<>|".contains(c) { '_' } else { c };
+        if cleaned.len() + c.len_utf8() > MAX_BYTES {
+            break;
+        }
+        cleaned.push(c);
+    }
+
+    while cleaned.starts_with('-') {
+        cleaned.remove(0);
+    }
+    let cleaned = cleaned.trim_matches('.').trim();
+
+    if cleaned.is_empty() { "track".to_owned() } else { cleaned.to_owned() }
 }
 
 /// Builds `dir/stem.ext`, appending ` (N)` before the extension if that
@@ -502,10 +580,10 @@ mod tests {
     use super::*;
     use std::f32::consts::TAU;
 
-    /// Writes a 1-second 44.1kHz mono sine WAV, tagged with a title, so the
-    /// end-to-end job (decode → encode → tag copy) can be exercised without
-    /// needing a fixture file on disk.
-    fn write_test_wav(path: &Path) {
+    /// Writes a mono 44.1kHz sine WAV of `num_frames` samples, tagged with a
+    /// title, so an end-to-end job (decode → encode → tag copy) can be
+    /// exercised without needing a fixture file on disk.
+    fn write_test_wav_frames(path: &Path, num_frames: u32) {
         let spec = hound::WavSpec {
             channels: 1,
             sample_rate: 44_100,
@@ -513,7 +591,7 @@ mod tests {
             sample_format: hound::SampleFormat::Int,
         };
         let mut writer = hound::WavWriter::create(path, spec).unwrap();
-        for i in 0..44_100u32 {
+        for i in 0..num_frames {
             let s = (TAU * 440.0 * i as f32 / 44_100.0).sin();
             writer.write_sample((s * f32::from(i16::MAX)) as i16).unwrap();
         }
@@ -524,6 +602,12 @@ mod tests {
         tag.set_title("Pipeline Test Track".to_owned());
         tagged.insert_tag(tag);
         tagged.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+
+    /// One second of `write_test_wav_frames`, used by tests that don't care
+    /// about the exact clip length.
+    fn write_test_wav(path: &Path) {
+        write_test_wav_frames(path, 44_100);
     }
 
     #[test]
@@ -614,5 +698,78 @@ mod tests {
             }
             assert_eq!(prev_end, 1000, "spans for {total} tracks should sum to exactly 1000");
         }
+    }
+
+    #[test]
+    fn sanitize_filename_blocks_traversal_and_dashes_and_caps_length() {
+        assert_eq!(sanitize_filename(".."), "track");
+        assert_eq!(sanitize_filename("..."), "track");
+        assert!(!sanitize_filename("../../.bashrc").contains('/'));
+        assert!(!sanitize_filename("-rf --no-preserve-root").starts_with('-'));
+        assert_eq!(sanitize_filename("a\0b").find('\0'), None);
+
+        let long = "x".repeat(1000);
+        assert!(sanitize_filename(&long).len() <= 150);
+    }
+
+    #[test]
+    fn cancelled_conversion_leaves_no_output_file() {
+        let dir = std::env::temp_dir().join(format!("lyra-pipeline-cancel-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.wav");
+        write_test_wav(&source);
+
+        let out_dir = dir.join("out");
+        let job = ConvertJob::new(
+            1,
+            source,
+            JobKind::Convert,
+            encoder::OutputFormat::Wav16,
+            None,
+            out_dir.clone(),
+        );
+        job.request_cancel();
+
+        let result = run(&job);
+        assert!(matches!(result, Err(ConvertError::Cancelled)), "expected Cancelled, got {result:?}");
+
+        let entries: Vec<_> = std::fs::read_dir(&out_dir)
+            .map(|rd| rd.filter_map(|e| e.ok()).collect())
+            .unwrap_or_default();
+        assert!(entries.is_empty(), "expected no leftover files in {out_dir:?}, found {entries:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_with_resample_does_not_drop_a_short_clip() {
+        let dir = std::env::temp_dir().join(format!("lyra-pipeline-resample-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.wav");
+        // Shorter than the resampler's internal processing chunk (1024
+        // source-rate frames), so without draining its buffered tail via
+        // `flush()` the whole clip would come out empty.
+        write_test_wav_frames(&source, 441);
+
+        let out_dir = dir.join("out");
+        let job = ConvertJob::new(
+            1,
+            source,
+            JobKind::Convert,
+            encoder::OutputFormat::Flac,
+            Some(48_000),
+            out_dir.clone(),
+        );
+        run(&job).expect("resampled conversion job should succeed");
+
+        let out_path = out_dir.join("source.flac");
+        let tagged = Probe::open(&out_path).unwrap().read().unwrap();
+        let duration = tagged.properties().duration();
+        assert!(
+            duration.as_secs_f64() > 0.0,
+            "resampled short clip should not be flushed away entirely, got {duration:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

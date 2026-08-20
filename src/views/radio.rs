@@ -49,6 +49,7 @@ fn station_icon<'a, M: 'a + 'static>(
 }
 
 /// Render the radio view: saved stations, add-by-URL, and directory search.
+#[allow(clippy::too_many_arguments)]
 pub fn radio_view<'a>(
     stations: &'a [RadioStation],
     search_query: &'a str,

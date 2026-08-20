@@ -146,16 +146,20 @@ pub fn parse_fixed_band_eq(path: &str, content: &str) -> Result<AutoEQProfile> {
         )));
     }
 
-    // Verify frequencies match expected (with tolerance)
+    // Reject any deviation from the standard 10-band layout: the
+    // equalizer applies `bands` at a fixed, hardcoded set of frequencies
+    // (see `player::equalizer::BAND_FREQUENCIES`), so a filter listed out
+    // of order or at an unexpected frequency would silently have its gain
+    // applied to the wrong band instead of failing loudly.
     let expected_freqs = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
     for (i, (freq, _)) in gains.iter().enumerate() {
         if *freq != expected_freqs[i] {
-            tracing::warn!(
-                "AutoEQ filter {} has unexpected frequency {} Hz (expected {} Hz)",
+            return Err(AutoEQError::InvalidFormat(format!(
+                "Filter {} has unexpected frequency {} Hz (expected {} Hz)",
                 i + 1,
                 freq,
                 expected_freqs[i]
-            );
+            )));
         }
     }
 
@@ -261,6 +265,29 @@ Filter 10: ON PK Fc 16000 Hz Gain -4.0 dB Q 0.70
 Preamp: -6.5 dB
 Filter 1: ON PK Fc 31 Hz Gain 99999999999999999999999999999999999999999999999.0 dB Q 0.70
 Filter 2: ON PK Fc 62 Hz Gain 4.0 dB Q 0.70
+Filter 3: ON PK Fc 125 Hz Gain 3.0 dB Q 0.70
+Filter 4: ON PK Fc 250 Hz Gain 2.0 dB Q 0.70
+Filter 5: ON PK Fc 500 Hz Gain 1.0 dB Q 0.70
+Filter 6: ON PK Fc 1000 Hz Gain 0.0 dB Q 0.70
+Filter 7: ON PK Fc 2000 Hz Gain -1.0 dB Q 0.70
+Filter 8: ON PK Fc 4000 Hz Gain -2.0 dB Q 0.70
+Filter 9: ON PK Fc 8000 Hz Gain -3.0 dB Q 0.70
+Filter 10: ON PK Fc 16000 Hz Gain -4.0 dB Q 0.70
+        "#;
+
+        let err = parse_fixed_band_eq("oratory1990/over-ear/Test", content).unwrap_err();
+        assert!(matches!(err, AutoEQError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_parse_fixed_band_eq_frequency_order_mismatch_is_rejected() {
+        // Each in-range frequency, but band 1 and band 2 are swapped: if
+        // this weren't rejected, the parsed gains would silently be
+        // applied to the wrong band by the fixed-frequency equalizer.
+        let content = r#"
+Preamp: -6.5 dB
+Filter 1: ON PK Fc 62 Hz Gain 5.0 dB Q 0.70
+Filter 2: ON PK Fc 31 Hz Gain 4.0 dB Q 0.70
 Filter 3: ON PK Fc 125 Hz Gain 3.0 dB Q 0.70
 Filter 4: ON PK Fc 250 Hz Gain 2.0 dB Q 0.70
 Filter 5: ON PK Fc 500 Hz Gain 1.0 dB Q 0.70

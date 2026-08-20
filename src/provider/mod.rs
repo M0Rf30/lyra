@@ -9,7 +9,7 @@ pub mod local;
 pub mod mpd;
 pub mod subsonic;
 
-use crate::library::{Album, Artist, Lyrics, Track, TrackSource};
+use crate::library::{Album, Artist, Lyrics, Track};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -69,6 +69,18 @@ impl From<String> for ProviderError {
     }
 }
 
+/// Wrap a network/protocol error into `ProviderError::Io`, labeled with the
+/// backend name and the failing operation. Shared by `mpd.rs` and
+/// `subsonic.rs`, whose per-backend `*_err` helpers differed only in prefix.
+pub(crate) fn wrap_err<E: fmt::Display>(
+    backend: &str,
+    op: &str,
+) -> impl FnOnce(E) -> ProviderError {
+    let backend = backend.to_string();
+    let op = op.to_string();
+    move |e| ProviderError::Io(format!("{backend} {op}: {e}"))
+}
+
 /// Common interface for all music providers.
 ///
 /// Each provider manages a library of tracks, albums, and artists, and can
@@ -95,9 +107,6 @@ pub trait MusicProvider: Send + Sync {
 
     /// Search tracks matching the given query string.
     fn search(&self, query: &str) -> Result<Vec<Track>, ProviderError>;
-
-    /// Resolve a track to a playback source.
-    fn resolve_audio(&self, track: &Track) -> Result<TrackSource, ProviderError>;
 
     /// Get cover art bytes for an album, if available.
     fn get_cover_art(&self, album: &Album) -> Result<Option<Vec<u8>>, ProviderError>;

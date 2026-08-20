@@ -17,6 +17,9 @@ pub mod crossfade;
 pub mod decoder;
 pub mod dop;
 pub mod dop_output;
+// `engine::engine` intentionally mirrors rmpd's module layout; renaming would
+// churn every `use` path across the crate (including app.rs).
+#[allow(clippy::module_inception)]
 pub mod engine;
 pub mod filter;
 pub mod output;

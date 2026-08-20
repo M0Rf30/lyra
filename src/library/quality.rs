@@ -88,10 +88,9 @@ fn extension_of(path: &Path) -> Option<String> {
 /// Classify a track's audio quality tier from its file extension and
 /// sample rate.
 ///
-/// `bitrate` is accepted for signature symmetry with [`format_summary`]
-/// (every call site already has all three values on hand) but today's
-/// rules don't need it — tier is decided entirely by container/codec and
-/// sample rate.
+/// `bitrate` is accepted so every call site can pass all three metadata
+/// values it has on hand uniformly, but today's rules don't need it —
+/// tier is decided entirely by container/codec and sample rate.
 ///
 /// `m4a` is the one genuinely ambiguous extension: it holds either ALAC
 /// (lossless) or AAC (lossy), and nothing on `Track` says which. This
@@ -125,50 +124,6 @@ pub fn classify(path: &Path, sample_rate: u32, _bitrate: u32) -> AudioQuality {
         }
         _ => AudioQuality::Unknown,
     }
-}
-
-/// Format sample rate as kHz, e.g. `44.1 kHz` or `48 kHz` — one decimal
-/// only when the value isn't an exact multiple of 1000.
-fn format_khz(sample_rate: u32) -> String {
-    if sample_rate.is_multiple_of(1000) {
-        format!("{} kHz", sample_rate / 1000)
-    } else {
-        format!("{:.1} kHz", f64::from(sample_rate) / 1000.0)
-    }
-}
-
-/// Detailed, human-readable format readout, e.g. `"FLAC · 96 kHz · 2304
-/// kbps"` or `"DSF · DSD64"`. Any component that is zero, unknown, or
-/// absent (missing extension, unset sample rate/bitrate) is omitted
-/// entirely rather than left as a dangling `· 0 kbps`.
-#[must_use]
-pub fn format_summary(path: &Path, sample_rate: u32, bitrate: u32) -> String {
-    let ext = extension_of(path);
-    let mut parts: Vec<String> = Vec::with_capacity(3);
-    if let Some(ext) = &ext {
-        parts.push(ext.to_ascii_uppercase());
-    }
-
-    let is_dsd = matches!(ext.as_deref(), Some("dsf" | "dff" | "dsd"));
-    if is_dsd {
-        // DSD64 is the base rate: 64x the 44.1 kHz CD rate. Higher
-        // multiples (DSD128, DSD256, ...) scale linearly from there.
-        if sample_rate > 0 {
-            let multiple = (f64::from(sample_rate) / 44_100.0).round() as u32;
-            if multiple > 0 {
-                parts.push(format!("DSD{multiple}"));
-            }
-        }
-    } else {
-        if sample_rate > 0 {
-            parts.push(format_khz(sample_rate));
-        }
-        if bitrate > 0 {
-            parts.push(format!("{bitrate} kbps"));
-        }
-    }
-
-    parts.join(" · ")
 }
 
 /// The best quality tier across an album's tracks — `Unknown` for an empty
@@ -286,30 +241,6 @@ mod tests {
                 0
             ),
             AudioQuality::CdLossless
-        );
-    }
-
-    #[test]
-    fn format_summary_omits_zero_bitrate() {
-        assert_eq!(
-            format_summary(Path::new("song.flac"), 96_000, 0),
-            "FLAC · 96 kHz"
-        );
-    }
-
-    #[test]
-    fn format_summary_mp3_example() {
-        assert_eq!(
-            format_summary(Path::new("song.mp3"), 44_100, 320),
-            "MP3 · 44.1 kHz · 320 kbps"
-        );
-    }
-
-    #[test]
-    fn format_summary_dsd_example() {
-        assert_eq!(
-            format_summary(Path::new("song.dsf"), 2_822_400, 0),
-            "DSF · DSD64"
         );
     }
 

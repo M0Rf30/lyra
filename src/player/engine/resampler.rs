@@ -164,6 +164,63 @@ impl StreamResampler {
 
         out
     }
+
+    /// Drain any audio still buffered inside the resampler at end-of-stream.
+    ///
+    /// [`Self::process`] only emits output once a full chunk of input has
+    /// accumulated, so up to one chunk's worth of real samples can be
+    /// sitting in `self.input` when a track ends; the resampler's own
+    /// filter delay ([`Resampler::output_delay`]) holds a few more frames of
+    /// already-consumed input that were never pushed out either. Call this
+    /// once after the last `process()` — dropping the resampler without it
+    /// silently truncates the tail of the track.
+    pub fn flush(&mut self) -> Vec<f32> {
+        let ch = self.channels;
+        let mut out = Vec::new();
+        if self.input.is_empty() {
+            return out;
+        }
+
+        let leftover_frames = self.input.len() / ch;
+        self.input.resize(self.chunk * ch, 0.0);
+        let out_cap = self.scratch.len() / ch;
+
+        // One pass for the real leftover samples (zero-padded to a full
+        // chunk via `partial_len`), then enough all-zero passes to drain the
+        // filter's own group delay so trailing signal isn't lost inside it.
+        let extra_passes = self.resampler.output_delay().div_ceil(self.chunk).max(1);
+        for pass in 0..=extra_passes {
+            let partial_len = if pass == 0 { leftover_frames } else { 0 };
+            let indexing = Indexing {
+                input_offset: 0,
+                output_offset: 0,
+                active_channels_mask: None,
+                partial_len: Some(partial_len),
+            };
+            let result = {
+                let in_adapter =
+                    match InterleavedSlice::new(&self.input[..self.chunk * ch], ch, self.chunk) {
+                        Ok(a) => a,
+                        Err(_) => break,
+                    };
+                let mut out_adapter =
+                    match InterleavedSlice::new_mut(&mut self.scratch, ch, out_cap) {
+                        Ok(a) => a,
+                        Err(_) => break,
+                    };
+                self.resampler
+                    .process_into_buffer(&in_adapter, &mut out_adapter, Some(&indexing))
+                    .ok()
+            };
+            match result {
+                Some((_, nbr_out)) => out.extend_from_slice(&self.scratch[..nbr_out * ch]),
+                None => break,
+            }
+        }
+
+        self.input.clear();
+        out
+    }
 }
 
 /// Map a quality level to rubato sinc interpolation parameters.
@@ -234,5 +291,21 @@ mod tests {
         let _ = rs.process(&[0.0f32; 10]);
         let out = rs.process(&vec![0.0f32; 4096]);
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn flush_emits_leftover_tail_instead_of_dropping_it() {
+        let mut rs = StreamResampler::new(44100, 48000, 1, ResamplerQuality::SincMedium).unwrap();
+        // Fewer samples than one input chunk: `process` alone must buffer
+        // them without emitting anything (this is the leftover `flush` is
+        // meant to recover instead of silently dropping at end-of-stream).
+        let out = rs.process(&[0.5f32; 100]);
+        assert!(out.is_empty());
+
+        let tail = rs.flush();
+        assert!(!tail.is_empty(), "flush must not drop the buffered tail");
+
+        // Flushing again with nothing buffered is a safe no-op.
+        assert!(rs.flush().is_empty());
     }
 }

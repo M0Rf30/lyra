@@ -462,6 +462,7 @@ fn utility_row<'a>(
     // changing this function's signature later.
     let _ = space_xxs;
 
+    let volume = volume.clamp(0.0, 1.0);
     let volume_icon_name = if volume <= 0.0 {
         "audio-volume-muted-symbolic"
     } else if volume < 0.33 {
@@ -574,7 +575,7 @@ pub fn expanded_now_playing<'a>(
         (frac, preview_pos)
     } else {
         let p = if duration.as_secs_f32() > 0.0 {
-            position.as_secs_f32() / duration.as_secs_f32()
+            (position.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -1138,10 +1139,10 @@ pub fn expanded_now_playing<'a>(
         // The transient metadata pill is redundant once fullscreen — the
         // control card already surfaces title/artist/album/year.
         #[cfg(feature = "visualizer")]
-        if !fullscreen_mode {
-            if let Some(meta_overlay) = viz_metadata_overlay {
-                stack_widget = stack_widget.push(meta_overlay);
-            }
+        if !fullscreen_mode
+            && let Some(meta_overlay) = viz_metadata_overlay
+        {
+            stack_widget = stack_widget.push(meta_overlay);
         }
 
         // Preset browser overlay: the topmost layer, above the metadata

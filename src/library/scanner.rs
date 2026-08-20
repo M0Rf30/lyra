@@ -38,6 +38,7 @@ impl LibraryScanner {
     pub fn scan(db: &LibraryDb, dirs: &[PathBuf]) -> Result<usize, String> {
         let mut count = 0;
         let mut complete_roots = Vec::new();
+        let known_mtimes = db.track_mtimes("local")?;
 
         for dir in dirs {
             match std::fs::metadata(dir) {
@@ -91,7 +92,7 @@ impl LibraryScanner {
                     .unwrap_or(0);
 
                 let path_str = path.to_string_lossy();
-                if let Some(existing_mtime) = db.get_track_mtime(&path_str)
+                if let Some(&existing_mtime) = known_mtimes.get(path_str.as_ref())
                     && existing_mtime == mtime
                 {
                     continue;
@@ -350,7 +351,10 @@ mod tests {
         db.upsert_track(&local_track(root.join("gone.mp3")), 0)
             .unwrap();
 
-        assert_eq!(LibraryScanner::scan(&db, &[root.clone()]).unwrap(), 0);
+        assert_eq!(
+            LibraryScanner::scan(&db, std::slice::from_ref(&root)).unwrap(),
+            0
+        );
         assert!(db.all_tracks(None).unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();
     }

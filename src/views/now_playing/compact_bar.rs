@@ -146,7 +146,7 @@ pub fn playback_bar<'a>(
         (frac, preview_pos)
     } else {
         let p = if duration.as_secs_f32() > 0.0 {
-            position.as_secs_f32() / duration.as_secs_f32()
+            (position.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -329,6 +329,7 @@ pub fn playback_bar<'a>(
         .width(Length::FillPortion(3));
 
     // --- Volume: icon reflects current level, fixed-width slider (always enabled) ---
+    let volume = volume.clamp(0.0, 1.0);
     let volume_icon_name = if volume <= 0.0 {
         "audio-volume-muted-symbolic"
     } else if volume < 0.33 {

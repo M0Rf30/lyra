@@ -242,7 +242,7 @@ impl shader::Pipeline for VizPipeline {
 
         // --- Placeholder 1x1 texture (resized to the real size on first `prepare()`) ---
         let (texture, bind_group) =
-            Self::create_texture(&device, &bind_group_layout, &sampler, 1, 1);
+            Self::create_texture(device, &bind_group_layout, &sampler, 1, 1);
 
         // --- Pipeline layout + render pipeline ---
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

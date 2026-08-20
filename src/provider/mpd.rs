@@ -6,7 +6,7 @@
 //! library, controls remote playback, and receives real-time idle events.
 
 use super::{MusicProvider, ProviderError, ProviderType};
-use crate::library::{Album, Artist, CoverSource, Playlist, Track, TrackSource};
+use crate::library::{Album, Artist, CoverSource, Playlist, Track};
 use mpd_client::Client;
 use mpd_client::client::{ConnectWithPasswordError, ConnectionEvents};
 use mpd_client::commands::{
@@ -18,6 +18,7 @@ use mpd_client::commands::{
 use mpd_client::filter::{Filter, Operator};
 use mpd_client::responses;
 use mpd_client::tag::Tag;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,8 +27,8 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 /// Helper to wrap MPD errors into `ProviderError::Io` with a labeled context.
-fn mpd_err<E: std::fmt::Display>(op: &str) -> impl FnOnce(E) -> ProviderError + '_ {
-    move |e| ProviderError::Io(format!("MPD {op}: {e}"))
+fn mpd_err<E: std::fmt::Display>(op: &str) -> impl FnOnce(E) -> ProviderError {
+    super::wrap_err("MPD", op)
 }
 
 /// Configuration for connecting to an MPD server.
@@ -278,14 +279,26 @@ impl MpdProvider {
                 continue;
             }
 
-            let mut tracks: Vec<Track> = songs.iter().map(|s| self.song_to_track(s)).collect();
-            Track::sort_by_disc_and_track(&mut tracks);
+            // `find album` matches purely on title: same-titled albums by
+            // different artists (e.g. "Greatest Hits") would otherwise be
+            // merged into one Album mixing unrelated tracks. Split by album
+            // artist first, same disambiguation `browse_artists()` uses.
+            let mut by_artist: HashMap<String, Vec<Track>> = HashMap::new();
+            for song in &songs {
+                let track = self.song_to_track(song);
+                by_artist
+                    .entry(track.album_artist.clone())
+                    .or_default()
+                    .push(track);
+            }
 
-            let cover_source = tracks
-                .first()
-                .map(|t| CoverSource::MpdAlbumArt(t.source_uri.clone()));
-
-            albums.push(Album::from_tracks(album_name.clone(), tracks, cover_source));
+            for (_, mut tracks) in by_artist {
+                Track::sort_by_disc_and_track(&mut tracks);
+                let cover_source = tracks
+                    .first()
+                    .map(|t| CoverSource::MpdAlbumArt(t.source_uri.clone()));
+                albums.push(Album::from_tracks(album_name.clone(), tracks, cover_source));
+            }
         }
 
         Ok(albums)
@@ -424,6 +437,22 @@ impl MpdProvider {
     pub fn status(&self) -> Result<responses::Status, ProviderError> {
         self.block_on(self.status_async())
     }
+
+    /// Whether MPD sticker support was detected on connect.
+    fn stickers_supported(&self) -> bool {
+        self.stickers_supported.load(Ordering::Relaxed)
+    }
+
+    /// Error to return from favorite/rating mutations when stickers aren't supported.
+    fn require_stickers(&self) -> Result<(), ProviderError> {
+        if self.stickers_supported() {
+            Ok(())
+        } else {
+            Err(ProviderError::NotSupported(
+                "MPD stickers not enabled".into(),
+            ))
+        }
+    }
 }
 
 impl MusicProvider for MpdProvider {
@@ -444,7 +473,7 @@ impl MusicProvider for MpdProvider {
         self.block_on(async {
             let names = self.list_album_names().await?;
             let mut albums = self.browse_albums_batch(&names).await?;
-            albums.sort_by(|a, b| a.name.cmp(&b.name));
+            albums.sort_by(|a, b| a.name.cmp(&b.name).then(a.artist.cmp(&b.artist)));
             Ok(albums)
         })
     }
@@ -549,10 +578,6 @@ impl MusicProvider for MpdProvider {
             let tracks: Vec<Track> = songs.iter().map(|s| self.song_to_track(s)).collect();
             Ok(tracks)
         })
-    }
-
-    fn resolve_audio(&self, track: &Track) -> Result<TrackSource, ProviderError> {
-        Ok(TrackSource::MpdFile(track.source_uri.clone()))
     }
 
     #[tracing::instrument(skip(self, album), level = "debug")]
@@ -687,6 +712,19 @@ impl MusicProvider for MpdProvider {
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
+    fn rename_playlist(&self, id: &str, new_name: &str) -> Result<(), ProviderError> {
+        let id_owned = id.to_string();
+        let new_name_owned = new_name.to_string();
+        self.block_on(async {
+            let client = self.get_client().await?;
+            client
+                .command(commands::RenamePlaylist::new(&id_owned, &new_name_owned))
+                .await
+                .map_err(mpd_err("rename"))
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
     fn add_to_playlist(
         &self,
         playlist_id: &str,
@@ -709,11 +747,7 @@ impl MusicProvider for MpdProvider {
     // --- Favorites and ratings via stickers (Tasks 52-53) ---
 
     fn toggle_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
-        if !self.stickers_supported.load(Ordering::Relaxed) {
-            return Err(ProviderError::NotSupported(
-                "MPD stickers not enabled".into(),
-            ));
-        }
+        self.require_stickers()?;
         let uri = track_id.to_string();
         self.block_on(async {
             let client = self.get_client().await?;
@@ -738,7 +772,7 @@ impl MusicProvider for MpdProvider {
     }
 
     fn is_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
-        if !self.stickers_supported.load(Ordering::Relaxed) {
+        if !self.stickers_supported() {
             return Ok(false);
         }
         let uri = track_id.to_string();
@@ -752,11 +786,7 @@ impl MusicProvider for MpdProvider {
     }
 
     fn set_rating(&self, track_id: &str, rating: u8) -> Result<(), ProviderError> {
-        if !self.stickers_supported.load(Ordering::Relaxed) {
-            return Err(ProviderError::NotSupported(
-                "MPD stickers not enabled".into(),
-            ));
-        }
+        self.require_stickers()?;
         let uri = track_id.to_string();
         self.block_on(async {
             let client = self.get_client().await?;
@@ -775,7 +805,7 @@ impl MusicProvider for MpdProvider {
     }
 
     fn get_rating(&self, track_id: &str) -> Result<Option<u8>, ProviderError> {
-        if !self.stickers_supported.load(Ordering::Relaxed) {
+        if !self.stickers_supported() {
             return Ok(None);
         }
         let uri = track_id.to_string();
@@ -789,11 +819,7 @@ impl MusicProvider for MpdProvider {
     }
 
     fn list_favorites(&self) -> Result<Vec<Track>, ProviderError> {
-        if !self.stickers_supported.load(Ordering::Relaxed) {
-            return Err(ProviderError::NotSupported(
-                "MPD stickers not enabled".into(),
-            ));
-        }
+        self.require_stickers()?;
         self.block_on(async {
             let client = self.get_client().await?;
             // Find all songs with favorite=1 sticker

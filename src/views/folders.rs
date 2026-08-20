@@ -137,6 +137,25 @@ impl FolderTree {
         out
     }
 
+    /// Count of tracks in `dir`; when `recursive`, also every track
+    /// beneath its subdirectories. Equivalent to
+    /// `tracks_in(dir, recursive).len()` but never allocates the index
+    /// list — the folder view calls this once per visible subdirectory row
+    /// on every render, purely to display a count.
+    #[must_use]
+    pub fn track_count_in(&self, dir: &Path, recursive: bool) -> usize {
+        let Some(node) = self.nodes.get(dir) else {
+            return 0;
+        };
+        let mut count = node.track_indices.len();
+        if recursive {
+            for child in &node.children {
+                count += self.track_count_in(child, recursive);
+            }
+        }
+        count
+    }
+
     fn collect_tracks(&self, dir: &Path, recursive: bool, out: &mut Vec<usize>) {
         let Some(node) = self.nodes.get(dir) else {
             return;
@@ -346,7 +365,7 @@ pub fn folder_view<'a>(
     let mut body = widget::Column::new().spacing(2);
 
     for child in children {
-        let count = tree.tracks_in(child, true).len();
+        let count = tree.track_count_in(child, true);
         let name = child
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -414,7 +433,7 @@ fn track_row<'a>(
 
     let row = widget::button::custom(
         widget::Row::new()
-            .push(common::cell_text(format!("{}", index + 1)).width(32))
+            .push(common::cell_text((index + 1).to_string()).width(32))
             .push(title_col)
             .push(artist_col)
             .push(

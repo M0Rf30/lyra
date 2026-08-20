@@ -14,25 +14,6 @@ pub const BAND_LABELS: [&str; 10] = [
     "31", "62", "125", "250", "500", "1K", "2K", "4K", "8K", "16K",
 ];
 
-/// Represents a single EQ band.
-#[derive(Debug, Clone, Copy)]
-pub struct EqualizerBand {
-    pub frequency: f32,
-    pub label: &'static str,
-    /// Gain in dB, range: -12.0 to +12.0
-    pub gain_db: f32,
-}
-
-impl EqualizerBand {
-    pub fn new(index: usize, gain_db: f32) -> Self {
-        Self {
-            frequency: BAND_FREQUENCIES[index],
-            label: BAND_LABELS[index],
-            gain_db: gain_db.clamp(-12.0, 12.0),
-        }
-    }
-}
-
 /// Named EQ presets (legacy enum for built-in presets).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EqPreset {

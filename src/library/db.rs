@@ -264,6 +264,21 @@ impl LibraryDb {
                 .map_err(|e| format!("Migration v5 commit error: {e}"))?;
         }
 
+        if version < 6 {
+            let tx = self
+                .conn
+                .unchecked_transaction()
+                .map_err(|e| format!("Migration v6 transaction error: {e}"))?;
+
+            tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_tracks_genre ON tracks(genre);
+                 PRAGMA user_version=6;",
+            )
+            .map_err(|e| format!("Migration v6 error (schema): {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("Migration v6 commit error: {e}"))?;
+        }
+
         let tx = self
             .conn
             .unchecked_transaction()
@@ -562,6 +577,22 @@ impl LibraryDb {
             .ok()
     }
 
+    /// Get every known path and stored mtime for one provider in a single
+    /// query — used by a full directory scan to skip unchanged files
+    /// without issuing a point query per file on disk.
+    pub fn track_mtimes(&self, provider: &str) -> Result<HashMap<String, i64>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, mtime FROM tracks WHERE provider = ?1")
+            .map_err(|e| format!("Query error: {e}"))?;
+        let mtimes = stmt
+            .query_map(params![provider], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("Query error: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(mtimes)
+    }
+
     /// Count total tracks, optionally filtered by provider.
     pub fn track_count(&self, provider: Option<&str>) -> usize {
         match provider {
@@ -586,7 +617,7 @@ impl LibraryDb {
 
     /// Search tracks by matching query against title, artist, album, or genre.
     pub fn search_tracks(&self, query: &str, provider: Option<&str>) -> Result<Vec<Track>, String> {
-        let pattern = format!("%{query}%");
+        let pattern = format!("%{}%", super::smart_playlist::escape_like(query));
         let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match provider {
             Some(p) => (
                 "SELECT id, path, title, artist, album_artist, album, genre,
@@ -594,9 +625,10 @@ impl LibraryDb {
                         provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
                  FROM tracks
                  WHERE provider = ?1
-                   AND (title LIKE ?2 OR artist LIKE ?2 OR album LIKE ?2 OR genre LIKE ?2)
+                   AND (title LIKE ?2 ESCAPE '\\' OR artist LIKE ?2 ESCAPE '\\'
+                        OR album LIKE ?2 ESCAPE '\\' OR genre LIKE ?2 ESCAPE '\\')
                  ORDER BY
-                   CASE WHEN title LIKE ?2 THEN 0 ELSE 1 END,
+                   CASE WHEN title LIKE ?2 ESCAPE '\\' THEN 0 ELSE 1 END,
                    title"
                     .to_string(),
                 vec![
@@ -609,9 +641,10 @@ impl LibraryDb {
                         track_number, disc_number, year, duration_ms, bitrate, sample_rate,
                         provider, provider_track_id, is_favorite, rating, rg_track_gain, rg_album_gain
                  FROM tracks
-                 WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1 OR genre LIKE ?1
+                 WHERE title LIKE ?1 ESCAPE '\\' OR artist LIKE ?1 ESCAPE '\\'
+                    OR album LIKE ?1 ESCAPE '\\' OR genre LIKE ?1 ESCAPE '\\'
                  ORDER BY
-                   CASE WHEN title LIKE ?1 THEN 0 ELSE 1 END,
+                   CASE WHEN title LIKE ?1 ESCAPE '\\' THEN 0 ELSE 1 END,
                    title"
                     .to_string(),
                 vec![Box::new(pattern)],
@@ -771,9 +804,13 @@ impl LibraryDb {
             .parse()
             .map_err(|_| "Invalid playlist ID".to_string())?;
 
-        // Get current max position.
-        let max_pos: i64 = self
+        let tx = self
             .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Add to playlist transaction error: {e}"))?;
+
+        // Get current max position.
+        let max_pos: i64 = tx
             .query_row(
                 "SELECT COALESCE(MAX(position), -1) FROM playlist_tracks WHERE playlist_id = ?1",
                 params![pid],
@@ -781,20 +818,24 @@ impl LibraryDb {
             )
             .unwrap_or(-1);
 
-        let mut stmt = self
-            .conn
-            .prepare(
-                "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
-            )
-            .map_err(|e| format!("Add to playlist prepare error: {e}"))?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
+                )
+                .map_err(|e| format!("Add to playlist prepare error: {e}"))?;
 
-        for (i, tid) in track_ids.iter().enumerate() {
-            let track_id: i64 = tid
-                .parse()
-                .map_err(|_| format!("Invalid track ID: {tid}"))?;
-            stmt.execute(params![pid, track_id, max_pos + 1 + i as i64])
-                .map_err(|e| format!("Add to playlist error: {e}"))?;
+            for (i, tid) in track_ids.iter().enumerate() {
+                let track_id: i64 = tid
+                    .parse()
+                    .map_err(|_| format!("Invalid track ID: {tid}"))?;
+                stmt.execute(params![pid, track_id, max_pos + 1 + i as i64])
+                    .map_err(|e| format!("Add to playlist error: {e}"))?;
+            }
         }
+
+        tx.commit()
+            .map_err(|e| format!("Add to playlist commit error: {e}"))?;
         Ok(())
     }
 
@@ -1213,8 +1254,9 @@ mod tests {
         db.run_migration().unwrap();
         db.run_migration().unwrap();
         assert!(db.column_exists("tracks", "rg_album_gain").unwrap());
-        // v5 added the smart_playlists table; assert both the table and the
-        // version so this test keeps pinning the migration ladder's head.
+        // v5 added the smart_playlists table, v6 added the genre index;
+        // assert all three so this test keeps pinning the migration
+        // ladder's head.
         assert!(
             db.conn
                 .query_row(
@@ -1224,11 +1266,20 @@ mod tests {
                 )
                 .is_ok()
         );
+        assert!(
+            db.conn
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_tracks_genre'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .is_ok()
+        );
         assert_eq!(
             db.conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            5
+            6
         );
     }
 
@@ -1276,7 +1327,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(db.remove_missing_tracks(&[root.clone()]).is_err());
+        assert!(db.remove_missing_tracks(std::slice::from_ref(&root)).is_err());
         assert_eq!(
             db.conn
                 .query_row("SELECT COUNT(*) FROM tracks", [], |row| row
@@ -1285,5 +1336,42 @@ mod tests {
             1000
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_tracks_treats_underscore_as_literal_not_wildcard() {
+        let db = LibraryDb::open_memory().unwrap();
+        let mut literal = Track {
+            id: 0,
+            path: PathBuf::from("/music/literal.flac"),
+            title: "track_1".to_string(),
+            artist: String::new(),
+            album_artist: String::new(),
+            album: String::new(),
+            genre: String::new(),
+            track_number: 0,
+            disc_number: 0,
+            year: 0,
+            duration: Duration::ZERO,
+            bitrate: 0,
+            sample_rate: 0,
+            provider_id: Arc::from("local"),
+            source_uri: "/music/literal.flac".to_string(),
+            is_favorite: false,
+            rating: None,
+            rg_track_gain: None,
+            rg_album_gain: None,
+        };
+        db.upsert_track(&literal, 0).unwrap();
+        literal.path = PathBuf::from("/music/wildcard-match.flac");
+        literal.source_uri = "/music/wildcard-match.flac".to_string();
+        literal.title = "trackX1".to_string();
+        db.upsert_track(&literal, 0).unwrap();
+
+        // "_" in the query is user text, not a single-character LIKE
+        // wildcard: only the literal "track_1" title should come back.
+        let results = db.search_tracks("track_1", None).unwrap();
+        assert_eq!(results.len(), 1, "unexpected matches: {results:?}");
+        assert_eq!(results[0].title, "track_1");
     }
 }

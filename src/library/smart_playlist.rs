@@ -218,26 +218,26 @@ impl Rule {
             }
             RuleOp::Contains => {
                 format!(
-                    "{column} LIKE {}",
-                    bind(params, Box::new(format!("%{}%", self.value)))
+                    "{column} LIKE {} ESCAPE '\\'",
+                    bind(params, Box::new(format!("%{}%", escape_like(&self.value))))
                 )
             }
             RuleOp::NotContains => {
                 format!(
-                    "{column} NOT LIKE {}",
-                    bind(params, Box::new(format!("%{}%", self.value)))
+                    "{column} NOT LIKE {} ESCAPE '\\'",
+                    bind(params, Box::new(format!("%{}%", escape_like(&self.value))))
                 )
             }
             RuleOp::StartsWith => {
                 format!(
-                    "{column} LIKE {}",
-                    bind(params, Box::new(format!("{}%", self.value)))
+                    "{column} LIKE {} ESCAPE '\\'",
+                    bind(params, Box::new(format!("{}%", escape_like(&self.value))))
                 )
             }
             RuleOp::EndsWith => {
                 format!(
-                    "{column} LIKE {}",
-                    bind(params, Box::new(format!("%{}", self.value)))
+                    "{column} LIKE {} ESCAPE '\\'",
+                    bind(params, Box::new(format!("%{}", escape_like(&self.value))))
                 )
             }
             RuleOp::GreaterThan => {
@@ -271,6 +271,21 @@ fn bind(
 ) -> String {
     params.push(value);
     format!("?{}", params.len())
+}
+
+/// Escape `%`, `_`, and `\` in a raw rule value so it can be wrapped in
+/// `%…%`/`…%`/`%…` and bound as a LIKE pattern without the user's own text
+/// being interpreted as wildcards. Every caller pairs this with
+/// `ESCAPE '\'` in the generated SQL.
+pub(crate) fn escape_like(raw: &str) -> String {
+    let mut escaped = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
 }
 
 /// A saved rule-based playlist: a query over the local `tracks` table.
@@ -496,6 +511,22 @@ mod tests {
             bound_text(params[0].as_ref()),
             format!("%{}%", playlist.rules[0].value)
         );
+    }
+
+    #[test]
+    fn contains_rule_escapes_like_wildcards_in_value() {
+        let mut playlist = base();
+        playlist.rules.push(Rule {
+            field: RuleField::Title,
+            op: RuleOp::Contains,
+            value: "50% off_deal".into(),
+            value2: String::new(),
+        });
+        let (sql, params) = playlist.to_sql();
+
+        assert!(sql.contains("ESCAPE '\\'"), "missing ESCAPE clause: {sql}");
+        assert_eq!(params.len(), 1);
+        assert_eq!(bound_text(params[0].as_ref()), "%50\\% off\\_deal%");
     }
 
     #[test]

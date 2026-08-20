@@ -48,16 +48,9 @@ impl BiquadCoeffs {
         a2: 0.0,
     };
 
-    /// Pack five f32 coefficients into a u64 pair for atomic storage.
-    /// We use two u64 values: one holds (b0, b1) and the other (b2, a1, a2-ish).
-    /// Actually, we pack all five as compressed f16-ish isn't worth the complexity.
-    /// Instead, we use a simpler scheme: each coefficient is stored in its own
-    /// atomic slot. But to minimize atomics, we pack b0+b1 into one u64 and
-    /// b2+a1+a2 — wait, 5 floats don't fit in 2 u64s nicely.
-    ///
-    /// Simplest correct approach: store the full coefficient set behind an
-    /// `Arc<[AtomicU64; 3]>` per band where we pack two f32s per u64.
-    /// u64[0] = (b0, b1), u64[1] = (b2, a1), u64[2] = (a2, _pad).
+    /// Pack two f32 coefficients into one u64 (`a` in the high 32 bits, `b`
+    /// in the low 32 bits) for atomic storage. Five coefficients need three
+    /// such slots: `[0] = (b0, b1)`, `[1] = (b2, a1)`, `[2] = (a2, unused)`.
     fn pack_pair(a: f32, b: f32) -> u64 {
         let a_bits = a.to_bits() as u64;
         let b_bits = b.to_bits() as u64;
@@ -283,7 +276,6 @@ impl EqFilter {
     }
 
     /// Reset all filter states (e.g. after a seek).
-    #[allow(dead_code)]
     pub fn reset_states(&mut self) {
         for band in &mut self.states {
             for ch in band.iter_mut() {
@@ -304,15 +296,21 @@ impl crate::player::engine::filter::AudioFilter for EqFilter {
             return;
         }
 
+        // Snapshot coefficients once per buffer instead of once per sample:
+        // the UI updates them at most a few times a second, so re-reading
+        // 30 atomics per sample bought nothing but overhead in this
+        // per-callback hot path.
+        let coeffs: [BiquadCoeffs; NUM_BANDS] =
+            std::array::from_fn(|band_idx| BiquadCoeffs::load(&self.coeffs[band_idx]));
+
         for sample in buf.iter_mut() {
             let ch = self.channel_idx as usize;
             self.channel_idx = (self.channel_idx + 1) % self.channels.get();
 
             // Cascade through all 10 bands.
             let mut out = *sample;
-            for band_idx in 0..NUM_BANDS {
-                let c = BiquadCoeffs::load(&self.coeffs[band_idx]);
-                out = self.states[band_idx][ch].process(out, &c);
+            for (band_idx, c) in coeffs.iter().enumerate() {
+                out = self.states[band_idx][ch].process(out, c);
             }
             *sample = out;
         }

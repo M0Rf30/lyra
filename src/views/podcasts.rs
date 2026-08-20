@@ -123,7 +123,7 @@ pub fn podcast_list_view<'a>(
                 .on_submit_maybe(if add_url.trim().is_empty() {
                     None
                 } else {
-                    Some(|text: String| PodcastMessage::AddByUrl(text))
+                    Some(PodcastMessage::AddByUrl)
                 })
                 .width(Length::Fill),
         )

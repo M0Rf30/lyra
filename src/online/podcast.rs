@@ -26,6 +26,17 @@ pub struct EpisodeMeta {
     pub description: String,
 }
 
+/// Cap on a fetched podcast feed body. Legitimate feeds (even
+/// long-running shows with thousands of episodes) are well under this; a
+/// hostile or broken server serving an unbounded body must not be read
+/// into memory in full.
+const MAX_FEED_RESPONSE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Cap on the number of episodes kept from a single feed fetch, as a
+/// second line of defense against a pathological feed with an enormous
+/// entry count (bounding memory and the size of the follow-up DB upsert).
+const MAX_EPISODES_PER_FEED: usize = 5_000;
+
 /// Fetch and parse a podcast feed, returning its metadata and episodes.
 pub fn fetch_feed(
     client: &reqwest::blocking::Client,
@@ -35,13 +46,19 @@ pub fn fetch_feed(
         .get(feed_url)
         .send()
         .map_err(|e| format!("Failed to fetch feed: {e}"))?;
-    let bytes = response
-        .bytes()
-        .map_err(|e| format!("Failed to read feed body: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Failed to fetch feed: HTTP {}", response.status()));
+    }
+    let bytes = super::read_capped_body(response, MAX_FEED_RESPONSE_BYTES)?;
     let feed = feed_rs::parser::parse(&bytes[..]).map_err(|e| format!("Failed to parse feed: {e}"))?;
 
     let meta = feed_to_podcast_meta(&feed);
-    let episodes = feed.entries.iter().filter_map(entry_to_episode_meta).collect();
+    let episodes = feed
+        .entries
+        .iter()
+        .filter_map(entry_to_episode_meta)
+        .take(MAX_EPISODES_PER_FEED)
+        .collect();
     Ok((meta, episodes))
 }
 
@@ -76,7 +93,13 @@ fn find_enclosure(entry: &Entry) -> Option<(String, String, i64)> {
                     .as_ref()
                     .map(|m| m.as_str().to_string())
                     .unwrap_or_default();
-                let duration = media.duration.map(|d| d.as_secs() as i64).unwrap_or(0);
+                // `try_into` + clamp instead of a raw `as` cast: an
+                // absurd/hostile `<itunes:duration>` value near u64::MAX
+                // would otherwise wrap around to a negative duration.
+                let duration = media
+                    .duration
+                    .map(|d| d.as_secs().try_into().unwrap_or(i64::MAX))
+                    .unwrap_or(0);
                 return Some((url.to_string(), mime, duration));
             }
         }
@@ -161,6 +184,9 @@ struct ItunesResultRaw {
     artist_name: String,
 }
 
+/// Cap on the iTunes Search API JSON response.
+const MAX_ITUNES_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Search the iTunes podcast directory. Results without a `feedUrl` are
 /// skipped since they can't be subscribed to.
 pub fn search_itunes(
@@ -175,9 +201,12 @@ pub fn search_itunes(
         .get(&url)
         .send()
         .map_err(|e| format!("iTunes search failed: {e}"))?;
-    let body: ItunesResponse = response
-        .json()
-        .map_err(|e| format!("iTunes response parse failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("iTunes search returned HTTP {}", response.status()));
+    }
+    let bytes = super::read_capped_body(response, MAX_ITUNES_RESPONSE_BYTES)?;
+    let body: ItunesResponse =
+        serde_json::from_slice(&bytes).map_err(|e| format!("iTunes response parse failed: {e}"))?;
     Ok(map_itunes_results(body.results))
 }
 

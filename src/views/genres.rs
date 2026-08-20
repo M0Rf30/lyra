@@ -40,24 +40,7 @@ pub fn genres_view(
 
     use crate::config::ViewMode;
 
-    let toggle_icon = match mode {
-        ViewMode::Grid => "view-list-symbolic",
-        ViewMode::List => "view-grid-symbolic",
-    };
-    let toggle_label = match mode {
-        ViewMode::Grid => fl!("switch-to-list"),
-        ViewMode::List => fl!("switch-to-grid"),
-    };
-    let toggle_btn = widget::tooltip(
-        widget::button::icon(widget::icon::from_name(toggle_icon).size(16))
-            .on_press(GenreMessage::ToggleViewMode),
-        widget::text::caption(toggle_label),
-        widget::tooltip::Position::Bottom,
-    );
-    let header = widget::Row::new()
-        .push(widget::Space::new().width(Length::Fill))
-        .push(toggle_btn)
-        .padding(16);
+    let header = common::view_mode_toggle_header(mode, GenreMessage::ToggleViewMode);
 
     let content: cosmic::Element<'_, GenreMessage> = match mode {
         ViewMode::Grid => {
@@ -188,7 +171,7 @@ pub fn genre_detail_view<'a>(
 
         let row = widget::button::custom(
             widget::Row::new()
-                .push(common::cell_text(format!("{}", index + 1)).width(40))
+                .push(common::cell_text((index + 1).to_string()).width(40))
                 .push(title_col)
                 .push(artist_col)
                 .push(album_col)

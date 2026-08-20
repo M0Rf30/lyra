@@ -78,24 +78,7 @@ pub fn albums_view<'a>(
         );
     }
 
-    let toggle_icon = match mode {
-        ViewMode::Grid => "view-list-symbolic",
-        ViewMode::List => "view-grid-symbolic",
-    };
-    let toggle_label = match mode {
-        ViewMode::Grid => fl!("switch-to-list"),
-        ViewMode::List => fl!("switch-to-grid"),
-    };
-    let toggle_btn = widget::tooltip(
-        widget::button::icon(widget::icon::from_name(toggle_icon).size(16))
-            .on_press(AlbumMessage::ToggleViewMode),
-        widget::text::caption(toggle_label),
-        widget::tooltip::Position::Bottom,
-    );
-    let header = widget::Row::new()
-        .push(widget::Space::new().width(Length::Fill))
-        .push(toggle_btn)
-        .padding(16);
+    let header = common::view_mode_toggle_header(mode, AlbumMessage::ToggleViewMode);
 
     let content: cosmic::Element<'a, AlbumMessage> = match mode {
         ViewMode::Grid => {
@@ -104,22 +87,11 @@ pub fn albums_view<'a>(
                 .enumerate()
                 .map(|(index, album)| {
                     let key = CoverArt::album_key(&album.artist, &album.name);
-                    let art_widget: cosmic::Element<'_, AlbumMessage> =
-                        if let Some(handle) = cover_images.get(&key) {
-                            widget::icon::icon(handle.clone()).size(160).into()
-                        } else {
-                            let placeholder_icon: cosmic::Element<'_, AlbumMessage> =
-                                widget::icon::from_name("media-optical-cd-audio-symbolic")
-                                    .size(64)
-                                    .into();
-                            widget::container(placeholder_icon)
-                                .width(CARD_WIDTH)
-                                .height(CARD_WIDTH)
-                                .align_x(Horizontal::Center)
-                                .align_y(Vertical::Center)
-                                .class(cosmic::theme::Container::Card)
-                                .into()
-                        };
+                    let art_widget = common::grid_art_tile(
+                        cover_images.get(&key),
+                        160,
+                        "media-optical-cd-audio-symbolic",
+                    );
 
                     // A missing or title-echoing artist still reserves the caption
                     // line's height (a non-breaking space) so every card's label
@@ -132,42 +104,21 @@ pub fn albums_view<'a>(
                         "\u{a0}"
                     };
 
-                    let label_block = widget::container(
-                        widget::Column::new()
-                            .push(
-                                widget::container(common::clipped_cell(
-                                    common::cell_text(album.name.as_str()).into(),
-                                ))
-                                .width(CARD_WIDTH),
-                            )
-                            .push(
-                                widget::container(
-                                    widget::Row::new()
-                                        .push(common::clipped_cell(
-                                            secondary_caption(artist_display).into(),
-                                        ))
-                                        .push(common::quality_badge(
-                                            crate::library::quality::album_quality(&album.tracks),
-                                        ))
-                                        .spacing(4)
-                                        .align_y(Alignment::Center),
-                                )
-                                .width(CARD_WIDTH),
-                            )
-                            .spacing(2),
-                    )
-                    .height(Length::Fixed(CARD_LABEL_HEIGHT));
+                    let label_block = common::grid_card_label(
+                        CARD_WIDTH,
+                        CARD_LABEL_HEIGHT,
+                        common::clipped_cell(common::cell_text(album.name.as_str()).into()),
+                        widget::Row::new()
+                            .push(common::clipped_cell(secondary_caption(artist_display).into()))
+                            .push(common::quality_badge(crate::library::quality::album_quality(
+                                &album.tracks,
+                            )))
+                            .spacing(4)
+                            .align_y(Alignment::Center)
+                            .into(),
+                    );
 
-                    let album_card = widget::Column::new()
-                        .push(
-                            widget::container(art_widget)
-                                .width(CARD_WIDTH)
-                                .height(CARD_WIDTH)
-                                .align_x(Horizontal::Center)
-                                .align_y(Vertical::Center),
-                        )
-                        .push(label_block)
-                        .spacing(8);
+                    let album_card = common::grid_card(art_widget, CARD_WIDTH, label_block);
 
                     let tooltip_label = if has_distinct_artist {
                         fl!(
@@ -217,14 +168,11 @@ pub fn albums_view<'a>(
 
             for (index, album) in albums.iter().enumerate() {
                 let key = CoverArt::album_key(&album.artist, &album.name);
-                let art_widget: cosmic::Element<'_, AlbumMessage> =
-                    if let Some(handle) = cover_images.get(&key) {
-                        widget::icon::icon(handle.clone()).size(48).into()
-                    } else {
-                        widget::icon::from_name("media-optical-cd-audio-symbolic")
-                            .size(48)
-                            .into()
-                    };
+                let art_widget: cosmic::Element<'_, AlbumMessage> = common::list_art_icon(
+                    cover_images.get(&key),
+                    48,
+                    "media-optical-cd-audio-symbolic",
+                );
 
                 let has_distinct_artist = !album.artist.trim().is_empty()
                     && !album.artist.trim().eq_ignore_ascii_case(album.name.trim());
@@ -388,7 +336,7 @@ pub fn album_detail_view<'a>(
                 .size(14)
                 .into()
         } else {
-            common::cell_text(format!("{}", track.track_number)).into()
+            common::cell_text(track.track_number.to_string()).into()
         };
 
         let heart_btn = common::favorite_button(
@@ -423,21 +371,12 @@ pub fn album_detail_view<'a>(
 
         // Task 98: Add to playlist button - honest about its destination, or
         // absent entirely when there is nowhere to add to.
-        let playlist_btn: cosmic::Element<'_, AlbumMessage> =
-            if let Some(first_pl) = playlists.first() {
-                widget::tooltip(
-                    widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16))
-                        .on_press(AlbumMessage::AddToPlaylist(
-                            track.source_uri.clone(),
-                            first_pl.id.clone(),
-                        )),
-                    widget::text::caption(format!("Add to \"{}\"", first_pl.name)),
-                    widget::tooltip::Position::Top,
-                )
-                .into()
-            } else {
-                widget::Space::new().width(32).height(32).into()
-            };
+        let playlist_btn: cosmic::Element<'_, AlbumMessage> = common::add_to_playlist_button(
+            track.source_uri.clone(),
+            playlists,
+            AlbumMessage::AddToPlaylist,
+            32.0,
+        );
 
         let row = widget::button::custom(
             widget::Row::new()

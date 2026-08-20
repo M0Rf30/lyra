@@ -68,9 +68,9 @@ fn preset_row_class(selected: bool) -> cosmic::theme::Button {
                 }
             } else {
                 ButtonStyle {
-                    background: Some(Background::Color(
-                        Color::from_rgba(1.0, 1.0, 1.0, 0.08).into(),
-                    )),
+                    background: Some(Background::Color(Color::from_rgba(
+                        1.0, 1.0, 1.0, 0.08,
+                    ))),
                     text_color: Some(BACKDROP_TEXT),
                     icon_color: Some(BACKDROP_TEXT),
                     border_radius: cosmic.corner_radii.radius_s.into(),
@@ -81,9 +81,9 @@ fn preset_row_class(selected: bool) -> cosmic::theme::Button {
         pressed: Box::new(move |_focused, theme| {
             let cosmic = theme.cosmic();
             ButtonStyle {
-                background: Some(Background::Color(
-                    Color::from_rgba(1.0, 1.0, 1.0, 0.14).into(),
-                )),
+                background: Some(Background::Color(Color::from_rgba(
+                    1.0, 1.0, 1.0, 0.14,
+                ))),
                 text_color: Some(BACKDROP_TEXT),
                 icon_color: Some(BACKDROP_TEXT),
                 border_radius: cosmic.corner_radii.radius_s.into(),
