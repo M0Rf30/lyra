@@ -183,7 +183,7 @@ pub fn songs_list_view<'a>(
         return common::empty_state(
             "audio-x-generic-symbolic",
             fl!("no-songs"),
-            "Scan your library from File > Rescan",
+            fl!("songs-empty-hint"),
         );
     }
 
@@ -214,7 +214,7 @@ pub fn songs_list_view<'a>(
     let fav_button = widget::button::custom(
         widget::Row::new()
             .push(widget::icon::from_name(fav_icon).size(16))
-            .push(widget::text::body("Favorites"))
+            .push(widget::text::body(fl!("songs-favorites-filter")))
             .spacing(4)
             .align_y(Alignment::Center),
     )
@@ -251,8 +251,8 @@ pub fn songs_list_view<'a>(
     let table_area: cosmic::Element<'a, SongMessage> = if filtered.is_empty() {
         common::empty_state(
             "edit-find-symbolic",
-            "No matching tracks",
-            "Try clearing the favorites or genre filter",
+            fl!("songs-no-matches"),
+            fl!("songs-no-matches-hint"),
         )
     } else {
         widget::responsive(move |size: Size| {

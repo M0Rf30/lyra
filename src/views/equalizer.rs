@@ -7,6 +7,7 @@
 //! results list below the preset controls.
 
 use crate::autoeq::AutoEQProfileMetadata;
+use crate::fl;
 use crate::player::equalizer::{BAND_LABELS, EqPresetData, PresetSource};
 use crate::views::list_row_button_class;
 use cosmic::iced::{Alignment, Length};
@@ -52,7 +53,7 @@ pub fn equalizer_view<'a>(
     autoeq_loading: bool,
     autoeq_search: &'a str,
 ) -> cosmic::Element<'a, EqualizerMessage> {
-    let toggle = cosmic::widget::settings::item::builder("Equalizer Enabled")
+    let toggle = cosmic::widget::settings::item::builder(fl!("equalizer-enabled"))
         .control(widget::toggler(enabled).on_toggle(EqualizerMessage::ToggleEnabled));
 
     // --- Preset dropdown (built-in + custom only) ---
@@ -87,19 +88,23 @@ pub fn equalizer_view<'a>(
         })
         .unwrap_or(false);
 
-    let save_btn = widget::button::text("Save").on_press_maybe(if is_custom_selected && dirty {
+    let save_btn = widget::button::text(fl!("save")).on_press_maybe(if is_custom_selected && dirty {
         Some(EqualizerMessage::SavePreset)
     } else {
         None
     });
 
-    let delete_btn = widget::button::destructive("Delete").on_press_maybe(if is_custom_selected {
-        Some(EqualizerMessage::DeletePreset)
-    } else {
-        None
-    });
+    let delete_btn =
+        widget::button::destructive(fl!("equalizer-delete-preset")).on_press_maybe(
+            if is_custom_selected {
+                Some(EqualizerMessage::DeletePreset)
+            } else {
+                None
+            },
+        );
 
-    let reset_btn = widget::button::text("Reset").on_press(EqualizerMessage::ResetPreset);
+    let reset_btn =
+        widget::button::text(fl!("equalizer-reset-preset")).on_press(EqualizerMessage::ResetPreset);
 
     let toolbar_row = widget::Row::new()
         .push(save_btn)
@@ -108,13 +113,13 @@ pub fn equalizer_view<'a>(
         .spacing(4);
 
     // --- Save As inline input ---
-    let save_as_input = widget::text_input("Preset name...", save_as_name)
+    let save_as_input = widget::text_input(fl!("equalizer-preset-name-placeholder"), save_as_name)
         .on_input(EqualizerMessage::SaveAsNameChanged);
 
     let save_as_btn = if !save_as_name.trim().is_empty() {
-        widget::button::standard("Save As").on_press(EqualizerMessage::SavePresetAs)
+        widget::button::standard(fl!("equalizer-save-preset-as")).on_press(EqualizerMessage::SavePresetAs)
     } else {
-        widget::button::standard("Save As")
+        widget::button::standard(fl!("equalizer-save-preset-as"))
     };
 
     let save_as_row = widget::Row::new()
@@ -127,7 +132,7 @@ pub fn equalizer_view<'a>(
     let autoeq_section: cosmic::Element<'a, EqualizerMessage> = if !autoeq_profiles.is_empty() {
         let query = autoeq_search.trim().to_lowercase();
 
-        let search_input = widget::text_input("Search headphones...", autoeq_search)
+        let search_input = widget::text_input(fl!("equalizer-autoeq-search-placeholder"), autoeq_search)
             .on_input(EqualizerMessage::AutoEQSearchChanged);
 
         if query.len() >= 2 {
@@ -139,11 +144,12 @@ pub fn equalizer_view<'a>(
 
             let count = filtered.len();
             let count_text: cosmic::Element<'_, EqualizerMessage> = if count == 0 {
-                widget::text::caption("No matches").into()
+                widget::text::caption(fl!("equalizer-autoeq-no-matches")).into()
             } else if count >= 50 {
-                widget::text::caption("50+ matches — refine your search").into()
+                widget::text::caption(fl!("equalizer-autoeq-too-many-matches")).into()
             } else {
-                widget::text::caption(format!("{count} matches")).into()
+                widget::text::caption(fl!("equalizer-autoeq-match-count", count = count.to_string()))
+                    .into()
             };
 
             // Build scrollable clickable list of matching profiles
@@ -169,8 +175,11 @@ pub fn equalizer_view<'a>(
                 widget::scrollable(widget::container(result_list).width(Length::Fill))
                     .height(Length::Fixed(200.0));
 
-            let refresh_btn = widget::button::text(format!("{} profiles", autoeq_profiles.len()))
-                .on_press(EqualizerMessage::FetchAutoEQ);
+            let refresh_btn = widget::button::text(fl!(
+                "equalizer-autoeq-profile-count",
+                count = autoeq_profiles.len().to_string()
+            ))
+            .on_press(EqualizerMessage::FetchAutoEQ);
 
             widget::Column::new()
                 .push(search_input)
@@ -181,11 +190,13 @@ pub fn equalizer_view<'a>(
                 .into()
         } else {
             let hint: cosmic::Element<'_, EqualizerMessage> =
-                widget::text::caption("Type 2+ chars to search").into();
+                widget::text::caption(fl!("equalizer-autoeq-search-hint")).into();
 
-            let refresh_btn =
-                widget::button::text(format!("{} profiles loaded", autoeq_profiles.len()))
-                    .on_press(EqualizerMessage::FetchAutoEQ);
+            let refresh_btn = widget::button::text(fl!(
+                "equalizer-autoeq-profiles-loaded",
+                count = autoeq_profiles.len().to_string()
+            ))
+            .on_press(EqualizerMessage::FetchAutoEQ);
 
             widget::Column::new()
                 .push(search_input)
@@ -197,18 +208,22 @@ pub fn equalizer_view<'a>(
     } else {
         // Profiles not yet loaded — show fetch button
         let fetch_btn = if autoeq_loading {
-            widget::button::text("Loading...")
+            widget::button::text(fl!("equalizer-autoeq-loading"))
         } else {
-            widget::button::text("Load AutoEQ Profiles").on_press(EqualizerMessage::FetchAutoEQ)
+            widget::button::text(fl!("equalizer-autoeq-load-profiles"))
+                .on_press(EqualizerMessage::FetchAutoEQ)
         };
         widget::Column::new().push(fetch_btn).spacing(4).into()
     };
 
     // --- Preamp slider ---
     let preamp_row = widget::Row::new()
-        .push(widget::text::body("Preamp:"))
+        .push(widget::text::body(fl!("equalizer-preamp-label")))
         .push(widget::space::horizontal())
-        .push(widget::text::body(format!("{:+.1} dB", preamp)))
+        .push(widget::text::body(fl!(
+            "equalizer-preamp-value",
+            db = format!("{:+.1}", preamp)
+        )))
         .spacing(8)
         .align_y(Alignment::Center);
 
@@ -252,18 +267,18 @@ pub fn equalizer_view<'a>(
     widget::Column::new()
         .push(toggle)
         .push(widget::divider::horizontal::default())
-        .push(widget::text::title4("Preset"))
+        .push(widget::text::title4(fl!("equalizer-section-preset")))
         .push(preset_dropdown)
         .push(toolbar_row)
         .push(save_as_row)
         .push(widget::divider::horizontal::default())
-        .push(widget::text::title4("AutoEQ"))
+        .push(widget::text::title4(fl!("equalizer-section-autoeq")))
         .push(autoeq_section)
         .push(widget::divider::horizontal::default())
-        .push(widget::text::title4("Preamp"))
+        .push(widget::text::title4(fl!("equalizer-section-preamp")))
         .push(preamp_control)
         .push(widget::divider::horizontal::default())
-        .push(widget::text::title4("Bands"))
+        .push(widget::text::title4(fl!("equalizer-section-bands")))
         .push(band_row)
         .spacing(8)
         .padding(16)

@@ -100,6 +100,7 @@ pub struct MprisSnapshot {
     pub can_go_next: bool,
     pub can_go_previous: bool,
     pub can_seek: bool,
+    pub can_play: bool,
 }
 
 /// Item yielded by [`mpris_stream`]: first a one-shot `Ready` carrying the
@@ -126,7 +127,7 @@ struct SharedState {
     /// Per-track `file://` cover art URL cache. Lyra keeps cover art as
     /// BLOBs in its library database rather than as loose files on disk, but
     /// MPRIS clients need an actual file to read pixels from — see
-    /// [`MprisHandle::art_url_for_track`].
+    /// [`MprisHandle::cached_art_url`]/[`MprisHandle::cache_art_url`].
     art_cache: Mutex<HashMap<i64, Option<String>>>,
 }
 
@@ -181,6 +182,10 @@ impl MprisHandle {
         if previous.can_seek != snapshot.can_seek {
             properties.push(Property::CanSeek(snapshot.can_seek));
         }
+        if previous.can_play != snapshot.can_play {
+            properties.push(Property::CanPlay(snapshot.can_play));
+            properties.push(Property::CanPause(snapshot.can_play));
+        }
         let metadata_changed = previous.track_id != snapshot.track_id
             || previous.title != snapshot.title
             || previous.artist != snapshot.artist
@@ -207,17 +212,19 @@ impl MprisHandle {
             .unbounded_send(Update { properties, seeked });
     }
 
-    /// Resolves (and locally caches) a `file://` URL pointing at `track`'s
-    /// cover art, extracting it from the audio file's tags at most once per
-    /// track id. Returns `None` when the track has no embedded art.
-    pub fn art_url_for_track(&self, track: &crate::library::Track) -> Option<String> {
-        let mut cache = self.shared.art_cache.lock();
-        if let Some(cached) = cache.get(&track.id) {
-            return cached.clone();
-        }
-        let resolved = extract_art_url(track.id, &track.path);
-        cache.insert(track.id, resolved.clone());
-        resolved
+    /// Returns the cached cover-art URL for `track_id`, if resolution has
+    /// already completed. `Some(None)` means resolution finished but the
+    /// track has no embedded art; `None` means it hasn't been resolved yet,
+    /// and the caller should resolve it off-thread (see [`extract_art_url`])
+    /// and record the outcome via [`Self::cache_art_url`].
+    pub fn cached_art_url(&self, track_id: i64) -> Option<Option<String>> {
+        self.shared.art_cache.lock().get(&track_id).cloned()
+    }
+
+    /// Records a resolved cover-art URL for `track_id`, populating the
+    /// cache read by [`Self::cached_art_url`].
+    pub fn cache_art_url(&self, track_id: i64, url: Option<String>) {
+        self.shared.art_cache.lock().insert(track_id, url);
     }
 }
 
@@ -226,7 +233,7 @@ impl MprisHandle {
 /// This is the only disk-writing cover art cache in Lyra (the library's own
 /// cache stores album art as database BLOBs, which D-Bus clients can't read
 /// directly) and is scoped entirely to MPRIS's needs.
-fn extract_art_url(track_id: i64, path: &Path) -> Option<String> {
+pub(crate) fn extract_art_url(track_id: i64, path: &Path) -> Option<String> {
     let bytes = crate::library::CoverArt::extract_from_file(path)?;
     let ext = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         "png"
@@ -591,11 +598,11 @@ impl PlayerInterface for DbusPlayer {
     }
 
     async fn can_play(&self) -> fdo::Result<bool> {
-        Ok(true)
+        Ok(self.snapshot().can_play)
     }
 
     async fn can_pause(&self) -> fdo::Result<bool> {
-        Ok(true)
+        Ok(self.snapshot().can_play)
     }
 
     async fn can_seek(&self) -> fdo::Result<bool> {
