@@ -17,6 +17,7 @@ use cosmic::widget::button::Style as ButtonStyle;
 use cosmic::widget::tooltip::Position as TooltipPosition;
 
 use crate::fl;
+use crate::library::Playlist;
 
 /// Concrete text widget type returned by `cosmic::widget::text::*` helpers.
 pub type Text<'a> = cosmic::iced::widget::Text<'a, cosmic::Theme, cosmic::Renderer>;
@@ -292,6 +293,143 @@ pub fn empty_state<'a, M: 'static>(
     .align_x(Horizontal::Center)
     .align_y(Vertical::Center)
     .into()
+}
+
+/// Shared header for card-grid views: a right-aligned view-mode toggle
+/// button that flips between grid and list icons/labels for the current
+/// mode. Used by every card-grid view (albums, artists, genres) so the
+/// toggle's placement and wording never drift between them.
+pub fn view_mode_toggle_header<'a, M: Clone + 'static>(
+    mode: crate::config::ViewMode,
+    on_toggle: M,
+) -> cosmic::Element<'a, M> {
+    use crate::config::ViewMode;
+    let toggle_icon = match mode {
+        ViewMode::Grid => "view-list-symbolic",
+        ViewMode::List => "view-grid-symbolic",
+    };
+    let toggle_label = match mode {
+        ViewMode::Grid => fl!("switch-to-list"),
+        ViewMode::List => fl!("switch-to-grid"),
+    };
+    let toggle_btn = widget::tooltip(
+        widget::button::icon(widget::icon::from_name(toggle_icon).size(16)).on_press(on_toggle),
+        widget::text::caption(toggle_label),
+        TooltipPosition::Bottom,
+    );
+    widget::Row::new()
+        .push(widget::Space::new().width(Length::Fill))
+        .push(toggle_btn)
+        .padding(16)
+        .into()
+}
+
+/// Grid-card artwork tile: the cached cover/avatar icon at `size`, or a
+/// card-styled placeholder frame with a 64px fallback icon when nothing is
+/// cached yet. Shared by every card grid (albums, artists) so a missing
+/// cover's frame never differs from the album/artist that has one.
+pub fn grid_art_tile<'a, M: 'static>(
+    handle: Option<&widget::icon::Handle>,
+    size: u16,
+    placeholder_icon: &'static str,
+) -> cosmic::Element<'a, M> {
+    match handle {
+        Some(handle) => widget::icon::icon(handle.clone()).size(size).into(),
+        None => {
+            let placeholder: cosmic::Element<'a, M> =
+                widget::icon::from_name(placeholder_icon).size(64).into();
+            widget::container(placeholder)
+                .width(f32::from(size))
+                .height(f32::from(size))
+                .align_x(Horizontal::Center)
+                .align_y(Vertical::Center)
+                .class(cosmic::theme::Container::Card)
+                .into()
+        }
+    }
+}
+
+/// List-row artwork icon: the cached cover/avatar icon at `size`, or an
+/// unstyled fallback icon at the same size when nothing is cached.
+pub fn list_art_icon<'a, M: 'static>(
+    handle: Option<&widget::icon::Handle>,
+    size: u16,
+    placeholder_icon: &'static str,
+) -> cosmic::Element<'a, M> {
+    match handle {
+        Some(handle) => widget::icon::icon(handle.clone()).size(size).into(),
+        None => widget::icon::from_name(placeholder_icon).size(size).into(),
+    }
+}
+
+/// Fixed-height two-line label block under a grid card: a title element
+/// above a subtitle element, both pinned to `card_width` so every card's
+/// caption block is exactly `label_height` tall regardless of whether the
+/// subtitle has text. Callers clip their own title/subtitle content
+/// (typically with [`clipped_cell`]) before passing it in, since a
+/// subtitle may itself be a row with more than one clipped piece.
+pub fn grid_card_label<'a, M: 'a>(
+    card_width: f32,
+    label_height: f32,
+    title: cosmic::Element<'a, M>,
+    subtitle: cosmic::Element<'a, M>,
+) -> cosmic::Element<'a, M> {
+    widget::container(
+        widget::Column::new()
+            .push(widget::container(title).width(card_width))
+            .push(widget::container(subtitle).width(card_width))
+            .spacing(2),
+    )
+    .height(Length::Fixed(label_height))
+    .into()
+}
+
+/// Assembles a grid card: a fixed `card_width`×`card_width` centered art
+/// tile above a label block. Shared by every card grid (albums, artists)
+/// so art framing and card spacing never drift between them.
+pub fn grid_card<'a, M: 'a>(
+    art: cosmic::Element<'a, M>,
+    card_width: f32,
+    label_block: cosmic::Element<'a, M>,
+) -> cosmic::Element<'a, M> {
+    widget::Column::new()
+        .push(
+            widget::container(art)
+                .width(card_width)
+                .height(card_width)
+                .align_x(Horizontal::Center)
+                .align_y(Vertical::Center),
+        )
+        .push(label_block)
+        .spacing(8)
+        .into()
+}
+
+/// Add-to-playlist icon button. Adds to the first playlist, honestly
+/// labelled via tooltip with that playlist's name. Renders empty space
+/// instead of a dead button when there are no playlists yet. Shared by
+/// every track row that offers this action (songs, albums).
+pub fn add_to_playlist_button<'a, M: 'static + Clone>(
+    source_uri: String,
+    playlists: &'a [Playlist],
+    make_message: impl FnOnce(String, String) -> M,
+    empty_width: f32,
+) -> cosmic::Element<'a, M> {
+    if let Some(playlist) = playlists.first() {
+        let button = widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16))
+            .on_press(make_message(source_uri, playlist.id.clone()));
+        widget::tooltip(
+            button,
+            widget::text::caption(fl!(
+                "songs-add-to-playlist",
+                playlist = playlist.name.as_str()
+            )),
+            TooltipPosition::Top,
+        )
+        .into()
+    } else {
+        widget::Space::new().width(empty_width).into()
+    }
 }
 
 #[cfg(test)]

@@ -239,7 +239,13 @@ fn extract_art_url(track_id: i64, path: &Path) -> Option<String> {
     if !file_path.exists() {
         std::fs::write(&file_path, &bytes).ok()?;
     }
-    Some(format!("file://{}", file_path.display()))
+    let encoded_path = file_path
+        .to_string_lossy()
+        .split('/')
+        .map(urlencoding::encode)
+        .collect::<Vec<_>>()
+        .join("/");
+    Some(format!("file://{encoded_path}"))
 }
 
 /// Decides whether a `Seeked` signal is warranted for the transition from

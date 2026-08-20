@@ -10,6 +10,31 @@ use std::time::{Duration, SystemTime};
 const INDEX_CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60); // 7 days
 const PROFILE_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60); // 30 days
 
+/// Cap on the AutoEQ INDEX.md body. The real file is a few hundred KB; a
+/// hostile or broken mirror returning an unbounded body must not be read
+/// into memory in full.
+const MAX_INDEX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+/// Cap on a single FixedBandEQ.txt profile body (normally well under 1 KB).
+const MAX_PROFILE_RESPONSE_BYTES: usize = 256 * 1024;
+
+/// Reads an async HTTP response body as UTF-8 text, capped at `max_bytes`.
+/// Uses `Response::chunk()` (always available, no `stream` feature
+/// needed) so a hostile or misbehaving server can't exhaust memory with
+/// an unbounded body.
+async fn read_capped_text(mut response: reqwest::Response, max_bytes: usize) -> Result<String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        body.extend_from_slice(&chunk);
+        if body.len() > max_bytes {
+            return Err(AutoEQError::InvalidFormat(format!(
+                "Response exceeded {max_bytes} byte limit"
+            )));
+        }
+    }
+    String::from_utf8(body)
+        .map_err(|e| AutoEQError::InvalidFormat(format!("Response was not valid UTF-8: {e}")))
+}
+
 /// Manager for fetching and caching AutoEQ profiles.
 pub struct AutoEQManager {
     cache_dir: PathBuf,
@@ -66,7 +91,7 @@ impl AutoEQManager {
             ));
         }
 
-        let content = response.text().await?;
+        let content = read_capped_text(response, MAX_INDEX_RESPONSE_BYTES).await?;
         let profiles = super::parser::parse_index(&content)?;
 
         // Cache in memory
@@ -150,7 +175,7 @@ impl AutoEQManager {
             ));
         }
 
-        let content = response.text().await?;
+        let content = read_capped_text(response, MAX_PROFILE_RESPONSE_BYTES).await?;
         super::parser::parse_fixed_band_eq(path, &content)
     }
 
@@ -193,7 +218,7 @@ impl AutoEQManager {
             profiles: profiles.to_vec(),
         };
         let json = serde_json::to_string_pretty(&cache_data)?;
-        std::fs::write(cache_path, json)?;
+        write_cache_atomically(&cache_path, &json)?;
         Ok(())
     }
 
@@ -204,7 +229,12 @@ impl AutoEQManager {
         }
 
         let content = std::fs::read_to_string(cache_path)?;
-        let cache_data: CachedIndex = serde_json::from_str(&content)?;
+        // A corrupt/truncated cache file (e.g. left behind by a crash or
+        // unclean shutdown mid-write) is a cache miss, not a fatal error:
+        // fall through to a fresh fetch instead of permanently failing.
+        let Ok(cache_data) = serde_json::from_str::<CachedIndex>(&content) else {
+            return Ok(None);
+        };
 
         // Check TTL
         let age = SystemTime::now()
@@ -228,7 +258,7 @@ impl AutoEQManager {
         };
 
         let json = serde_json::to_string_pretty(&cache_data)?;
-        std::fs::write(cache_path, json)?;
+        write_cache_atomically(&cache_path, &json)?;
         Ok(())
     }
 
@@ -241,7 +271,11 @@ impl AutoEQManager {
         }
 
         let content = std::fs::read_to_string(cache_path)?;
-        let cache_data: CachedProfile = serde_json::from_str(&content)?;
+        // See `load_index_from_disk`: a corrupt cache file is a miss, not
+        // a fatal error.
+        let Ok(cache_data) = serde_json::from_str::<CachedProfile>(&content) else {
+            return Ok(None);
+        };
 
         // Check TTL
         let age = SystemTime::now()
@@ -261,6 +295,15 @@ impl AutoEQManager {
     }
 }
 
+/// Writes `content` to `path` via a temp-file-then-rename, so a crash or
+/// power loss mid-write can never leave a truncated/corrupt cache file in
+/// `path`'s place (`rename` is atomic on the same filesystem).
+fn write_cache_atomically(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, content)?;
+    std::fs::rename(&tmp_path, path)
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedIndex {
     timestamp: SystemTime,
@@ -271,4 +314,45 @@ struct CachedIndex {
 struct CachedProfile {
     timestamp: SystemTime,
     profile: AutoEQProfile,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_cache_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lyra-autoeq-test-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn corrupt_index_cache_is_treated_as_a_miss_not_an_error() {
+        // A truncated/corrupt cache file — e.g. left behind by a crash
+        // mid-write — must fall back to a fresh fetch, not permanently
+        // break the feature with a propagated parse error.
+        let dir = temp_cache_dir("index");
+        std::fs::write(dir.join("index.json"), b"not valid json{{{").unwrap();
+        let manager = AutoEQManager::new(dir, Duration::from_secs(5)).unwrap();
+        assert!(matches!(manager.load_index_from_disk(), Ok(None)));
+    }
+
+    #[test]
+    fn corrupt_profile_cache_is_treated_as_a_miss_not_an_error() {
+        let dir = temp_cache_dir("profile");
+        let manager = AutoEQManager::new(dir.clone(), Duration::from_secs(5)).unwrap();
+        let filename = manager.cache_filename("oratory1990/over-ear/Test");
+        std::fs::write(dir.join(filename), b"not valid json{{{").unwrap();
+        assert!(matches!(
+            manager.load_profile_from_disk("oratory1990/over-ear/Test"),
+            Ok(None)
+        ));
+    }
 }

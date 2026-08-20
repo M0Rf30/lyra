@@ -258,25 +258,15 @@ fn mpd_server_card<'a>(
         .on_input(move |v| ProvidersMessage::EditPassword(index, v))
         .password();
 
-    let mut action_buttons = widget::Row::new().spacing(8).align_y(Alignment::Center);
-    action_buttons = action_buttons
-        .push(widget::button::standard(fl!("save")).on_press(ProvidersMessage::Save(index)));
-    action_buttons = action_buttons.push(
-        widget::button::text(fl!("test-connection"))
-            .on_press(ProvidersMessage::TestConnection(index)),
+    let buttons = provider_action_buttons(
+        ProvidersMessage::Save(index),
+        ProvidersMessage::TestConnection(index),
+        ProvidersMessage::Remove(index),
+        connection_status,
     );
-    if let Some(status) = connection_status {
-        action_buttons = action_buttons.push(status_label(status));
-    }
-
-    let buttons = widget::Row::new()
-        .push(action_buttons)
-        .push(widget::space::horizontal())
-        .push(widget::button::destructive(fl!("remove")).on_press(ProvidersMessage::Remove(index)))
-        .align_y(Alignment::Center);
 
     widget::Column::new()
-        .push(widget::text::title4(format!("MPD: {}", &server.name)))
+        .push(widget::text::title4(format!("MPD: {}", server.name)))
         .push(name_input)
         .push(host_input)
         .push(
@@ -316,26 +306,12 @@ fn subsonic_server_card<'a>(
         .on_toggle(move |v| ProvidersMessage::SubsonicToggleCerts(index, v));
 
     // Save + Test Connection on the left, Remove pushed to the right
-    let mut action_buttons = widget::Row::new().spacing(8).align_y(Alignment::Center);
-    action_buttons = action_buttons.push(
-        widget::button::standard(fl!("save")).on_press(ProvidersMessage::SubsonicSave(index)),
+    let buttons = provider_action_buttons(
+        ProvidersMessage::SubsonicSave(index),
+        ProvidersMessage::SubsonicTestConnection(index),
+        ProvidersMessage::SubsonicRemove(index),
+        connection_status,
     );
-    action_buttons = action_buttons.push(
-        widget::button::text(fl!("test-connection"))
-            .on_press(ProvidersMessage::SubsonicTestConnection(index)),
-    );
-    if let Some(status) = connection_status {
-        action_buttons = action_buttons.push(status_label(status));
-    }
-
-    let buttons = widget::Row::new()
-        .push(action_buttons)
-        .push(widget::space::horizontal())
-        .push(
-            widget::button::destructive(fl!("remove"))
-                .on_press(ProvidersMessage::SubsonicRemove(index)),
-        )
-        .align_y(Alignment::Center);
 
     // Task 109: Transcoding controls — use a wrapping column layout to avoid overflow
     let bitrate_options: Vec<(Option<u32>, String)> = vec![
@@ -406,7 +382,7 @@ fn subsonic_server_card<'a>(
     }
 
     widget::Column::new()
-        .push(widget::text::title4(format!("Subsonic: {}", &server.name)))
+        .push(widget::text::title4(format!("Subsonic: {}", server.name)))
         .push(name_input)
         .push(url_input)
         .push(
@@ -424,6 +400,29 @@ fn subsonic_server_card<'a>(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+/// Save/Test-connection/status row, plus a Remove button pushed to the far
+/// right. Identical scaffolding for both provider kinds' server cards.
+fn provider_action_buttons<'a>(
+    save: ProvidersMessage,
+    test: ProvidersMessage,
+    remove: ProvidersMessage,
+    connection_status: Option<&'a str>,
+) -> cosmic::Element<'a, ProvidersMessage> {
+    let mut action_buttons = widget::Row::new().spacing(8).align_y(Alignment::Center);
+    action_buttons = action_buttons.push(widget::button::standard(fl!("save")).on_press(save));
+    action_buttons =
+        action_buttons.push(widget::button::text(fl!("test-connection")).on_press(test));
+    if let Some(status) = connection_status {
+        action_buttons = action_buttons.push(status_label(status));
+    }
+
+    widget::Row::new()
+        .push(action_buttons)
+        .push(widget::space::horizontal())
+        .push(widget::button::destructive(fl!("remove")).on_press(remove))
+        .align_y(Alignment::Center)
+        .into()
+}
 
 /// Render a connection status label with color coding.
 ///

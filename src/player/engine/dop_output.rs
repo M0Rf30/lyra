@@ -52,6 +52,14 @@ fn send_bounded(
     }
 }
 
+/// DoP marker sample for the priming/reset bursts: alternates 0x05/0xFA
+/// every frame, matching the real encoder's per-frame marker cycle (see
+/// `dop.rs::DopEncoder::encode`).
+fn dop_primer_sample(frame: usize) -> i32 {
+    let marker: i32 = if frame.is_multiple_of(2) { 0x05 } else { 0xFA };
+    marker << 24
+}
+
 pub struct DopOutput {
     device: Device,
     stream: Option<Stream>,
@@ -159,11 +167,8 @@ impl DopOutput {
         let mut primer_samples = Vec::with_capacity(primer_frames * self.config.channels as usize);
 
         for frame in 0..primer_frames {
-            let marker = if frame % 2 == 0 { 0x05 } else { 0xFA };
-            for _ in 0..self.config.channels {
-                let dop_silence = (marker as i32) << 24;
-                primer_samples.push(dop_silence);
-            }
+            let dop_silence = dop_primer_sample(frame);
+            primer_samples.extend(std::iter::repeat_n(dop_silence, self.config.channels as usize));
         }
 
         let chunk_size = self.config.sample_rate as usize / 50 * self.config.channels as usize;
@@ -232,12 +237,7 @@ impl DopOutput {
 
         if let Some(sender) = &self.sample_sender {
             let reset_frames = self.config.sample_rate as usize / 10;
-            let mut reset_samples =
-                Vec::with_capacity(reset_frames * self.config.channels as usize);
-
-            for _ in 0..(reset_frames * self.config.channels as usize) {
-                reset_samples.push(0);
-            }
+            let reset_samples = vec![0i32; reset_frames * self.config.channels as usize];
 
             // Best-effort: never block shutdown if the callback isn't draining.
             let _ = sender.try_send(reset_samples);
@@ -297,4 +297,21 @@ mod tests {
         let outcome = send_bounded(&tx, vec![1], Duration::from_millis(20));
         assert!(matches!(outcome, SendOutcome::Disconnected));
     }
+
+    #[test]
+    fn dop_primer_marker_alternates_every_frame() {
+        let markers: Vec<i32> = (0..6).map(dop_primer_sample).collect();
+        assert_eq!(
+            markers,
+            vec![
+                0x05 << 24,
+                0xFA << 24,
+                0x05 << 24,
+                0xFA << 24,
+                0x05 << 24,
+                0xFA << 24,
+            ]
+        );
+    }
 }
+

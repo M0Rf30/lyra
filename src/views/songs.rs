@@ -182,7 +182,7 @@ pub fn songs_list_view<'a>(
     if tracks.is_empty() {
         return common::empty_state(
             "audio-x-generic-symbolic",
-            "No songs found",
+            fl!("no-songs"),
             "Scan your library from File > Rescan",
         );
     }
@@ -439,7 +439,7 @@ fn build_row<'a>(
             .size(14)
             .into()
     } else {
-        common::cell_text(format!("{}", original_index + 1)).into()
+        common::cell_text((original_index + 1).to_string()).into()
     };
 
     let mut row = widget::Row::new()
@@ -523,9 +523,11 @@ fn build_row<'a>(
     }
 
     row = row.push(
-        widget::container(playlist_dropdown_button(
+        widget::container(common::add_to_playlist_button(
             track.source_uri.clone(),
             playlists,
+            SongMessage::AddToPlaylist,
+            ADD_WIDTH,
         ))
         .width(ADD_WIDTH)
         .align_x(Horizontal::Center),
@@ -542,30 +544,6 @@ fn build_row<'a>(
         .padding(0)
         .class(list_row_button_class(is_playing))
         .into()
-}
-
-/// Add-to-playlist button. Adds to the first playlist (existing behavior),
-/// honestly labelled via tooltip with that playlist's name. Renders empty
-/// space instead of a dead button when there are no playlists yet.
-fn playlist_dropdown_button<'a>(
-    source_uri: String,
-    playlists: &[Playlist],
-) -> cosmic::Element<'a, SongMessage> {
-    if let Some(playlist) = playlists.first() {
-        let button = widget::button::icon(widget::icon::from_name("list-add-symbolic").size(16))
-            .on_press(SongMessage::AddToPlaylist(source_uri, playlist.id.clone()));
-        widget::tooltip(
-            button,
-            widget::text::caption(fl!(
-                "songs-add-to-playlist",
-                playlist = playlist.name.as_str()
-            )),
-            widget::tooltip::Position::Top,
-        )
-        .into()
-    } else {
-        widget::Space::new().width(ADD_WIDTH).into()
-    }
 }
 
 fn sort_label(name: &str, field: SortField, current: SortField, descending: bool) -> String {

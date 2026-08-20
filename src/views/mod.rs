@@ -16,7 +16,6 @@ pub mod radio;
 pub mod settings;
 pub mod smart_playlists;
 pub mod songs;
-pub mod tag_editor;
 
 use cosmic::cosmic_theme::palette::WithAlpha;
 use cosmic::iced::core::Background;

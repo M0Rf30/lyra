@@ -7,15 +7,15 @@
 //! decoded locally by the `LocalBackend`.
 
 use super::{MusicProvider, ProviderError, ProviderType};
-use crate::library::{Album, Artist, CoverSource, LyricLine, Lyrics, Playlist, Track, TrackSource};
+use crate::library::{Album, Artist, CoverSource, LyricLine, Lyrics, Playlist, Track};
 use opensubsonic::{Auth, Client};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 /// Helper to wrap Subsonic errors into `ProviderError::Io` with a labeled context.
-fn subsonic_err<E: std::fmt::Display>(op: &str) -> impl FnOnce(E) -> ProviderError + '_ {
-    move |e| ProviderError::Io(format!("Subsonic {op}: {e}"))
+fn subsonic_err<E: std::fmt::Display>(op: &str) -> impl FnOnce(E) -> ProviderError {
+    super::wrap_err("Subsonic", op)
 }
 
 /// Configuration for connecting to a Subsonic-compatible server.
@@ -502,15 +502,6 @@ impl MusicProvider for SubsonicProvider {
         })
     }
 
-    fn resolve_audio(&self, track: &Track) -> Result<TrackSource, ProviderError> {
-        // Build an authenticated streaming URL for this song ID.
-        let url = self
-            .client
-            .stream_url(&track.source_uri, None, None)
-            .map_err(subsonic_err("stream_url"))?;
-        Ok(TrackSource::HttpStream(url.to_string()))
-    }
-
     #[tracing::instrument(skip(self, album), level = "debug")]
     fn get_cover_art(&self, album: &Album) -> Result<Option<Vec<u8>>, ProviderError> {
         // The cover_source should already contain a Url from browse_albums().
@@ -709,6 +700,18 @@ impl MusicProvider for SubsonicProvider {
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
+    fn rename_playlist(&self, id: &str, new_name: &str) -> Result<(), ProviderError> {
+        let id_owned = id.to_string();
+        let name_owned = new_name.to_string();
+        self.block_on(async {
+            self.client
+                .update_playlist(&id_owned, Some(&name_owned), None, None, &[], &[])
+                .await
+                .map_err(subsonic_err("updatePlaylist"))
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
     fn add_to_playlist(
         &self,
         playlist_id: &str,
@@ -757,6 +760,19 @@ impl MusicProvider for SubsonicProvider {
     }
 
     #[tracing::instrument(skip(self), level = "debug")]
+    fn is_favorite(&self, track_id: &str) -> Result<bool, ProviderError> {
+        let id = track_id.to_string();
+        self.block_on(async {
+            let song = self
+                .client
+                .get_song(&id)
+                .await
+                .map_err(subsonic_err("getSong"))?;
+            Ok(song.starred.is_some())
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
     fn set_rating(&self, track_id: &str, rating: u8) -> Result<(), ProviderError> {
         let id = track_id.to_string();
         self.block_on(async {
@@ -764,6 +780,19 @@ impl MusicProvider for SubsonicProvider {
                 .set_rating(&id, rating as i32)
                 .await
                 .map_err(subsonic_err("setRating"))
+        })
+    }
+
+    #[tracing::instrument(skip(self), level = "debug")]
+    fn get_rating(&self, track_id: &str) -> Result<Option<u8>, ProviderError> {
+        let id = track_id.to_string();
+        self.block_on(async {
+            let song = self
+                .client
+                .get_song(&id)
+                .await
+                .map_err(subsonic_err("getSong"))?;
+            Ok(song.user_rating.and_then(|r| if r > 0 { Some(r as u8) } else { None }))
         })
     }
 

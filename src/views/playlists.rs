@@ -227,7 +227,7 @@ pub fn playlist_detail_view<'a>(
 
         let row = widget::button::custom(
             widget::Row::new()
-                .push(common::cell_text(format!("{}", track_idx + 1)).width(40))
+                .push(common::cell_text((track_idx + 1).to_string()).width(40))
                 .push(title_col)
                 .push(artist_col)
                 .push(common::duration_cell(track.duration.as_secs()))

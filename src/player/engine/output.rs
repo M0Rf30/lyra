@@ -337,6 +337,18 @@ impl CpalOutput {
     }
 
     pub fn stop(&mut self) -> Result<()> {
+        // Drain any tail still buffered inside the resampler (a short final
+        // chunk, plus its own filter delay) before the stream closes, so the
+        // last fraction of a resampled track isn't silently dropped.
+        if let Some(rs) = &mut self.resampler {
+            let tail = rs.flush();
+            if !tail.is_empty()
+                && let Some(sender) = &self.sample_sender
+            {
+                // Best-effort: never block shutdown if the callback isn't draining.
+                let _ = sender.try_send(tail);
+            }
+        }
         if let Some(stream) = self.stream.take() {
             drop(stream);
         }

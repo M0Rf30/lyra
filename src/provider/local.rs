@@ -8,7 +8,6 @@
 use super::{MusicProvider, ProviderError, ProviderType};
 use crate::library::{
     Album, Artist, CoverArt, LibraryDb, LibraryScanner, LyricsProvider, Playlist, Track,
-    TrackSource,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -77,10 +76,6 @@ impl MusicProvider for LocalProvider {
         let db = self.lock_db()?;
         db.search_tracks(query, Some("local"))
             .map_err(ProviderError::Database)
-    }
-
-    fn resolve_audio(&self, track: &Track) -> Result<TrackSource, ProviderError> {
-        Ok(TrackSource::LocalFile(PathBuf::from(&track.source_uri)))
     }
 
     fn get_cover_art(&self, album: &Album) -> Result<Option<Vec<u8>>, ProviderError> {

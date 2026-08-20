@@ -52,9 +52,12 @@ pub fn search_stations(
         .header("User-Agent", "lyra/0.1")
         .send()
         .map_err(|e| format!("Radio search failed: {e}"))?;
-    let raw: Vec<StationRaw> = response
-        .json()
-        .map_err(|e| format!("Radio response parse failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Radio search returned HTTP {}", response.status()));
+    }
+    let body = super::read_capped_body(response, MAX_JSON_RESPONSE_BYTES)?;
+    let raw: Vec<StationRaw> =
+        serde_json::from_slice(&body).map_err(|e| format!("Radio response parse failed: {e}"))?;
     Ok(map_station_results(raw))
 }
 
@@ -73,11 +76,20 @@ pub fn popular_stations(
         .header("User-Agent", "lyra/0.1")
         .send()
         .map_err(|e| format!("Radio search failed: {e}"))?;
-    let raw: Vec<StationRaw> = response
-        .json()
-        .map_err(|e| format!("Radio response parse failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Radio search returned HTTP {}", response.status()));
+    }
+    let body = super::read_capped_body(response, MAX_JSON_RESPONSE_BYTES)?;
+    let raw: Vec<StationRaw> =
+        serde_json::from_slice(&body).map_err(|e| format!("Radio response parse failed: {e}"))?;
     Ok(map_station_results(raw))
 }
+
+/// Cap on the radio-browser.info JSON response body. The directory's own
+/// `limit=`/count params bound normal responses to well under this, so
+/// hitting the cap means a hostile or broken server, not a legitimate
+/// large result set.
+const MAX_JSON_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
 fn map_station_results(raw: Vec<StationRaw>) -> Vec<StationSearchResult> {
     raw.into_iter()
@@ -133,10 +145,16 @@ pub fn parse_pls(body: &str) -> Option<String> {
         let line = line.trim();
         let Some(eq_idx) = line.find('=') else { continue };
         let key = &line[..eq_idx];
-        if key.len() <= 4 || !key[..4].eq_ignore_ascii_case("file") {
+        // `key.get(..4)`/`key.get(4..)` (not byte-slicing) so a key
+        // containing multi-byte UTF-8 within its first 4 bytes — from a
+        // malformed/hostile playlist — can never land mid-character and
+        // panic; it just fails to match "file" and the line is skipped.
+        let Some(prefix) = key.get(..4) else { continue };
+        if !prefix.eq_ignore_ascii_case("file") {
             continue;
         }
-        let Ok(n) = key[4..].parse::<u32>() else { continue };
+        let Some(suffix) = key.get(4..) else { continue };
+        let Ok(n) = suffix.parse::<u32>() else { continue };
         let value = line[eq_idx + 1..].trim();
         if value.is_empty() {
             continue;
@@ -183,6 +201,11 @@ const MAX_PLAYLIST_HOPS: u32 = 3;
 /// the chain is still unresolved at the cap, that's a clear error rather
 /// than silently handing back a playlist URL as if it were a direct stream.
 pub fn resolve_stream_url(client: &reqwest::blocking::Client, url: &str) -> Result<String, String> {
+    /// Playlist bodies (.pls/.m3u) are always small hand-written text
+    /// files; a hostile or broken server returning an unbounded body must
+    /// not be read into memory in full.
+    const MAX_PLAYLIST_RESPONSE_BYTES: u64 = 1024 * 1024;
+
     let mut current = url.to_string();
     for _ in 0..MAX_PLAYLIST_HOPS {
         let Some(extension_hint) = sniff_playlist_format(&current, None) else {
@@ -192,6 +215,9 @@ pub fn resolve_stream_url(client: &reqwest::blocking::Client, url: &str) -> Resu
             .get(&current)
             .send()
             .map_err(|e| format!("Failed to fetch playlist: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!("Failed to fetch playlist: HTTP {}", response.status()));
+        }
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -199,9 +225,9 @@ pub fn resolve_stream_url(client: &reqwest::blocking::Client, url: &str) -> Resu
             .map(str::to_string);
         let format =
             sniff_playlist_format(&current, content_type.as_deref()).unwrap_or(extension_hint);
-        let body = response
-            .text()
-            .map_err(|e| format!("Failed to read playlist: {e}"))?;
+        let bytes = super::read_capped_body(response, MAX_PLAYLIST_RESPONSE_BYTES)?;
+        let body = String::from_utf8(bytes)
+            .map_err(|e| format!("Playlist was not valid UTF-8: {e}"))?;
         current = parse_playlist(&body, format)
             .ok_or_else(|| "Playlist contained no stream URL".to_string())?;
     }
@@ -262,6 +288,15 @@ mod tests {
     #[test]
     fn parse_pls_returns_none_without_file_entries() {
         assert_eq!(parse_pls("[playlist]\nNumberOfEntries=0\n"), None);
+    }
+
+    #[test]
+    fn parse_pls_ignores_multibyte_key_without_panicking() {
+        // A hostile/malformed playlist could put multi-byte UTF-8 right
+        // before the first 4 bytes of a key; byte-slicing at index 4 would
+        // land mid-character and panic. This must just skip the line.
+        let body = "fïle1=https://x.example/a.mp3\nFile1=https://x.example/b.mp3\n";
+        assert_eq!(parse_pls(body), Some("https://x.example/b.mp3".to_string()));
     }
 
     #[test]

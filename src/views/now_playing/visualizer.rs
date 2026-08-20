@@ -3,25 +3,16 @@
 //! ProjectM visualizer integration (behind `visualizer` feature flag).
 //!
 //! Provides an offscreen-rendered music visualizer using the projectM library.
-//! Renders to an FBO via a headless EGL context, reads pixels back, and sends
-//! frames as iced `image::Handle` for display in the expanded now-playing view.
-//!
-//! ## Known limitation — texture churn
-//!
-//! Each frame creates a new `image::Handle::from_rgba()` with a unique ID
-//! (iced's API does not support updating pixel data for an existing handle).
-//! This causes iced's raster cache to upload a new GPU texture and evict the
-//! previous one every frame. In practice the upload+trim cycle completes within
-//! a single render pass so visible flickering is unlikely, but the GPU memory
-//! churn is sub-optimal. A stable-ID RGBA handle would require upstream changes
-//! to iced's `image::Handle` / `image::Id` API.
+//! Renders to an FBO via a headless EGL context, reads pixels back, and hands
+//! the raw RGBA bytes to `viz_shader::VizFrameBuffer`, which the shader
+//! widget in `viz_shader.rs` uploads into a single persistent GPU texture
+//! every frame — no per-frame `image::Handle` churn.
 
 use projectm::core::ProjectM;
 use projectm::playlist::Playlist;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 /// Commands sent from the UI thread to the dedicated projectM render
@@ -337,8 +328,8 @@ impl ProjectMRenderer {
     /// Render one frame and return RGBA pixel bytes.
     ///
     /// Feed PCM audio data to projectM, render a frame into the FBO,
-    /// and read pixels back. The returned bytes are ready for direct use
-    /// with `widget::icon::from_raster_pixels()` — no PNG encoding needed.
+    /// and read pixels back. The returned bytes are handed directly to
+    /// `viz_shader::VizFrameBuffer::update` — no PNG encoding needed.
     ///
     /// Reuses one of two pooled buffers for the GL readback instead of
     /// allocating a fresh one every call: a slot is reused in place when
@@ -473,79 +464,6 @@ impl PcmBuffer {
     }
 }
 
-/// Convert raw RGBA pixels to PNG bytes suitable for `icon::from_raster_bytes`.
-pub fn rgba_to_png(pixels: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
-    use image::{ImageBuffer, RgbaImage};
-    use std::io::Cursor;
-
-    let img: RgbaImage = ImageBuffer::from_raw(width, height, pixels.to_vec())?;
-    let mut output = Vec::new();
-    let mut cursor = Cursor::new(&mut output);
-    img.write_to(&mut cursor, image::ImageFormat::Png).ok()?;
-    Some(output)
-}
-
-/// State holder for the visualizer render thread.
-///
-/// This is used by the subscription in `app.rs` to manage the render loop.
-pub struct VisualizerState {
-    /// The renderer (created on the render thread).
-    pub renderer: Option<ProjectMRenderer>,
-    /// Shared PCM buffer.
-    pub pcm_buffer: Arc<Mutex<PcmBuffer>>,
-    /// Whether the visualizer is actively rendering.
-    pub active: Arc<AtomicBool>,
-}
-
-impl VisualizerState {
-    /// Create a new visualizer state with a shared PCM buffer.
-    pub fn new(pcm_buffer: Arc<Mutex<PcmBuffer>>) -> Self {
-        Self {
-            renderer: None,
-            pcm_buffer,
-            active: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    /// Initialize the renderer on the current thread.
-    pub fn init(&mut self, preset_dir: Option<PathBuf>) -> Result<(), String> {
-        let renderer = ProjectMRenderer::new(preset_dir)?;
-        self.renderer = Some(renderer);
-        self.active.store(true, Ordering::Release);
-        Ok(())
-    }
-
-    /// Render one frame, reading PCM from the shared buffer.
-    pub fn render_one_frame(&mut self) -> Option<Vec<u8>> {
-        let renderer = self.renderer.as_mut()?;
-        let pcm = self
-            .pcm_buffer
-            .lock()
-            .ok()
-            .map(|buf| buf.read_recent(2048))
-            .unwrap_or_default();
-        let rgba = renderer.render_frame(&pcm);
-        rgba_to_png(&rgba, RENDER_WIDTH as u32, RENDER_HEIGHT as u32)
-    }
-
-    /// Request the next preset.
-    pub fn next_preset(&mut self) {
-        if let Some(renderer) = &mut self.renderer {
-            renderer.next_preset();
-        }
-    }
-
-    /// Stop rendering.
-    pub fn stop(&mut self) {
-        self.active.store(false, Ordering::Release);
-    }
-
-    /// Check if actively rendering.
-    pub fn is_active(&self) -> bool {
-        self.active.load(Ordering::Acquire)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,7 +535,7 @@ mod tests {
         fs::write(stock_dir.join("Basic.milk"), b"").unwrap();
         fs::write(root.join("readme.txt"), b"").unwrap();
 
-        let entries = scan_presets(&[root.clone()]);
+        let entries = scan_presets(std::slice::from_ref(&root));
 
         assert_eq!(
             entries

@@ -52,7 +52,9 @@ fn flac_bit_depth(source_bits: Option<u32>) -> u32 {
 }
 
 /// Scales a `[-1.0, 1.0]` sample to a signed `bits`-wide integer, clamping
-/// out-of-range input rather than wrapping.
+/// out-of-range input rather than wrapping. No dither is added: plain
+/// round-to-nearest quantization noise is inaudible at the 16-24 bit
+/// depths this converter targets, so the added complexity isn't worth it.
 fn f32_to_int(sample: f32, bits: u32) -> i32 {
     let scale = (1i64 << (bits - 1)) as f64;
     let max = scale - 1.0;
