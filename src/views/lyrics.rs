@@ -4,6 +4,7 @@
 //!
 //! Tasks 104-105: Synced lyrics rendering with highlighted current line.
 
+use crate::fl;
 use crate::library::palette::Accent;
 use crate::library::{LyricLine, Lyrics};
 use cosmic::iced::alignment::{Horizontal, Vertical};
@@ -61,7 +62,7 @@ pub fn lyrics_view<'a>(
         .spacing(4);
 
     let content: cosmic::Element<'_, LyricsMessage> = if is_loading {
-        widget::container(widget::text("Loading lyrics..."))
+        widget::container(widget::text(fl!("lyrics-loading")))
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center)
             .into()
@@ -87,9 +88,10 @@ pub fn lyrics_view<'a>(
     } else {
         widget::container(
             widget::Column::new()
-                .push(widget::text("No lyrics available"))
+                .push(widget::text(fl!("lyrics-unavailable")))
                 .push(
-                    widget::button::suggested("Search Online").on_press(LyricsMessage::FetchLyrics),
+                    widget::button::suggested(fl!("lyrics-search-online"))
+                        .on_press(LyricsMessage::FetchLyrics),
                 )
                 .spacing(8)
                 .align_x(Alignment::Center),
@@ -163,7 +165,7 @@ pub fn lyrics_overlay_view<'a, M: 'static>(
 
     let content: cosmic::Element<'_, M> = if is_loading {
         widget::container(
-            widget::text("Loading lyrics…").class(cosmic::theme::Text::Color(subtext_color)),
+            widget::text(fl!("lyrics-loading")).class(cosmic::theme::Text::Color(subtext_color)),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -204,7 +206,7 @@ pub fn lyrics_overlay_view<'a, M: 'static>(
         }
     } else {
         widget::container(
-            widget::text("No lyrics available").class(cosmic::theme::Text::Color(subtext_color)),
+            widget::text(fl!("lyrics-unavailable")).class(cosmic::theme::Text::Color(subtext_color)),
         )
         .width(Length::Fill)
         .height(Length::Fill)

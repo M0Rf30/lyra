@@ -84,10 +84,38 @@ favorite-remove = Remove from favorites
 no-track-playing = No track playing
 show-now-playing = Show now playing
 
+# EqualizerView
+equalizer-enabled = Equalizer Enabled
+equalizer-section-preset = Preset
+equalizer-save-preset-as = Save As
+equalizer-preset-name-placeholder = Preset name...
+equalizer-delete-preset = Delete
+equalizer-reset-preset = Reset
+equalizer-section-autoeq = AutoEQ
+equalizer-autoeq-search-placeholder = Search headphones...
+equalizer-autoeq-no-matches = No matches
+equalizer-autoeq-too-many-matches = 50+ matches — refine your search
+equalizer-autoeq-match-count = { $count } matches
+equalizer-autoeq-profile-count = { $count } profiles
+equalizer-autoeq-search-hint = Type 2+ chars to search
+equalizer-autoeq-profiles-loaded = { $count } profiles loaded
+equalizer-autoeq-loading = Loading...
+equalizer-autoeq-load-profiles = Load AutoEQ Profiles
+equalizer-section-preamp = Preamp
+equalizer-preamp-label = Preamp:
+equalizer-preamp-value = { $db } dB
+equalizer-section-bands = Bands
+
+# LyricsView
+lyrics-loading = Loading lyrics...
+lyrics-unavailable = No lyrics available
+lyrics-search-online = Search Online
+
 # AlbumsView
 albums-empty-hint = Add music directories in Settings to get started
 play-album = Play Album
 album-tooltip = { $title } — { $artist }
+back-to-albums = Back to albums
 
 # ExpandedView
 expanded-collapse = Back to library
@@ -95,6 +123,7 @@ expanded-empty-hint = Choose a song from your library to start listening
 
 # SmallViews
 artists-empty-hint = Artists will appear here once your library is scanned
+back-to-artists = Back to artists
 artist-album-count-one = { $count } album
 artist-album-count-other = { $count } albums
 artist-track-count-one = { $count } track
@@ -125,6 +154,10 @@ songs-column-artist = Artist
 songs-column-album = Album
 songs-column-duration = Duration
 songs-add-to-playlist = Add to "{ $playlist }"
+songs-favorites-filter = Favorites
+songs-empty-hint = Scan your library from File > Rescan
+songs-no-matches = No matching tracks
+songs-no-matches-hint = Try clearing the favorites or genre filter
 
 # PodcastsView
 podcasts = Podcasts

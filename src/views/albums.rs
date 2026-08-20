@@ -308,11 +308,11 @@ pub fn album_detail_view<'a>(
         meta_col = meta_col.push(genre_row);
     }
     let header = widget::Row::new()
-        .push(common::icon_button(
-            "go-previous-symbolic",
-            16,
-            "Back to albums",
-            AlbumMessage::BackToGrid,
+        .push(widget::tooltip(
+            widget::button::icon(widget::icon::from_name("go-previous-symbolic").size(16))
+                .on_press(AlbumMessage::BackToGrid),
+            widget::text::caption(fl!("back-to-albums")),
+            widget::tooltip::Position::Top,
         ))
         .push(
             widget::container(art_widget)

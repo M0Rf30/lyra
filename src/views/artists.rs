@@ -159,10 +159,12 @@ pub fn artist_detail_view<'a>(
         .spacing(4);
 
     let header = widget::Row::new()
-        .push(
+        .push(widget::tooltip(
             widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
                 .on_press(ArtistMessage::BackToList),
-        )
+            widget::text::caption(fl!("back-to-artists")),
+            widget::tooltip::Position::Top,
+        ))
         .push(avatar)
         .push(common::clipped_cell(header_info.into()))
         .spacing(16)
