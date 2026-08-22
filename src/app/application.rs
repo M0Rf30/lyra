@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0
 
-use super::{AppModel, Message};
+use super::{AppFlags, AppModel, Message};
 use cosmic::app::context_drawer;
 use cosmic::iced::Subscription;
 use cosmic::prelude::*;
@@ -8,7 +8,7 @@ use cosmic::widget::nav_bar;
 
 impl cosmic::Application for AppModel {
     type Executor = cosmic::executor::Default;
-    type Flags = ();
+    type Flags = AppFlags;
     type Message = Message;
     const APP_ID: &'static str = "io.github.m0rf30.Lyra";
 
@@ -20,11 +20,8 @@ impl cosmic::Application for AppModel {
         &mut self.core
     }
 
-    fn init(
-        core: cosmic::Core,
-        _flags: Self::Flags,
-    ) -> (Self, Task<cosmic::Action<Self::Message>>) {
-        Self::init_model(core)
+    fn init(core: cosmic::Core, flags: Self::Flags) -> (Self, Task<cosmic::Action<Self::Message>>) {
+        Self::init_model(core, flags)
     }
 
     fn header_start(&self) -> Vec<Element<'_, Self::Message>> {

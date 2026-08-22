@@ -4235,6 +4235,7 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "walkdir",
+ "zbus",
  "zbus-secret-service-keyring-store",
 ]
 

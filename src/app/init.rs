@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0
 
-use super::{APP_ICON, AppModel, ContextPage, Message, Page, REPOSITORY, key_binds};
+use super::{APP_ICON, AppFlags, AppModel, ContextPage, Message, Page, REPOSITORY, key_binds};
 use crate::config::Config;
 use crate::fl;
 use crate::library::LibraryDb;
@@ -22,7 +22,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 impl AppModel {
-    pub(super) fn init_model(core: cosmic::Core) -> (Self, Task<cosmic::Action<Message>>) {
+    pub(super) fn init_model(
+        core: cosmic::Core,
+        flags: AppFlags,
+    ) -> (Self, Task<cosmic::Action<Message>>) {
         let mut nav = nav_bar::Model::default();
 
         nav.insert()
@@ -273,7 +276,15 @@ impl AppModel {
         // Initialize player
         #[allow(unused_mut)]
         let mut player = match Player::new(None) {
-            Ok(p) => Some(p),
+            Ok(mut p) => {
+                // Apply the persisted master volume; `Player::new` hardcodes
+                // 0.8 internally, so without this every launch would ignore
+                // the saved level.
+                if let Err(e) = p.set_volume(config.volume) {
+                    tracing::warn!("Failed to apply saved volume: {e}");
+                }
+                Some(p)
+            }
             Err(e) => {
                 tracing::error!("Failed to initialize audio player: {e}");
                 None
@@ -494,6 +505,12 @@ impl AppModel {
                 provider = name,
                 reason = reason
             ))));
+        }
+        if !flags.open_paths.is_empty() {
+            // Files passed on the command line or handed off via
+            // `Exec=lyra %U` -- queue them for ad-hoc playback once tags
+            // are read, bypassing the library scan/DB entirely.
+            init_tasks.push(app.open_files(flags.open_paths));
         }
 
         (app, Task::batch(init_tasks))

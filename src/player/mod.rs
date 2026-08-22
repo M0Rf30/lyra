@@ -398,6 +398,21 @@ impl Player {
         self.mpd_backend.as_mut()
     }
 
+    /// Adopt a track MPD is already playing without Lyra having started it
+    /// itself — e.g. right after switching to an MPD backend whose server
+    /// was already mid-playback. Makes the MPD backend the active one and
+    /// marks it as having been playing, so `is_finished()` doesn't
+    /// immediately report the freshly-adopted track as ended. No-op if
+    /// there is no MPD backend.
+    pub fn adopt_mpd_track(&mut self, track: Track, duration: Duration) {
+        let Some(mpd) = self.mpd_backend.as_mut() else {
+            return;
+        };
+        mpd.mark_playing();
+        self.active_backend = ActiveBackend::Mpd;
+        self.current_track = Some(NowPlaying { track, duration });
+    }
+
     /// Get a reference to the local backend's EQ controller.
     pub fn eq_controller(&self) -> &EqController {
         self.local_backend.eq_controller()

@@ -479,6 +479,7 @@ fn utility_row<'a>(
         .push(
             widget::slider(0.0..=1.0, volume, NowPlayingMessage::SetVolume)
                 .step(0.01_f32)
+                .on_release(NowPlayingMessage::VolumeCommit)
                 .width(Length::Fixed(160.0)),
         )
         .push(transport_button(

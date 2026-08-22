@@ -193,7 +193,7 @@ impl LibraryScanner {
     }
 
     /// Read metadata from an audio file using lofty.
-    fn read_metadata(path: &Path) -> Result<Track, String> {
+    pub fn read_metadata(path: &Path) -> Result<Track, String> {
         let tagged_file = Probe::open(path)
             .map_err(|e| format!("Cannot open: {e}"))?
             .read()

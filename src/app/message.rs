@@ -95,6 +95,11 @@ pub enum Message {
     /// Performs the actual backend seek when the slider is released.
     SeekCommit,
     SetVolume(f32),
+    /// Persist the current master volume to config. Emitted on slider
+    /// release and on discrete volume changes (keyboard shortcuts, MPRIS
+    /// `SetVolume`) so the level survives a restart without writing the
+    /// config on every drag frame.
+    VolumeCommit,
     ToggleShuffle,
     CycleRepeat,
     PlaybackTick,
@@ -246,12 +251,16 @@ pub enum Message {
     MpdConnected(String),
     MpdConnectionFailed(String, String),
     MpdIdleEvent(String),
-    /// Polled status from the active MPD backend (position, duration, state, volume).
+    /// Polled status from the active MPD backend (position, duration,
+    /// state, volume). `song` is `Some` only on the tick where MPD's
+    /// current song identity changed (including the first tick after the
+    /// subscription starts) — most ticks carry `None`.
     MpdStatusUpdate {
         position: Duration,
         duration: Duration,
         state: PlaybackState,
         volume: f32,
+        song: Option<Track>,
     },
     /// An async MPD command failed — log and let the next poll self-correct.
     MpdCommandError(String),
@@ -412,6 +421,14 @@ pub enum Message {
     /// An MPRIS2 D-Bus event: either the server handle becoming available,
     /// or a command relayed from a media-key/shell-applet D-Bus call.
     Mpris(crate::mpris::MprisEvent),
+    /// Open ad-hoc audio files outside the library (double-clicked in a
+    /// file manager via `Exec=lyra %U`, passed on the command line, or
+    /// forwarded from another running instance's MPRIS `OpenUri`).
+    OpenFiles(Vec<PathBuf>),
+    /// The background tag-read kicked off by `OpenFiles` has finished;
+    /// queues the resulting tracks for playback. Empty when none of the
+    /// paths were readable audio files.
+    OpenFilesScanned(Vec<Track>),
     /// Result of a background cover-art resolve kicked off by
     /// `publish_mpris` for a track not yet in the MPRIS art cache.
     MprisArtResolved(i64, Option<String>),

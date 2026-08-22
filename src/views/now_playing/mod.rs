@@ -30,6 +30,8 @@ pub enum NowPlayingMessage {
     /// Emitted on mouse release — performs the actual backend seek.
     SeekCommit,
     SetVolume(f32),
+    /// Emitted on mouse release / discrete step — persists the level.
+    VolumeCommit,
     ToggleShuffle,
     CycleRepeat,
     ShowLyrics,

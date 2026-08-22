@@ -94,6 +94,15 @@ zbus-secret-service-keyring-store = { version = "1", features = ["rt-tokio-crypt
 # store, so this adds no new transitive D-Bus stack.
 mpris-server = { version = "0.10", features = ["tokio"] }
 
+# Direct zbus dependency for main.rs's cold-start handoff to an
+# already-running instance (name-owner check + `OpenUri`/`Raise` over
+# D-Bus, before the app's own event loop -- and mpris-server's own
+# zbus/tokio integration -- starts). Pinned to the same major version
+# already resolved transitively (5.19.0, via ashpd/mpris-server/the
+# secret-service keyring store), with only the `tokio` feature so it
+# doesn't pull in a second (async-io) executor.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
 # Misc
 open = "5"
 dirs = "6"

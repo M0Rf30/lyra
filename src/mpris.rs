@@ -41,7 +41,7 @@ use parking_lot::Mutex;
 
 /// A command originating from an MPRIS client (media keys, shell applet,
 /// `playerctl`, …), forwarded to `app.rs` for handling.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MprisCommand {
     Play,
     Pause,
@@ -58,6 +58,10 @@ pub enum MprisCommand {
     Loop(LoopMode),
     Raise,
     Quit,
+    /// `OpenUri` request from an MPRIS client. Only `file://` URIs are
+    /// actually playable; see `Message::OpenFiles`/`file_uri_to_path` in
+    /// `app.rs`/`lib.rs`.
+    OpenUri(String),
 }
 
 /// Repeat/loop mode, mirroring `mpris_server::LoopStatus` without leaking
@@ -457,21 +461,34 @@ impl RootInterface for DbusPlayer {
     }
 
     async fn supported_uri_schemes(&self) -> fdo::Result<Vec<String>> {
-        Ok(vec![
-            "file".to_owned(),
-            "http".to_owned(),
-            "https".to_owned(),
-        ])
+        // Only `file://` is wired up end-to-end (`OpenUri` ->
+        // `Message::OpenFiles` -> ad-hoc tag read off disk); advertising
+        // http(s) here would be a lie, since Lyra has no ad-hoc
+        // network-stream playback path outside its library/queue model.
+        Ok(vec!["file".to_owned()])
     }
 
     async fn supported_mime_types(&self) -> fdo::Result<Vec<String>> {
+        // Mirrors resources/io.github.m0rf30.Lyra.desktop's `MimeType=`
+        // list, itself verified against
+        // `player::engine::decoder::SUPPORTED_EXTENSIONS`.
         Ok(vec![
             "audio/mpeg".to_owned(),
             "audio/flac".to_owned(),
             "audio/ogg".to_owned(),
+            "audio/x-vorbis+ogg".to_owned(),
+            "audio/x-opus+ogg".to_owned(),
             "audio/x-wav".to_owned(),
+            "audio/x-aiff".to_owned(),
             "audio/mp4".to_owned(),
             "audio/aac".to_owned(),
+            "audio/x-ape".to_owned(),
+            "audio/x-wavpack".to_owned(),
+            "audio/x-musepack".to_owned(),
+            "audio/x-dsf".to_owned(),
+            "audio/x-dff".to_owned(),
+            "audio/webm".to_owned(),
+            "audio/x-matroska".to_owned(),
         ])
     }
 }
@@ -522,13 +539,9 @@ impl PlayerInterface for DbusPlayer {
         Ok(())
     }
 
-    async fn open_uri(&self, _uri: String) -> fdo::Result<()> {
-        // Lyra has no ad-hoc "open this URI" playback path outside its
-        // library/queue model, so this is honestly unsupported rather than
-        // silently swallowed.
-        Err(fdo::Error::NotSupported(
-            "OpenUri is not supported".to_owned(),
-        ))
+    async fn open_uri(&self, uri: String) -> fdo::Result<()> {
+        self.forward(MprisCommand::OpenUri(uri)).await;
+        Ok(())
     }
 
     async fn playback_status(&self) -> fdo::Result<PlaybackStatus> {

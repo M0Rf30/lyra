@@ -146,6 +146,7 @@ playlist-track-count-other = { $count } tracks
 # AppShell
 search-library = Search library
 toast-provider-connect-failed = Failed to connect to { $provider }: { $reason }
+toast-open-files-failed = No playable audio files found
 
 # SongsTable
 songs-column-number = #

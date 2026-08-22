@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::convert::JobState;
 use crate::player::{ActiveBackend, PlaybackState};
 use crate::provider::MusicProvider;
-use crate::provider::mpd::MpdProvider;
+use crate::provider::mpd::{MpdProvider, song_to_track};
 use cosmic::Application;
 use cosmic::iced::Subscription;
 use futures_util::{SinkExt, Stream};
@@ -29,35 +29,47 @@ impl AppModel {
         // `mpris_stream` function, so it starts once and never restarts.
         subs.push(Subscription::run(crate::mpris::mpris_stream).map(Message::Mpris));
 
-        // Playback position ticker (every 500ms when playing)
+        // Playback position ticker.
         let is_playing = self
             .player
             .as_ref()
             .is_some_and(|p| p.state() == PlaybackState::Playing);
 
-        let is_mpd_active = self
-            .player
-            .as_ref()
-            .is_some_and(|p| p.active_backend_type() == ActiveBackend::Mpd);
+        // Gate the MPD status subscription on the *presence* of an MPD
+        // backend, not on `is_playing` or `active_backend_type()`: right
+        // after switching to an MPD provider, the freshly-created `Player`
+        // always reports `Stopped` (no status has been polled yet) and
+        // `active_backend_type()` only flips to `Mpd` once Lyra itself has
+        // issued a `play` through it — gating on either would mean Lyra
+        // never polls a server that was already playing before the switch.
+        if let Some(player) = &self.player
+            && let Some(mpd) = player.mpd_backend_ref()
+            && let Some(provider) = self.active_mpd_provider()
+        {
+            // MPD: poll status from the server — position/duration/state/
+            // volume/current-song all come from the real MPD status.
+            // `mpd_status_stream` adapts its own interval and only fetches
+            // the current song on change.
+            let client = mpd.client();
+            let provider_id = provider.provider_id_arc();
+            subs.push(Subscription::run_with(
+                MpdPollKey(client, provider_id),
+                mpd_status_stream,
+            ));
+        }
 
-        if is_playing {
-            if is_mpd_active {
-                // MPD: poll status from the server every 300ms.
-                // This replaces the generic tick for MPD playback — we get
-                // position/duration/state/volume from the real MPD status.
-                if let Some(ref player) = self.player
-                    && let Some(mpd) = player.mpd_backend_ref()
-                {
-                    let client = mpd.client();
-                    subs.push(Subscription::run_with(
-                        MpdPollKey(client),
-                        mpd_status_stream,
-                    ));
-                }
-            } else {
-                // Local/Subsonic: simple tick for UI updates.
-                subs.push(Subscription::run(playback_tick_stream));
-            }
+        // Local/Subsonic tick, independent of the MPD poll above: an MPD
+        // backend can exist (MPD provider active) while playback actually
+        // runs through the local backend — a radio stream or podcast
+        // resolves to `LiveStream`/`HttpStream` regardless of the active
+        // provider — and that playback still needs its position ticked.
+        if is_playing
+            && self
+                .player
+                .as_ref()
+                .is_some_and(|p| p.active_backend_type() != ActiveBackend::Mpd)
+        {
+            subs.push(Subscription::run(playback_tick_stream));
         }
 
         // MPD idle event subscriptions — one per configured MPD provider.
@@ -186,28 +198,39 @@ impl AppModel {
 }
 
 /// Identity key for the MPD status-poll subscription. Hashing only the
-/// fixed string (not the client) preserves the old fixed-string-id
-/// behavior: a single persistent subscription while active.
-struct MpdPollKey(mpd_client::Client);
+/// fixed string (not the client/provider id) preserves the old
+/// fixed-string-id behavior: a single persistent subscription while an MPD
+/// backend exists, never restarted just because the client handle value
+/// changes.
+struct MpdPollKey(mpd_client::Client, Arc<str>);
 
 impl Hash for MpdPollKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        // Include the provider id so switching to a *different* MPD server
+        // restarts the poll against the new client; excluding the client
+        // handle itself keeps a reconnect to the same server from
+        // needlessly tearing the subscription down.
         "mpd-status-poll".hash(state);
+        self.1.hash(state);
     }
 }
 
-/// MPD: poll status from the server every 300ms.
-///
-/// This replaces the generic tick for MPD playback — we get
-/// position/duration/state/volume from the real MPD status.
+/// MPD: poll status from the server, adapting the interval to playback
+/// state — 300ms while playing (keeps the position bar smooth), ~1s
+/// otherwise (an idle connection doesn't need sub-second polling) — and
+/// fetching the current song only when its identity changes, so steady
+/// state stays at exactly one `Status` command per tick.
 fn mpd_status_stream(key: &MpdPollKey) -> impl Stream<Item = Message> + use<> {
     let client = key.0.clone();
+    let provider_id = Arc::clone(&key.1);
     cosmic::iced::stream::channel(
         1,
         |mut emitter: cosmic::iced::futures::channel::mpsc::Sender<Message>| async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(300));
+            const PLAYING_INTERVAL: Duration = Duration::from_millis(300);
+            const IDLE_INTERVAL: Duration = Duration::from_secs(1);
+
+            let mut last_song_id: Option<mpd_client::commands::SongId> = None;
             loop {
-                interval.tick().await;
                 match client.command(mpd_client::commands::Status).await {
                     Ok(status) => {
                         let state = match status.state {
@@ -215,17 +238,55 @@ fn mpd_status_stream(key: &MpdPollKey) -> impl Stream<Item = Message> + use<> {
                             mpd_client::responses::PlayState::Paused => PlaybackState::Paused,
                             mpd_client::responses::PlayState::Stopped => PlaybackState::Stopped,
                         };
+
+                        // Fetch the current song only when its identity
+                        // changed (including the first tick) — an unchanged
+                        // song never needs a second command. While MPD is
+                        // stopped there is nothing to adopt, so forget the
+                        // last id: the next transition into Playing/Paused
+                        // then re-fetches instead of seeing an unchanged id
+                        // and staying silent forever.
+                        let current_id = status.current_song.map(|(_, id)| id);
+                        let song = if state == PlaybackState::Stopped {
+                            last_song_id = None;
+                            None
+                        } else if current_id == last_song_id {
+                            None
+                        } else {
+                            last_song_id = current_id;
+                            match client.command(mpd_client::commands::CurrentSong).await {
+                                Ok(Some(song_in_queue)) => {
+                                    Some(song_to_track(&provider_id, &song_in_queue.song))
+                                }
+                                Ok(None) => None,
+                                Err(e) => {
+                                    tracing::warn!("MPD current-song fetch failed: {e}");
+                                    None
+                                }
+                            }
+                        };
+
+                        let next_delay = if state == PlaybackState::Playing {
+                            PLAYING_INTERVAL
+                        } else {
+                            IDLE_INTERVAL
+                        };
+
                         _ = emitter
                             .send(Message::MpdStatusUpdate {
                                 position: status.elapsed.unwrap_or(Duration::ZERO),
                                 duration: status.duration.unwrap_or(Duration::ZERO),
                                 state,
                                 volume: status.volume as f32 / 100.0,
+                                song,
                             })
                             .await;
+
+                        tokio::time::sleep(next_delay).await;
                     }
                     Err(e) => {
                         tracing::warn!("MPD status poll failed: {e}");
+                        tokio::time::sleep(IDLE_INTERVAL).await;
                     }
                 }
             }

@@ -677,6 +677,7 @@ impl AppModel {
             now_playing::NowPlayingMessage::SeekPreview(v) => Message::SeekPreview(v),
             now_playing::NowPlayingMessage::SeekCommit => Message::SeekCommit,
             now_playing::NowPlayingMessage::SetVolume(v) => Message::SetVolume(v),
+            now_playing::NowPlayingMessage::VolumeCommit => Message::VolumeCommit,
             now_playing::NowPlayingMessage::ToggleShuffle => Message::ToggleShuffle,
             now_playing::NowPlayingMessage::CycleRepeat => Message::CycleRepeat,
             now_playing::NowPlayingMessage::ShowLyrics => Message::ShowLyrics,

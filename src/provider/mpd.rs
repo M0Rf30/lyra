@@ -230,6 +230,13 @@ impl MpdProvider {
         self.runtime.clone()
     }
 
+    /// Shared provider id `Arc`, for building `Track`s outside `MpdProvider`
+    /// methods — used by the MPD status-poll subscription to convert a
+    /// `CurrentSong` response without holding a full `MpdProvider` handle.
+    pub(crate) fn provider_id_arc(&self) -> Arc<str> {
+        Arc::clone(&self.provider_id)
+    }
+
     /// Run an async block on the tokio runtime (bridging sync MusicProvider to async mpd_client).
     fn block_on<F, T>(&self, future: F) -> T
     where
@@ -285,7 +292,7 @@ impl MpdProvider {
             // artist first, same disambiguation `browse_artists()` uses.
             let mut by_artist: HashMap<String, Vec<Track>> = HashMap::new();
             for song in &songs {
-                let track = self.song_to_track(song);
+                let track = song_to_track(&self.provider_id, song);
                 by_artist
                     .entry(track.album_artist.clone())
                     .or_default()
@@ -319,60 +326,6 @@ impl MpdProvider {
             .command(CurrentSong)
             .await
             .map_err(mpd_err("currentsong"))
-    }
-
-    /// Convert an `mpd_client` Song to our Track model.
-    fn song_to_track(&self, song: &responses::Song) -> Track {
-        let title = song.title().unwrap_or("Unknown Title").to_string();
-        let artist = song
-            .artists()
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "Unknown Artist".to_string());
-        let album_artist = song
-            .album_artists()
-            .first()
-            .cloned()
-            .unwrap_or_else(|| artist.clone());
-        let album = song.album().unwrap_or("Unknown Album").to_string();
-        let genre = song
-            .tags
-            .get(&Tag::Genre)
-            .and_then(|v| v.first())
-            .cloned()
-            .unwrap_or_default();
-        let (disc_num, track_num) = song.number();
-        let year = song
-            .tags
-            .get(&Tag::Date)
-            .and_then(|v| v.first())
-            .and_then(|s| s.get(..4))
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-        let duration = song.duration.unwrap_or(Duration::ZERO);
-        let uri = song.url.clone();
-
-        Track {
-            id: 0,
-            path: PathBuf::from(&uri),
-            title,
-            artist,
-            album_artist,
-            album,
-            genre,
-            track_number: track_num as u32,
-            disc_number: disc_num as u32,
-            year,
-            duration,
-            bitrate: 0,
-            sample_rate: 0,
-            provider_id: Arc::clone(&self.provider_id),
-            source_uri: uri,
-            is_favorite: false,
-            rating: None,
-            rg_track_gain: None,
-            rg_album_gain: None,
-        }
     }
 
     // --- MPD state control methods (Tasks 56-59) ---
@@ -455,6 +408,65 @@ impl MpdProvider {
     }
 }
 
+/// Convert an `mpd_client` `Song` to our `Track` model.
+///
+/// A free function (not an `MpdProvider` method) so the MPD status-poll
+/// subscription (`app::subscriptions::mpd_status_stream`) can build a
+/// `Track` from a `CurrentSong` response using only the active provider's
+/// id, without needing a full `MpdProvider` handle.
+pub(crate) fn song_to_track(provider_id: &Arc<str>, song: &responses::Song) -> Track {
+    let title = song.title().unwrap_or("Unknown Title").to_string();
+    let artist = song
+        .artists()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "Unknown Artist".to_string());
+    let album_artist = song
+        .album_artists()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| artist.clone());
+    let album = song.album().unwrap_or("Unknown Album").to_string();
+    let genre = song
+        .tags
+        .get(&Tag::Genre)
+        .and_then(|v| v.first())
+        .cloned()
+        .unwrap_or_default();
+    let (disc_num, track_num) = song.number();
+    let year = song
+        .tags
+        .get(&Tag::Date)
+        .and_then(|v| v.first())
+        .and_then(|s| s.get(..4))
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    let duration = song.duration.unwrap_or(Duration::ZERO);
+    let uri = song.url.clone();
+
+    Track {
+        id: 0,
+        path: PathBuf::from(&uri),
+        title,
+        artist,
+        album_artist,
+        album,
+        genre,
+        track_number: track_num as u32,
+        disc_number: disc_num as u32,
+        year,
+        duration,
+        bitrate: 0,
+        sample_rate: 0,
+        provider_id: Arc::clone(provider_id),
+        source_uri: uri,
+        is_favorite: false,
+        rating: None,
+        rg_track_gain: None,
+        rg_album_gain: None,
+    }
+}
+
 impl MusicProvider for MpdProvider {
     fn id(&self) -> &str {
         &self.config.id
@@ -518,8 +530,10 @@ impl MusicProvider for MpdProvider {
                         .await
                         .map_err(mpd_err("find"))?;
 
-                    let mut tracks: Vec<Track> =
-                        songs.iter().map(|s| self.song_to_track(s)).collect();
+                    let mut tracks: Vec<Track> = songs
+                        .iter()
+                        .map(|s| song_to_track(&self.provider_id, s))
+                        .collect();
                     Track::sort_by_disc_and_track(&mut tracks);
 
                     let cover_source = tracks
@@ -555,7 +569,10 @@ impl MusicProvider for MpdProvider {
                 .await
                 .map_err(mpd_err("listallinfo"))?;
 
-            let mut tracks: Vec<Track> = songs.iter().map(|s| self.song_to_track(s)).collect();
+            let mut tracks: Vec<Track> = songs
+                .iter()
+                .map(|s| song_to_track(&self.provider_id, s))
+                .collect();
             tracks.sort_by(|a, b| a.title.cmp(&b.title));
             Ok(tracks)
         })
@@ -575,7 +592,10 @@ impl MusicProvider for MpdProvider {
                 .await
                 .map_err(mpd_err("search"))?;
 
-            let tracks: Vec<Track> = songs.iter().map(|s| self.song_to_track(s)).collect();
+            let tracks: Vec<Track> = songs
+                .iter()
+                .map(|s| song_to_track(&self.provider_id, s))
+                .collect();
             Ok(tracks)
         })
     }
@@ -652,7 +672,10 @@ impl MusicProvider for MpdProvider {
                 .await
                 .map_err(mpd_err("listplaylistinfo"))?;
 
-            let tracks: Vec<Track> = songs.iter().map(|s| self.song_to_track(s)).collect();
+            let tracks: Vec<Track> = songs
+                .iter()
+                .map(|s| song_to_track(&self.provider_id, s))
+                .collect();
             let total_duration = tracks.iter().map(|t| t.duration).sum();
             let track_count = tracks.len() as u32;
 
@@ -834,7 +857,7 @@ impl MusicProvider for MpdProvider {
                 let filter = Filter::new(Tag::Other("file".into()), Operator::Equal, uri.as_str());
                 if let Ok(songs) = client.command(Find::new(filter)).await {
                     for song in &songs {
-                        let mut track = self.song_to_track(song);
+                        let mut track = song_to_track(&self.provider_id, song);
                         track.is_favorite = true;
                         tracks.push(track);
                     }
@@ -870,7 +893,10 @@ impl MusicProvider for MpdProvider {
                 .await
                 .map_err(mpd_err("find genre"))?;
 
-            let tracks: Vec<Track> = songs.iter().map(|s| self.song_to_track(s)).collect();
+            let tracks: Vec<Track> = songs
+                .iter()
+                .map(|s| song_to_track(&self.provider_id, s))
+                .collect();
             Ok(tracks)
         })
     }

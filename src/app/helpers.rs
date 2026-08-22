@@ -3,7 +3,7 @@
 use super::tasks::resolve_mpris_art_task;
 use super::{AppModel, HTTP_CLIENT, Message, open_online_store, reload_result_is_stale};
 use crate::fl;
-use crate::library::{Album, Artist, LibraryDb, Track};
+use crate::library::{Album, Artist, LibraryDb, LibraryScanner, Track};
 use crate::player::mpd_backend::MpdBackend;
 use crate::player::{ActiveBackend, PlaybackState, Player};
 use crate::provider::MusicProvider;
@@ -635,6 +635,13 @@ impl AppModel {
                     eq.set_all(&gains);
                 }
 
+                // Apply the saved master volume; a fresh `Player` hardcodes
+                // 0.8, so without this a provider switch would reset the
+                // level instead of preserving it.
+                if let Err(e) = p.set_volume(self.config.volume) {
+                    tracing::warn!("Failed to apply saved volume: {e}");
+                }
+
                 self.player = Some(p);
             }
             Err(e) => {
@@ -1158,6 +1165,33 @@ impl AppModel {
             // No-op message — this write is fire-and-forget, matching
             // `dispatch_mpd`'s convention for tasks nothing depends on.
             cosmic::Action::App(Message::PlaybackTick)
+        })
+    }
+
+    /// Reads tags for a set of ad-hoc files -- double-clicked in a file
+    /// manager via `Exec=lyra %U`, passed on the command line, or
+    /// forwarded from another running instance's MPRIS `OpenUri` -- and
+    /// queues the readable ones for playback. Deliberately bypasses the
+    /// library database: these files need not live in any configured
+    /// library directory, matching how every other desktop media player
+    /// treats "open with".
+    pub(super) fn open_files(&mut self, paths: Vec<PathBuf>) -> Task<cosmic::Action<Message>> {
+        cosmic::task::future(async move {
+            let tracks = tokio::task::spawn_blocking(move || {
+                paths
+                    .into_iter()
+                    .filter_map(|path| match LibraryScanner::read_metadata(&path) {
+                        Ok(track) => Some(track),
+                        Err(e) => {
+                            tracing::warn!("Skipping unreadable file {}: {e}", path.display());
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default();
+            cosmic::Action::App(Message::OpenFilesScanned(tracks))
         })
     }
 }

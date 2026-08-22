@@ -498,6 +498,15 @@ fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
+/// Flags passed into `AppModel::init` at startup -- currently just the
+/// audio files (if any) the process was launched or handed off to open,
+/// via `Exec=lyra %U`, a bare CLI argument, or another running
+/// instance's MPRIS `OpenUri` forwarded through `main`.
+#[derive(Debug, Clone, Default)]
+pub struct AppFlags {
+    pub open_paths: Vec<PathBuf>,
+}
+
 #[cfg(test)]
 mod reload_generation_tests {
     use super::reload_result_is_stale;

@@ -11,7 +11,7 @@ use crate::fl;
 use crate::library::{LibraryScanner, LyricsProvider, Track};
 use crate::online::podcast;
 use crate::online::radio;
-use crate::player::PlaybackState;
+use crate::player::{ActiveBackend, PlaybackState};
 use crate::views::{convert, providers};
 use cosmic::Application;
 use cosmic::prelude::*;
@@ -384,12 +384,17 @@ impl AppModel {
             }
 
             Message::SetVolume(vol) => {
-                if let Some(ref mut player) = self.player
+                if let Some(player) = &mut self.player
                     && let Err(e) = player.set_volume(vol)
                 {
                     tracing::error!("Set volume failed: {e}");
                 }
-                self.config.volume = vol;
+                // Live-apply only: the actual level is read back from
+                // `player.volume()` by the UI/MPRIS snapshot, so we don't
+                // touch `config.volume` here. Persisting on every drag
+                // frame would trigger a full `write_entry` transaction per
+                // pixel of slider movement; `VolumeCommit` does the actual
+                // save once the gesture settles.
                 // Mirror the new level to MPRIS right away: the periodic
                 // publish only runs while playing, so a volume change made
                 // while paused/stopped would otherwise read stale on D-Bus.
@@ -408,6 +413,22 @@ impl AppModel {
                     ]);
                 }
                 return mpris_task;
+            }
+
+            // Persist the master volume. Emitted on slider release and on
+            // discrete events (keyboard shortcuts, MPRIS `SetVolume`) so the
+            // level survives a restart without writing config on every
+            // drag frame.
+            Message::VolumeCommit => {
+                let v = self
+                    .player
+                    .as_ref()
+                    .map_or(self.config.volume, |p| p.volume());
+                if let Some(ctx) = &self.config_context
+                    && let Err(e) = self.config.set_volume(ctx, v)
+                {
+                    tracing::error!("Failed to persist volume: {e}");
+                }
             }
 
             // Task 111: Wire shuffle toggle for MPD
@@ -452,17 +473,54 @@ impl AppModel {
                 duration,
                 state,
                 volume,
+                song,
             } => {
                 // Feed polled status into the MPD backend cache.
-                if let Some(ref mut player) = self.player {
+                if let Some(player) = &mut self.player {
                     if let Some(mpd) = player.mpd_backend_mut() {
                         mpd.update_status(position, duration, state, volume);
+                    }
+
+                    // The poll runs whenever an MPD backend exists, which
+                    // includes while Lyra plays a local file, radio stream
+                    // or podcast through the local backend (opening a file
+                    // from a file manager does exactly that). Only let MPD
+                    // drive the shared UI state when it is the backend
+                    // actually in charge — otherwise its position and song
+                    // would overwrite the locally-playing track. A stopped
+                    // local backend means nothing else is playing, which is
+                    // precisely the just-switched-to-MPD case that must
+                    // still adopt.
+                    if player.active_backend_type() != ActiveBackend::Mpd
+                        && player.state() != PlaybackState::Stopped
+                    {
+                        return Task::none();
+                    }
+
+                    // Adopt a track MPD is already playing that Lyra didn't
+                    // start itself — e.g. right after switching to this MPD
+                    // backend while its server was already mid-playback, or
+                    // MPD's song changed out from under Lyra (another
+                    // client skipped tracks). `song` is only `Some` on the
+                    // tick where MPD's song identity changed.
+                    if let Some(track) = song
+                        && state != PlaybackState::Stopped
+                    {
+                        player.adopt_mpd_track(track.clone(), duration);
+                        self.current_track = Some(track);
+                        self.lyrics_text = None;
+                        self.scrobble_now_playing_sent = false;
+                        self.scrobble_sent = false;
+                        #[cfg(feature = "visualizer")]
+                        {
+                            self.viz_metadata_opacity = 1.0;
+                        }
                     }
 
                     // Update UI position (unless user is dragging seek slider).
                     if self.seeking_preview.is_none() {
                         self.playback_position = position;
-                        if let Some(ref track) = self.current_track
+                        if let Some(track) = &self.current_track
                             && self.playback_position > track.duration
                         {
                             self.playback_position = track.duration;
@@ -544,7 +602,9 @@ impl AppModel {
                         "podcast" => {
                             if let Some(episode_id) = self.current_podcast_episode_id {
                                 let secs = self.playback_position.as_secs();
-                                if secs != self.last_saved_podcast_position_secs && secs.is_multiple_of(5) {
+                                if secs != self.last_saved_podcast_position_secs
+                                    && secs.is_multiple_of(5)
+                                {
                                     self.last_saved_podcast_position_secs = secs;
                                     let position_ms = self.playback_position.as_millis() as i64;
                                     position_save_task =
@@ -1337,10 +1397,21 @@ impl AppModel {
                     *s = Some(fl!("connected"));
                 }
 
-                // If this is the active provider, recreate the player with MpdBackend
-                // and reload the library.
+                // If this is the active provider, attach an MpdBackend and
+                // reload the library. Recreating the player throws away the
+                // queue and current track, so never do it mid-playback: a
+                // file opened from a file manager starts playing before a
+                // configured MPD server finishes connecting, and would
+                // otherwise be silently killed a moment later. The backend
+                // gets attached on the next provider switch instead.
                 if self.registry.active_id() == provider_id {
-                    self.recreate_player();
+                    if self
+                        .player
+                        .as_ref()
+                        .is_none_or(|p| p.state() == PlaybackState::Stopped)
+                    {
+                        self.recreate_player();
+                    }
                     return self.reload_library();
                 }
             }
@@ -2819,6 +2890,10 @@ impl AppModel {
                     // immediately. Without this, properties changed while
                     // stopped or paused would stay stale until the next
                     // playback tick — which only fires while playing.
+                    // `Seek` is relative and `SetPosition` absolute; capture
+                    // the distinction before the match so both can share one
+                    // arm without cloning `cmd` on every command.
+                    let relative_seek = matches!(cmd, MprisCommand::Seek(_));
                     let task = match cmd {
                         MprisCommand::Play => {
                             if playing {
@@ -2843,7 +2918,7 @@ impl AppModel {
                             let seek = self.current_track.as_ref().and_then(|track| {
                                 let duration_us = track.duration.as_micros() as i64;
                                 (duration_us > 0).then(|| {
-                                    let target_us = if matches!(cmd, MprisCommand::Seek(_)) {
+                                    let target_us = if relative_seek {
                                         self.playback_position.as_micros() as i64 + offset_us
                                     } else {
                                         offset_us
@@ -2859,9 +2934,10 @@ impl AppModel {
                                 None => Task::none(),
                             }
                         }
-                        MprisCommand::SetVolume(vol) => {
-                            self.update(Message::SetVolume(vol.clamp(0.0, 1.0) as f32))
-                        }
+                        MprisCommand::SetVolume(vol) => Task::batch([
+                            self.update(Message::SetVolume(vol.clamp(0.0, 1.0) as f32)),
+                            self.update(Message::VolumeCommit),
+                        ]),
                         MprisCommand::Shuffle(enabled) => {
                             if self.config.shuffle == enabled {
                                 Task::none()
@@ -2895,11 +2971,29 @@ impl AppModel {
                             Task::none()
                         }
                         MprisCommand::Quit => self.update(Message::Quit),
+                        MprisCommand::OpenUri(uri) => match crate::file_uri_to_path(&uri) {
+                            Some(path) => self.update(Message::OpenFiles(vec![path])),
+                            None => {
+                                tracing::warn!("MPRIS OpenUri: unsupported or invalid URI: {uri}");
+                                Task::none()
+                            }
+                        },
                     };
                     let mpris_task = self.publish_mpris();
                     return Task::batch([task, mpris_task]);
                 }
             },
+            Message::OpenFiles(paths) => {
+                return self.open_files(paths);
+            }
+            Message::OpenFilesScanned(tracks) => {
+                if tracks.is_empty() {
+                    tracing::warn!("No playable tracks found among opened files");
+                    return self
+                        .push_toast(widget::toaster::Toast::new(fl!("toast-open-files-failed")));
+                }
+                return self.play_track_list(tracks, 0);
+            }
             Message::MprisArtResolved(track_id, art_url) => {
                 if let Some(handle) = self.mpris.as_ref() {
                     handle.cache_art_url(track_id, art_url);
@@ -2965,7 +3059,10 @@ impl AppModel {
                         } else {
                             (current - step).max(0.0)
                         };
-                        return self.update(Message::SetVolume(target));
+                        return Task::batch([
+                            self.update(Message::SetVolume(target)),
+                            self.update(Message::VolumeCommit),
+                        ]);
                     }
                     Shortcut::Mute => {
                         let current = self
@@ -2983,7 +3080,10 @@ impl AppModel {
                             // started at zero).
                             self.pre_mute_volume.take().unwrap_or(1.0)
                         };
-                        return self.update(Message::SetVolume(target));
+                        return Task::batch([
+                            self.update(Message::SetVolume(target)),
+                            self.update(Message::VolumeCommit),
+                        ]);
                     }
                     Shortcut::ToggleShuffle => return self.update(Message::ToggleShuffle),
                     Shortcut::CycleRepeat => return self.update(Message::CycleRepeat),

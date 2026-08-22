@@ -73,6 +73,14 @@ impl MpdBackend {
         self.state = state;
         self.volume = volume;
     }
+
+    /// Mark the backend as having been actively playing, without going
+    /// through `play()`. Used by `Player::adopt_mpd_track` when Lyra
+    /// adopts a track MPD was already playing before Lyra's `Player`
+    /// existed, so `is_finished()` doesn't treat it as already ended.
+    pub fn mark_playing(&mut self) {
+        self.was_playing = true;
+    }
 }
 
 impl PlaybackBackend for MpdBackend {
