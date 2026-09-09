@@ -10,12 +10,13 @@ use crate::library::{Album, Artist, CoverSource, Playlist, Track};
 use mpd_client::Client;
 use mpd_client::client::{ConnectWithPasswordError, ConnectionEvents};
 use mpd_client::commands::{
-    self, AddToPlaylist, ClearPlaylist, Crossfade, CurrentSong, DeletePlaylist, Find, GetPlaylist,
-    GetPlaylists, List, ReplayGainMode, SaveQueueAsPlaylist, SetRandom, SetRepeat,
+    self, AddToPlaylist, ClearPlaylist, Command, Crossfade, CurrentSong, DeletePlaylist,
+    GetPlaylist, GetPlaylists, List, ReplayGainMode, SaveQueueAsPlaylist, SetRandom, SetRepeat,
     SetReplayGainMode, SetSingle, SingleMode, Status, StickerDelete, StickerFind, StickerGet,
     StickerSet, Update,
 };
-use mpd_client::filter::{Filter, Operator};
+use mpd_client::protocol::command::Command as RawCommand;
+use mpd_client::protocol::response::Frame;
 use mpd_client::responses;
 use mpd_client::tag::Tag;
 use std::collections::HashMap;
@@ -25,6 +26,98 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+
+/// Filter-expression construction that works around a bug in
+/// `mpd_client::filter::Filter`'s own escaping: its internal
+/// `escape_filter_value` replaces `"` with `\\"` (backslash, backslash,
+/// quote) and never escapes `\` at all, so any tag value containing a
+/// literal `"` or `\` produces a malformed `find`/`list` command that MPD
+/// rejects (verified against a live MPD 0.24 server).
+///
+/// Instead of routing values through `Filter`, this module renders the
+/// filter expression text ourselves with correct *filter-level* escaping
+/// (`\` -> `\\`, then `"` -> `\"`) and hands the resulting string to
+/// `mpd_protocol::command::Command::argument`, which applies the normal
+/// *argument-level* escaping used for every other command argument. The
+/// two escaping passes compose correctly by construction; see the
+/// `filter_expr` tests below for the exact wire bytes this produces.
+mod filter_expr {
+    /// Filter-level escaping for a value embedded in a filter expression.
+    /// Order matters: backslashes must be doubled before quotes are
+    /// escaped, or an escaped quote's backslash would itself be escaped.
+    pub(super) fn escape_value(value: &str) -> String {
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
+    /// `(Tag == "value")`
+    pub(super) fn eq(tag: &str, value: &str) -> String {
+        format!("({tag} == \"{}\")", escape_value(value))
+    }
+
+    /// `(Tag contains "value")`
+    pub(super) fn contains(tag: &str, value: &str) -> String {
+        format!("({tag} contains \"{}\")", escape_value(value))
+    }
+
+    /// `((a) AND (b) AND ...)`. `parts` are expected to already be
+    /// parenthesized (e.g. produced by [`eq`] or [`contains`]).
+    pub(super) fn and(parts: &[String]) -> String {
+        format!("({})", parts.join(" AND "))
+    }
+}
+
+/// `find <filterexpr>` sent with a filter expression built by
+/// [`filter_expr`], as a plain, correctly-escaped argument — replacement
+/// for `mpd_client::commands::Find` + `mpd_client::filter::Filter` (see
+/// `filter_expr` module docs for why).
+struct FindExpr(String);
+
+impl Command for FindExpr {
+    type Response = Vec<responses::Song>;
+
+    fn command(&self) -> RawCommand {
+        RawCommand::new("find").argument(self.0.as_str())
+    }
+
+    fn response(self, frame: Frame) -> Result<Self::Response, responses::TypedResponseError> {
+        // `responses::Song` is `#[non_exhaustive]` with a crate-private
+        // constructor, so it cannot be built outside `mpd_client`. Reuse
+        // `ListAllIn`'s public `Command::response` impl instead, which
+        // parses a song list frame identically (both call
+        // `responses::Song::from_frame_multi` internally) — only its
+        // (unused) `command()` differs.
+        commands::ListAllIn::root().response(frame)
+    }
+}
+
+/// `list Album <filterexpr>` sent with a filter expression built by
+/// [`filter_expr`] — replacement for `mpd_client::commands::List::filter`
+/// + `mpd_client::filter::Filter` (see `filter_expr` module docs).
+struct ListAlbumFiltered(String);
+
+impl Command for ListAlbumFiltered {
+    type Response = Vec<String>;
+
+    fn command(&self) -> RawCommand {
+        RawCommand::new("list")
+            .argument("Album")
+            .argument(self.0.as_str())
+    }
+
+    fn response(self, frame: Frame) -> Result<Self::Response, responses::TypedResponseError> {
+        let mut out = Vec::with_capacity(frame.fields_len());
+        for (key, value) in frame {
+            if &*key != "Album" {
+                return Err(responses::TypedResponseError::unexpected_field(
+                    "Album",
+                    key.as_ref(),
+                ));
+            }
+            out.push(value);
+        }
+        Ok(out)
+    }
+}
 
 /// Helper to wrap MPD errors into `ProviderError::Io` with a labeled context.
 fn mpd_err<E: std::fmt::Display>(op: &str) -> impl FnOnce(E) -> ProviderError {
@@ -276,11 +369,14 @@ impl MpdProvider {
         let mut albums = Vec::with_capacity(album_names.len());
 
         for album_name in album_names {
-            let filter = Filter::tag(Tag::Album, album_name);
-            let songs = client
-                .command(Find::new(filter))
-                .await
-                .map_err(mpd_err("find"))?;
+            let expr = filter_expr::eq("Album", album_name);
+            let songs = match client.command(FindExpr(expr)).await {
+                Ok(songs) => songs,
+                Err(e) => {
+                    tracing::warn!("MPD find failed for album {album_name:?}: {e}");
+                    continue;
+                }
+            };
 
             if songs.is_empty() {
                 continue;
@@ -509,9 +605,9 @@ impl MusicProvider for MpdProvider {
                 }
 
                 // Get albums for this artist
-                let filter = Filter::tag(Tag::AlbumArtist, artist_name);
+                let expr = filter_expr::eq("AlbumArtist", artist_name);
                 let album_list = client
-                    .command(List::new(Tag::Album).filter(filter))
+                    .command(ListAlbumFiltered(expr))
                     .await
                     .map_err(mpd_err("list album"))?;
 
@@ -523,10 +619,12 @@ impl MusicProvider for MpdProvider {
                         continue;
                     }
 
-                    let filter = Filter::tag(Tag::Album, album_name)
-                        .and(Filter::tag(Tag::AlbumArtist, artist_name));
+                    let expr = filter_expr::and(&[
+                        filter_expr::eq("Album", album_name),
+                        filter_expr::eq("AlbumArtist", artist_name),
+                    ]);
                     let songs = client
-                        .command(Find::new(filter))
+                        .command(FindExpr(expr))
                         .await
                         .map_err(mpd_err("find"))?;
 
@@ -586,9 +684,9 @@ impl MusicProvider for MpdProvider {
 
             // Use the `any` pseudo-tag with `contains` operator to search
             // across all metadata fields (Title, Artist, Album, etc.).
-            let filter = Filter::new(Tag::any(), Operator::Contain, &query_owned);
+            let expr = filter_expr::contains("any", &query_owned);
             let songs = client
-                .command(Find::new(filter))
+                .command(FindExpr(expr))
                 .await
                 .map_err(mpd_err("search"))?;
 
@@ -854,8 +952,8 @@ impl MusicProvider for MpdProvider {
             let mut tracks = Vec::with_capacity(results.value.len());
             for uri in results.value.keys() {
                 // Look up each song's metadata
-                let filter = Filter::new(Tag::Other("file".into()), Operator::Equal, uri.as_str());
-                if let Ok(songs) = client.command(Find::new(filter)).await {
+                let expr = filter_expr::eq("file", uri.as_str());
+                if let Ok(songs) = client.command(FindExpr(expr)).await {
                     for song in &songs {
                         let mut track = song_to_track(&self.provider_id, song);
                         track.is_favorite = true;
@@ -887,9 +985,9 @@ impl MusicProvider for MpdProvider {
         let genre_owned = genre.to_string();
         self.block_on(async {
             let client = self.get_client().await?;
-            let filter = Filter::tag(Tag::Genre, &genre_owned);
+            let expr = filter_expr::eq("Genre", &genre_owned);
             let songs = client
-                .command(Find::new(filter))
+                .command(FindExpr(expr))
                 .await
                 .map_err(mpd_err("find genre"))?;
 
@@ -1040,5 +1138,113 @@ mod tests {
 
         // ...and the live queue was never touched.
         assert_eq!(*live_queue.lock(), seed_queue);
+    }
+
+    #[test]
+    fn escape_value_leaves_plain_values_untouched() {
+        assert_eq!(filter_expr::escape_value("Clic"), "Clic");
+    }
+
+    #[test]
+    fn escape_value_escapes_embedded_quotes() {
+        // Filter-level escaping only: `"` -> `\"`. The upstream bug this
+        // replaces instead emitted `\\"` (backslash, backslash, quote) for
+        // this exact input, which MPD 0.24 rejects.
+        assert_eq!(filter_expr::escape_value("\"Clic\""), "\\\"Clic\\\"");
+    }
+
+    #[test]
+    fn escape_value_doubles_embedded_backslashes() {
+        assert_eq!(filter_expr::escape_value("back\\slash"), "back\\\\slash");
+    }
+
+    #[test]
+    fn filter_expr_eq_renders_expected_text() {
+        assert_eq!(filter_expr::eq("Album", "Clic"), "(Album == \"Clic\")");
+        assert_eq!(
+            filter_expr::eq("Album", "\"Clic\""),
+            "(Album == \"\\\"Clic\\\"\")"
+        );
+    }
+
+    #[test]
+    fn filter_expr_contains_renders_expected_text() {
+        assert_eq!(
+            filter_expr::contains("any", "foo bar"),
+            "(any contains \"foo bar\")"
+        );
+    }
+
+    #[test]
+    fn filter_expr_and_renders_expected_text() {
+        let expr = filter_expr::and(&[
+            filter_expr::eq("Album", "A"),
+            filter_expr::eq("AlbumArtist", "B"),
+        ]);
+        assert_eq!(expr, "((Album == \"A\") AND (AlbumArtist == \"B\"))");
+    }
+
+    #[test]
+    fn find_expr_command_matches_a_raw_command_built_the_same_way() {
+        // `Command::command` must hand the whole expression to
+        // `RawCommand::argument` as a single plain argument (letting the
+        // protocol layer's own argument escaping apply) rather than
+        // re-escaping it or embedding it unescaped.
+        let expr = filter_expr::eq("Album", "\"Clic\"");
+        let actual = FindExpr(expr.clone()).command();
+        let expected = RawCommand::new("find").argument(expr.as_str());
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn list_album_filtered_command_sends_tag_then_filter_expression() {
+        let expr = filter_expr::eq("AlbumArtist", "Foo");
+        let actual = ListAlbumFiltered(expr.clone()).command();
+        let expected = RawCommand::new("list")
+            .argument("Album")
+            .argument(expr.as_str());
+        assert_eq!(actual, expected);
+    }
+
+    /// Regression test for the exact bug this replaces: a literal `"` in
+    /// an album name (e.g. the real album titled `"Clic"`) previously
+    /// produced wire bytes MPD 0.24 rejected with `ACK [5@0] {} Space
+    /// expected after closing '"'`. This asserts the *exact* bytes sent on
+    /// the wire, captured from a real TCP connection to a fake MPD server,
+    /// match the form verified live against MPD 0.24 to return the
+    /// album's songs successfully.
+    #[test]
+    fn find_expr_sends_the_mpd_accepted_wire_form_for_a_quoted_album_name() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (port, commands, _live_queue) = spawn_fake_mpd(Vec::new());
+
+        let provider = MpdProvider::new(
+            MpdConfig {
+                id: "mpd-test".into(),
+                name: "Test".into(),
+                host: "127.0.0.1".into(),
+                port,
+                password: None,
+            },
+            runtime.handle().clone(),
+        );
+
+        runtime
+            .block_on(provider.connect_command())
+            .expect("connect to fake MPD");
+
+        // The fake server ACKs the unrelated sticker probe and replies
+        // "OK" with no songs to everything else, so this returns an empty
+        // batch — only the wire bytes sent for the `find` command matter.
+        let _ = runtime.block_on(provider.browse_albums_batch(&["\"Clic\"".to_string()]));
+
+        let find_cmd = std::iter::from_fn(|| commands.try_recv().ok())
+            .find(|cmd| cmd.starts_with("find "))
+            .expect("expected a find command to have been sent");
+
+        assert_eq!(
+            find_cmd,
+            "find \"(Album == \\\"\\\\\\\"Clic\\\\\\\"\\\")\""
+        );
     }
 }

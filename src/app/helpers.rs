@@ -310,13 +310,24 @@ impl AppModel {
                             album_names.len()
                         );
 
-                        // Step 2: Process in batches.
-                        for chunk in album_names.chunks(BATCH_SIZE) {
+                        // Step 2: Process in batches. A failed chunk is logged and
+                        // skipped rather than aborting the remaining batches, so one
+                        // bad batch does not truncate the whole library.
+                        let mut failed_chunks: usize = 0;
+                        let mut failed_albums: usize = 0;
+                        for (chunk_index, chunk) in album_names.chunks(BATCH_SIZE).enumerate() {
                             let albums = match mpd.browse_albums_batch(chunk).await {
                                 Ok(a) => a,
                                 Err(e) => {
-                                    tracing::error!("MPD browse_albums_batch failed: {e}");
-                                    break;
+                                    tracing::error!(
+                                        "MPD browse_albums_batch failed for chunk {chunk_index} \
+                                         ({} albums: {:?}): {e}",
+                                        chunk.len(),
+                                        chunk
+                                    );
+                                    failed_chunks += 1;
+                                    failed_albums += chunk.len();
+                                    continue;
                                 }
                             };
 
@@ -357,6 +368,13 @@ impl AppModel {
                                     cover_art_bytes,
                                 }))
                                 .await;
+                        }
+
+                        if failed_chunks > 0 {
+                            tracing::warn!(
+                                "MPD incremental load: skipped {failed_chunks} chunk(s) \
+                                 ({failed_albums} album(s)) due to browse_albums_batch errors"
+                            );
                         }
                     }
 
